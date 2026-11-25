@@ -406,11 +406,51 @@ Why it is shaped this way:
 | `script` | `check` + `version` cmds | optional `latest` cmd | `install` cmd | whatever the script does | declared |
 | `winget`, `scoop` | `winget list` / `scoop export` | `winget upgrade` / `scoop status` | | Limited | no |
 | `mas` | `mas list` | `mas outdated` | `mas install id` | No | no |
+| `browser-ext` | browser profile dirs (§5.2.1) | AMO API (Firefox); none for the Chrome Web Store | external-extension file or policy | No (stores auto-update) | `policy` method only |
 | `pacman`, `dnf` | later; the trait is the same as apt's | | | | yes |
 
 `github-release` replaces `download_latest_release` in `helpers.sh`, together with every `curl ... | sh`. It uses a checksum if the release publishes one. When none is published, `dots` records the SHA-256 of the asset in the lock on first install (trust on first use) and warns if the asset for the same tag later changes.
 
 `pip` is deliberately **not** a provider in the sense of `pip install --break-system-packages`. Python CLIs go through `uv tool` (each tool gets an isolated venv). For libraries that a script needs (for example `libtmux` for a tmux plugin), declare a `uv` package with `[providers.uv] kind = "lib", python = "system"`. That runs `uv pip install --system`, and it is explicit and greppable. `scripts/requirements.txt` becomes a uv-managed venv at `~/.local/share/dots/venvs/scripts` (a `uv` package with `kind = "venv"`, `requirements = "requirements.txt"`).
+
+### 5.2.1 Browser extensions (`browser-ext`)
+
+An extension is a package like any other. The provider writes the file the browser itself reads to install extensions, so it needs no browser automation and no store scraping.
+
+```toml
+# packages/vimium/package.toml
+schema = 1
+name = "vimium"
+
+[providers.browser-ext]
+chrome   = "dbepggeogbaibhgnhhndojpepiihcmeb"   # Chrome Web Store id (also used for Brave/Edge/Chromium unless overridden)
+edge     = "djnmhfbpocmdjinfoeolkdfnfbhkkgfn"   # optional per-browser id (Edge Add-ons uses different ids)
+firefox  = "{d7742d87-e61d-4b78-b8a1-b469842139fa}"   # AMO add-on GUID
+browsers = ["chrome", "brave", "firefox"]       # default: every supported browser found on the machine
+method   = "external"                           # external (user-level, removable) | policy (admin, force-installed)
+```
+
+**Install methods:**
+
+| Browser | `external` (default, no admin) | `policy` (admin) |
+|---------|-------------------------------|------------------|
+| Chrome / Brave / Edge / Chromium | `<id>.json` = `{"external_update_url": "<store update url>"}` in the browser's *External Extensions* dir. macOS: `~/Library/Application Support/<Vendor>/<Browser>/External Extensions/`. Linux: `/usr/share/<browser>/extensions/`, which is a system dir, so on Linux even `external` needs root. Windows: registry `HKCU\Software\<Vendor>\<Browser>\Extensions\<id>` with `update_url`. | `ExtensionInstallForcelist` policy. macOS: managed-preferences plist. Linux: `/etc/opt/chrome/policies/managed/dots.json` (and the per-browser equivalents). Windows: `HKLM` policy key. |
+| Firefox | Firefox no longer sideloads from external locations, so `external` is unavailable here. Selecting it on Firefox is a resolve error that suggests `policy`. | `policies.json` → `ExtensionSettings.<guid>.installation_mode = "normal_installed"` + `install_url` (AMO latest `.xpi`). Linux: `/etc/firefox/policies/`. macOS: `Firefox.app/Contents/Resources/distribution/` (gets overwritten by app updates, so `dots` re-checks it on every `status`). Windows: `HKLM` policy key. |
+
+- The files `dots` writes are ordinary **owned files** (§6.4). Removing the package deletes them, and the browser then uninstalls the extension on its next start. With `policy`, all of a browser's force-installed extensions share **one** `dots`-owned policy file, rendered from every extension package, the same way as fragments (§6.2). It never overwrites policies `dots` doesn't own.
+- **`external` needs a one-time click.** Chromium installs the extension *disabled* and asks the user to enable it. The provider therefore attaches a manual action automatically, "Enable \<name\> in \<browser\>". That action's `check` reads the profile's enabled state, so the todo closes itself (§9).
+- **Install happens on the browser's next launch**, not immediately. `apply` reports `pending-restart` (`↻` in `status`) until the profile shows the extension.
+- **installed():** for each profile of each browser, read the Chromium `Preferences`/`Secure Preferences` (`extensions.settings.<id>`: version, state) or Firefox `extensions.json`. Profiles come from the browser's `Local State` / `profiles.ini`. `profiles = ["Default"]` restricts the provider to certain profiles. The default is every profile.
+- **latest():** for Firefox, the AMO API (`/api/v5/addons/addon/<guid>/`). Chromium stores have no public version API, so `latest` stays unknown. That isn't a problem in practice, because the browser auto-updates extensions.
+- **Versions:** only `latest` is valid (lint error otherwise). Stores auto-update, so pinning would be a lie. The lock records the observed version for history.
+- **Bootstrap:** the browser itself is a dependency, and the provider is `Unsupported` for browsers that aren't installed. A package's `requires = ["google-chrome"]` makes that explicit.
+
+**Extension settings** usually live in browser storage, not in files, so each package handles them according to how the extension stores them:
+
+1. **File-based config** (for example Tridactyl's rc): a normal `[[files]]` entry in the same package.
+2. **Native messaging hosts** (brotab, KeePassXC-Browser, Tridactyl native): the host manifest is a `render` file in the browser's `NativeMessagingHosts` dir, with the host binary as a `requires`.
+3. **Policy-configurable** extensions (those that ship a managed-storage schema, such as uBlock Origin): with `method = "policy"`, a `[providers.browser-ext.managed]` table is rendered into the policy as `3rdparty.extensions.<id>`, so it is fully declarative and settings/overrides apply.
+4. **Everything else** (Tampermonkey userscripts, Vimium options): the package ships the export file and a manual action, "Import `settings.json` via Options › Import". That action has no `check` and stays a tracked todo until the user marks it done, and it reappears on every machine when its `revision` is bumped.
 
 ### 5.3 The `script` provider (the escape hatch, kept honest)
 
