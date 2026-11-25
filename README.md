@@ -4,7 +4,7 @@
 
 **Add someone else's bundle to your dotfiles: their tools and configs on your machine, your tweaks on top, their improvements whenever you `dots pull`.**
 
-<sub>repo: <code>dotrobot</code> · CLI: <code>dots</code> · single Rust binary · macOS & Linux first</sub>
+<sub>repo: <code>dotrobot</code> · CLI: <code>dots</code> · single Rust binary · macOS & Linux first · MIT</sub>
 
 </div>
 
@@ -16,13 +16,27 @@
 Dotfiles tools today make you choose:
 - **stow, dotbot, yadm** link files, but installing the software is up to you.
 - **chezmoi** adds templates, and installs software through scripts you write.
-- **home-manager** does everything, provided you move to Nix.
+- **home-manager** does everything, and even lets you import other people's modules, provided you move to Nix.
 
 And sharing a setup still means copy-paste: once you take someone's config, their updates never reach you again. Submodules and chezmoi externals can track another repo, but only as whole files. Change one line and you've forked it for good.
 
 `dots` installs software with the package managers you already have (brew, apt, cargo, uv, npm), links and generates your configs, and lets you **add** another person's bundle: you follow their setup at a pinned commit, override anything, and pull their updates when you choose.
 
-## The model in 30 seconds
+```mermaid
+flowchart TD
+    M(["your machine"]) -->|picks| B1["bundle: cli"]
+    M -->|picks| B2["bundle: mac-desktop"]
+    U[("ofirgall/dotfiles<br/>pinned commit")] -.->|dots add| B1
+    B1 --> P1["package: delta"]
+    B1 --> P2["package: fd"]
+    B2 --> P3["package: ghostty"]
+    P1 --> I["how to install<br/>brew · apt · cargo"]
+    P1 --> F["config files<br/>~/.gitconfig [delta]"]
+    P1 --> S["settings<br/>side_by_side = true"]
+    P1 --> T["manual steps"]
+    O["your overrides<br/>repo → this machine"] ==>|win over| B1
+    O ==>|win over| P1
+```
 
 A **package** is one tool: how to install it on each OS, its config files, and its **settings**. Settings are typed knobs such as `font_size` or `theme`, each with a recommended default.
 
@@ -43,6 +57,8 @@ packages = ["fd", "ripgrep", "bat", "delta", "yazi"]
 ```
 
 `dots apply` compares that with your machine, shows a plan, and makes them match. On a Mac it installs with brew. On Ubuntu it uses apt, or cargo when you have no sudo.
+
+Anything can have platform-specific sections, which go from general to specific: `linux › debian › ubuntu › ubuntu-22.04` (plus CPU architecture and WSL). `[platform.ubuntu]` applies to every Ubuntu, `[platform."ubuntu-22.04"]` overrides just that release, and the most specific one wins.
 
 ## Add someone's bundle
 
@@ -144,17 +160,21 @@ Every problem comes with the command that fixes it.
 ## Quick start (once v1 ships)
 
 ```sh
-dots init                          # your dotfiles repo; a few questions, Enter = recommended
+dots init                                # your dotfiles repo; a few questions, Enter = recommended
 dots add bundle ofirgall/dotfiles:cli    # optional
 dots apply
 ```
 
 <details>
-<summary><b>FAQ</b>: existing files · uninstall · secrets · script trust · coming from dotbot</summary>
+<summary><b>FAQ</b>: git · follow vs copy · existing files · uninstall · secrets · script trust · coming from dotbot</summary>
 
 **What happens to my existing files?** Any file `dots` would replace is backed up first, and the plan says so before you confirm. `dots restore` puts the backup back.
 
 **Uninstall?** `dots remove <pkg>` uninstalls the package and deletes only the files `dots` created. `apply` is idempotent: rerunning it does only what the plan shows.
+
+**Is it git under the hood?** Yes. Your dotfiles repo is a plain git repo, and you make the commits. Sources you add are fetched with git and pinned to a commit hash in `dots.lock`. `dots` uses your `git` CLI, so your SSH keys and credentials just work. Per-machine state (what's installed and linked on this machine, plus the action log) stays out of git on purpose.
+
+**Can I switch between following and owning a copy?** Yes. `dots eject <item>` turns a followed item into your own copy, with your overrides folded in. `dots uneject <item>` goes back to following, as long as your edits can be expressed as overrides.
 
 **Secrets?** `dots` never stores them. Machine-only values (`dots config set`, `~/.config/dots/`) are never committed.
 
@@ -172,6 +192,33 @@ dots apply
 - [ ] Later: Windows (winget, scoop), browser extensions, dotbot importer
 
 Watch the repo to follow along, or open an issue to challenge the design while it's still cheap to change.
+
+## Compared with other tools
+
+|  | [stow] | [dotbot] | [yadm] | [chezmoi] | [home-manager] | **dots** |
+|---|:-:|:-:|:-:|:-:|:-:|:-:|
+| Available today | ✅ | ✅ | ✅ | ✅ | ✅ | spec only |
+| Links or manages config files | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Per-OS / per-host config | — | conditional links | alt files, templates | templates | Nix | layers, `dots:if`, platform rules |
+| Installs software | — | shell steps | bootstrap script | `run_` scripts | Nix packages | brew, apt, cargo, uv, npm… |
+| Shows installed / outdated packages | — | — | — | — | — | ✅ |
+| Version lock | — | — | — | — | flake.lock | `dots.lock` |
+| Reuse someone's setup and keep their updates | — | — | — | externals (whole files) | import modules | `dots add` + overrides |
+| Tracked manual steps | — | — | — | — | — | ✅ |
+| Preview what would be overwritten | `--simulate` | — | — | `diff` | `build` + diff | `--dry-run`, incl. non-managed files |
+| Secrets | — | — | encryption | password managers | third-party | not in scope |
+| Windows | — | ✅ | — | ✅ | — | planned |
+| Needs | Perl | Python | bash, git | single binary | Nix | single binary |
+
+[stow]: https://www.gnu.org/software/stow/
+[dotbot]: https://github.com/anishathalye/dotbot
+[yadm]: https://yadm.io
+[chezmoi]: https://www.chezmoi.io
+[home-manager]: https://github.com/nix-community/home-manager
+
+## License
+
+[MIT](LICENSE)
 
 ---
 
