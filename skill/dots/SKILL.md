@@ -109,6 +109,7 @@ Then match the symptom:
 | "Config value isn't what I set" | **config explain `<pkg>.<setting>`**, then the header comment at the top of the rendered file | A higher scope (machine, or a bundle) overrides it; or the file is stale → apply |
 | "My edit to the config file disappeared" | status shows the file as `modified` or `stale` | They edited a rendered file → **adopt** the edit into a layer or override, then apply |
 | "File says conflict" | plan | A real file exists where `dots` wants a link. Apply moves it to a backup; tell the user where. |
+| A skill or script shows as tampered | status, **verify** | Something edited an integrity-enforced file → apply restores it. If the user made the edit on purpose, turn it into an override or a patch instead |
 | "Links are broken everywhere" | status (dangling), roots | The active worktree was deleted → switch the machine back to main |
 | "Install failed" | the apply summary's log tail; the full per-action log; **log X** for history | The script's check still fails after install (the script is broken), a network error, or a missing build dependency (add it to `requires`) |
 | "Hangs during apply" | | A script waiting on stdin. It must be marked interactive, or fixed to run unattended. |

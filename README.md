@@ -22,20 +22,24 @@ And sharing a setup still means copy-paste: once you take someone's config, thei
 
 `dots` installs software with the package managers you already have (brew, apt, cargo, uv, npm), links and generates your configs, and lets you **add** another person's bundle: you follow their setup at a pinned commit, override anything, and pull their updates when you choose.
 
-```mermaid
-flowchart TD
-    M(["your machine"]) -->|picks| B1["bundle: cli"]
-    M -->|picks| B2["bundle: mac-desktop"]
-    U[("ofirgall/dotfiles<br/>pinned commit")] -.->|dots add| B1
-    B1 --> P1["package: delta"]
-    B1 --> P2["package: fd"]
-    B2 --> P3["package: ghostty"]
-    P1 --> I["how to install<br/>brew · apt · cargo"]
-    P1 --> F["config files<br/>~/.gitconfig [delta]"]
-    P1 --> S["settings<br/>side_by_side = true"]
-    P1 --> T["manual steps"]
-    O["your overrides<br/>repo → this machine"] ==>|win over| B1
-    O ==>|win over| P1
+```text
+work-macbook (machine)
+├─ terminal (bundle)
+│  └─ ghostty (package)
+│     ├─ install   brew · github-release
+│     ├─ files     ~/.config/ghostty/config
+│     └─ settings  font_size = 15
+├─ editor (bundle)
+│  └─ neovim (package)
+│     └─ files     ~/.config/nvim/
+├─ cli (bundle)    ofirgall/dotfiles @ f452241
+│  └─ k9s (package)
+│     └─ files     ~/.config/k9s/config.yaml
+└─ skills (bundle)
+   └─ ponytail (package)  agent skill
+
+their bundle → overrides/ → this machine
+                            last one wins
 ```
 
 A **package** is one tool: how to install it on each OS, its config files, and its **settings**. Settings are typed knobs such as `font_size` or `theme`, each with a recommended default.
@@ -166,7 +170,7 @@ dots apply
 ```
 
 <details>
-<summary><b>FAQ</b>: git · follow vs copy · existing files · uninstall · secrets · script trust · coming from dotbot</summary>
+<summary><b>FAQ</b>: git · follow vs copy · patching · checksums · existing files · uninstall · secrets · script trust · coming from dotbot</summary>
 
 **What happens to my existing files?** Any file `dots` would replace is backed up first, and the plan says so before you confirm. `dots restore` puts the backup back.
 
@@ -175,6 +179,10 @@ dots apply
 **Is it git under the hood?** Yes. Your dotfiles repo is a plain git repo, and you make the commits. Sources you add are fetched with git and pinned to a commit hash in `dots.lock`. `dots` uses your `git` CLI, so your SSH keys and credentials just work. Per-machine state (what's installed and linked on this machine, plus the action log) stays out of git on purpose.
 
 **Can I switch between following and owning a copy?** Yes. `dots eject <item>` turns a followed item into your own copy, with your overrides folded in. `dots uneject <item>` goes back to following, as long as your edits can be expressed as overrides.
+
+**Can I change a skill or config I added from someone?** Yes, without editing it. Override a skill's frontmatter (for example `disable-model-invocation = true`) or any config key, or keep a small `.patch` for a few lines. If their next version no longer matches your patch, `dots pull` stops and tells you.
+
+**Checksums?** Every file `dots` places has a SHA-256: skills, configs, scripts and downloads. The lock pins the content of everything you follow. A skill or script changed on disk shows as tampered and gets restored, and `dots verify` rechecks everything.
 
 **Secrets?** `dots` never stores them. Machine-only values (`dots config set`, `~/.config/dots/`) are never committed.
 

@@ -452,6 +452,35 @@ method   = "external"                           # external (user-level, removabl
 3. **Policy-configurable** extensions (those that ship a managed-storage schema, such as uBlock Origin): with `method = "policy"`, a `[providers.browser-ext.managed]` table is rendered into the policy as `3rdparty.extensions.<id>`, so it is fully declarative and settings/overrides apply.
 4. **Everything else** (Tampermonkey userscripts, Vimium options): the package ships the export file and a manual action, "Import `settings.json` via Options › Import". That action has no `check` and stays a tracked todo until the user marks it done, and it reappears on every machine when its `revision` is bumped.
 
+### 5.2.2 Agent skills (`agent-skill`)
+
+A skill (a dir with `SKILL.md` plus scripts and references) is a package like any other, so it can be added from someone's repo, followed, overridden, pinned and verified.
+
+```toml
+# packages/ponytail/package.toml
+schema = 1
+name = "ponytail"
+
+[providers.agent-skill]
+src    = "skill/"                      # the skill dir inside this package
+agents = ["claude", "codex"]           # default: every supported agent found on the machine
+
+[providers.agent-skill.frontmatter]    # merged over SKILL.md's own frontmatter at render time
+disable-model-invocation = false
+```
+
+- **Install.** Each agent has a known skills dir (`claude` → `~/.claude/skills/<name>/`, `codex` → `~/.codex/skills/<name>/`, extendable in `dots.toml` under `[provider.agent-skill.agents]`). `SKILL.md` is a `render` file (format `markdown`, §6.1) so its frontmatter can be changed. Every other file is a `link`. `installed()` reads each skills dir, `latest()` is the source's rev, and versions follow the source (git rev, or the upstream pin).
+- **Override any option** without editing the skill. The frontmatter table is an ordinary overridable section:
+  ```toml
+  # overrides/packages/ponytail/override.toml
+  [providers.agent-skill.frontmatter]
+  disable-model-invocation = true        # only when I type /ponytail
+  allowed-tools = { remove = ["Bash"] }
+  ```
+  Any frontmatter key works the same way (`description`, `model`, `allowed-tools`…). Unknown keys pass through untouched.
+- **Patch the body.** A patch layer (§6.1) changes lines of `SKILL.md` or any script in the skill: `overrides/packages/ponytail/SKILL.md.patch`. If their next version no longer matches the patch, `dots pull` stops and names it, the same as a stale override.
+- **Skills are code for your agent.** New or changed skills are listed with scripts in every `add`/`pull` review (§13), and skill files are **integrity-enforced** by default (§6.6).
+
 ### 5.3 The `script` provider (the escape hatch, kept honest)
 
 ```toml
@@ -536,7 +565,11 @@ layers (filtered by `when`, in order: package layers → repo override layer →
 
 Full minijinja templating is opt-in per file (`template = "jinja"`). It is not the default, because `{{ }}` collides with too many real config formats (gh-dash, helm-ish YAML, tmux format strings).
 
-Formats: `toml` (via `toml_edit`, which preserves comments and order from the first layer), `json`, `jsonc` (Claude/VS Code settings files contain comments, so a plain JSON parser would corrupt them), `yaml`, `ini`/`gitconfig`, `text`.
+Formats: `toml` (via `toml_edit`, which preserves comments and order from the first layer), `json`, `jsonc` (Claude/VS Code settings files contain comments, so a plain JSON parser would corrupt them), `yaml`, `ini`/`gitconfig`, `markdown`, `text`.
+
+`markdown` is a structured YAML frontmatter plus a text body. The frontmatter merges and takes `[[files.set]]` patches like YAML (`path = "frontmatter.disable-model-invocation"`). The body follows the `text` rules. Skills (§5.2.2), manual actions and agent/command files all use it.
+
+**Patch layers.** Any layer may be a unified diff (`*.patch`), applied to the merged result of the layers before it, with no fuzz. A patch that doesn't apply is an error naming the patch and the first hunk that failed. It never half-applies. This is the escape hatch for changing a few lines of a text file you don't own, when an include, a directive or a whole-file override doesn't fit. `dots adopt --as-patch` writes one from your edits.
 
 Merge semantics for structured formats:
 
@@ -582,6 +615,7 @@ The engine groups all fragments by `dst` and renders them like layers. Two packa
 | `stale` | a source layer changed and the file has not been re-rendered |
 | `dangling` | the symlink target is gone (typical cause: worktree deleted, see §11) |
 | `foreign-entries` | a linked dir contains files not in git (the herdr sockets/logs case) |
+| `tampered` | an integrity-enforced file (§6.6) changed on disk. Unlike `modified`, it is never adopted silently. |
 
 For `modified`, run `dots adopt <dst> [--layer macos]`. It computes the structural diff against the render and writes it into the chosen layer (by default the most specific layer whose condition is true). For text it opens a 3-way merge. This is the answer for apps that rewrite their own config.
 
@@ -595,6 +629,28 @@ For `modified`, run `dots adopt <dst> [--layer macos]`. It computes the structur
 ### 6.5 Windows specifics
 
 Symlinks need Developer Mode or admin. At startup `dots` probes whether it can create a symlink. If not, file links fall back to **hardlinks** and directory links to **junctions**, and the link kind is recorded per entry. Hardlinks break when an editor saves by atomic rename. That case is detected as `modified` and fixed by relinking, and `dots doctor` tells you to enable Developer Mode. Path vars `%APPDATA%` and `%LOCALAPPDATA%` are expanded. `~` means `%USERPROFILE%`.
+
+
+### 6.6 Integrity (checksums)
+
+Every byte `dots` places comes with a SHA-256: skills, configs, scripts, release assets, everything.
+
+| What | Where the hash lives | Checked |
+|---|---|---|
+| **Source content** of each package/bundle (its whole dir, as a tree hash) | `dots.lock` `[[content]]`, per item and rev | on `apply`, `pull` and `verify`. A followed item whose content no longer matches the lock for the same rev (rewritten history, a tampered cache) is an error. |
+| **Deployed files** (rendered, copied, linked targets) | the state (§6.3 `rendered_sha256`) | on every `status` (cheap stat first, hash on change) |
+| **Downloads** (release assets, `script` URLs, `.xpi`) | the package (`sha256 = "..."`), else the publisher's checksum file, else the lock (trust on first use) | before extracting or running |
+| **Author pins** | `[integrity]` in a package or an override: `"skill/SKILL.md" = "sha256:…"`, or `tree = "sha256:…"` for the whole dir | on every `apply`. A mismatch refuses to install. |
+
+```toml
+# dots.lock
+[[content]]
+item = "ofirgall:ponytail"
+rev  = "f4522416c0d0…"
+tree = "sha256:9b1f…"          # hash of the package dir at that rev
+```
+
+Policy per package, bundle or upstream: `integrity = "warn" | "enforce"`. The default is `enforce` for skills, scripts and hooks (code that runs, or that instructs an agent), and `warn` for configs, because apps rewrite their own configs and that is `modified`, not an attack. Under `enforce`, a changed deployed file is `tampered`: `apply` restores it, and `dots adopt` refuses unless you pass the item explicitly. `dots verify [item]` recomputes every hash (sources, deployed files, binaries from `github-release`) and lists each mismatch with what it expected and where that expectation came from. `pull` shows changed hashes of enforced files first, with the scripts.
 
 ---
 
@@ -1142,6 +1198,7 @@ dots todo [show|done|skip|check]
 dots adopt <dst> [--layer L]
 dots try | use | roots | diff
 dots log [pkg]
+dots verify [item]                    # recompute every checksum (§6.6)
 dots restore <run-id>
 dots config list|get|set|unset|explain     # §17
 dots questions                             # §17/§19
