@@ -1,4 +1,4 @@
-# dots
+# dotrobot
 
 A dotfiles manager written in Rust: packages, bundles, config files, versions and manual steps, defined in TOML and reconciled across macOS, Linux and Windows.
 
@@ -25,3 +25,7 @@ A dotfiles manager written in Rust: packages, bundles, config files, versions an
 - [ARCHITECTURE.md](ARCHITECTURE.md): concepts, schemas, providers, files, versions, overrides, forks, worktrees, history, engine, crate layout, migration from dotbot
 - [UX.md](UX.md): terminal output design: capability tiers, visual language, screen mockups, errors, accessibility
 - [skill/dots/SKILL.md](skill/dots/SKILL.md): agent skill
+
+## Name
+
+**dotrobot** is named after [dotbot](https://github.com/anishathalye/dotbot). It has run my [dotfiles](https://github.com/ofirgall/dotfiles) since their very first commit in June 2021, more than five years of `install.conf.yaml`. Thanks, dotbot. The CLI is called `dots`.
