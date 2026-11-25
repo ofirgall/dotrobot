@@ -104,6 +104,8 @@ $ dots pull                                  # weeks later: bring in their chang
   ✓ your 2 overrides still apply
 ```
 
+Not sure what it would touch? `dots add bundle ofirgall/dotfiles:cli --dry-run` checks your actual machine, including software and files `dots` never installed. It tells you what's new, what you already have (adopted, not reinstalled), what would be upgraded, and which existing files would be replaced (backed up first, with a diff).
+
 If their update removes or renames something your override targets, the update stops and names the override. To roll back, revert the lock change.
 
 > [!TIP]

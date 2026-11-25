@@ -352,7 +352,38 @@ This is a clack-style guided flow: a left rail, one question at a time, and the 
             └─ needs rust ≥1.80   (provided by rustup 1.83.0 ✓)
 ```
 
-`dots add bundle|pkg` uses the same tree to show what will be added, with `+ new`, `= already have (same origin)` and `! name taken` markers. After the tree, there is a **"Code that will run on your machine"** section listing each script with its line count. Press `v` to view each script in the pager before confirming.
+`dots add bundle|pkg` previews the plan against **the real machine**, including software and files that `dots` never installed (ARCHITECTURE §13.1.1). `--dry-run` shows exactly this and stops:
+
+```
+ dots add bundle ofirgall/dotfiles:cli   from ofirgall/dotfiles @ f452241   --dry-run
+
+ 3 new · 2 adopt · 1 upgrade · 1 shadow · 1 replace · 1 edit
+
+ Packages
+   + delta     cargo  0.18.2
+   + yazi      brew   25.5.1
+   + jless     cargo  0.9.0        needs rust ≥1.80 → also installs rustup
+   = ripgrep   brew   14.1.1       already installed (not by dots) · adopted, no reinstall
+   = bat       apt    0.19.0       already installed · stays on apt   → dots migrate bat --to cargo
+   ↑ fd        brew   9.0.0 → 10.2.0   installed version is below the bundle's ">=10"
+   ⚠ fzf       brew   0.56.0       you also have ~/.local/bin/fzf (unknown owner), which comes first on PATH
+               → keep yours: dots add … --exclude fzf
+
+ Files
+   + ~/.config/bat/config
+   ⚡ ~/.config/yazi/                exists, not managed by dots · 4 files, 2 differ · backed up first   [d]iff
+   ~ ~/.gitconfig                   adds a [delta] section (8 lines) · the rest of your file is untouched   [d]iff
+
+ Also
+   ○ 1 manual step   ▲ needs your password once (apt)
+
+ Code that will run on your machine
+   yazi/install-plugins.sh  12 lines   [v]iew
+
+ Dry run: nothing was changed.   → run without --dry-run to add it
+```
+
+Markers: `+ new`, `= adopt` (already on the machine, satisfies the spec), `↑ upgrade`, `⚠ shadow` (a copy dots doesn't control would compete on PATH), `⚡ replace` (backed up first), `~ edit` (adds lines to a file you keep), `✗ blocked`. The headline counts the risky categories first. `d` opens a diff of your current file against the incoming one. `v` opens the script in the pager. Without `--dry-run`, the same screen ends with the confirm prompt instead.
 
 ### 4.11 `dots log`
 

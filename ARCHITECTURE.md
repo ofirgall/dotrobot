@@ -983,10 +983,44 @@ There are two modes, and **following is the default**:
 1. Fetch into `~/.cache/dots/remotes/<host>/<owner>/<repo>.git` (a bare mirror, `git fetch` on reuse), and check out the requested rev.
 2. Read their `dots.toml` and check `schema`/`requires_dots` compatibility.
 3. Resolve the item **of the kind you named**. `add pkg` looks only at packages and `add bundle` only at bundles, so there is no name ambiguity. If the name exists only as the other kind, the error suggests the right command ("`cli` is a bundle in ofirgall/dotfiles: dots add bundle ofirgall/dotfiles:cli").
-4. Compute the closure over `requires` and bundle membership. Show it as a tree, marking what you already have (by name *and* by origin).
+4. Compute the closure over `requires` and bundle membership, then **preview it against the real system** (§13.1.1). That includes things on your machine that `dots` never installed.
 5. **Show what will execute**: every script, hook and `check` command, in a pager. Code from someone else runs on your machine, so you confirm (`--yes` skips this, explicitly).
 6. Name collision with something of yours: refuse, or use `--as <name>`. Never overwrite silently.
 7. Custom providers or tags the items need that you don't have are listed, with an offer to add them to `dots.toml`.
+
+### 13.1.1 Preview against the real system
+
+Before asking anything, `add` builds the **same plan `apply` would build** if the item were already part of your setup, and shows it. `dots add … --dry-run` stops after the preview. That also works for your own bundles (`dots add bundle cli --dry-run`), so you can answer "what would turning this on do to this machine?" without touching anything.
+
+The preview checks the whole machine, not just what `dots` manages:
+
+- **Packages.** It runs `installed()` for every candidate provider (§5.1), which returns everything installed by any means, together with the PATH inventory (§7.4) for binaries that no package manager claims. Each package gets exactly one verdict:
+
+  | Verdict | When | What `apply` would do |
+  |---|---|---|
+  | `+ new` | not found anywhere | install with the chosen provider |
+  | `= adopt` | installed by a candidate provider (even outside dots), and the version satisfies the spec | nothing to install. Record it in the lock and journal (§8.3 g.4). The provider choice is sticky (§5.5), so an apt `bat` stays apt even if the bundle prefers cargo. The hint shows `dots migrate`. |
+  | `↑ upgrade` | installed, but the version doesn't satisfy the spec | upgrade with that same provider. If that provider can't reach a satisfying version, fall back to rule §8.3 c, and the preview names the reason. |
+  | `⚠ shadow` | the binary exists from a source that is **not** a candidate (a manual `curl` install in `~/.local/bin`, an unknown owner) | install the managed copy. The preview names which copy will win on PATH, offers `exclude` to keep yours, and warns about a duplicate. |
+  | `✗ conflict` | a `conflicts`/`replaces` (§8.3 d), or a binary name owned by one of your declared packages | refuse until it is resolved |
+
+- **Files.** For every destination the item would own, compare it with what is on disk *now*:
+
+  | Verdict | When | What `apply` would do |
+  |---|---|---|
+  | `+ new` | destination absent | create it |
+  | `= same` | identical content (or already the same link) | adopt ownership, no write |
+  | `⚡ replace` | exists, not owned by dots, different content | **back it up**, then link or write. `d` shows the diff, current vs incoming. For a directory: how many files it contains and how many differ. |
+  | `~ edit` | an `inject` block or a `fragment` going into a file you already have | show only the added lines. The rest of your file is untouched. |
+  | `✗ blocked` | owned by another dots package, or a fragment key collision | refuse, naming the owner |
+
+- **Settings and the rest.** It lists the `required` settings that will be asked for, the new manual steps, the `requires` closure (rustup, fonts…), whether sudo is needed, and every script that will run (step 5).
+
+Rules:
+
+- The preview is **read-only and offline-friendly**. It uses the fetched rev and local queries, and never runs a script from the item. `check` commands are not run until you confirm, because they are code from someone else too.
+- The verdict counts form the headline (`3 new · 2 adopt · 1 upgrade · 1 replace`), so the risky categories (`replace`, `shadow`, `upgrade`) can't be missed.
+- `--json` emits the same verdict rows. Agents use this to tell the user exactly what would be overwritten, before anything is.
 
 ### 13.2 Following (the default)
 
