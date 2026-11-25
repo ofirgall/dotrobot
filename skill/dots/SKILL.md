@@ -21,7 +21,7 @@ Your job: help the user get the machine they want with as few questions as possi
 | **Settings** | Typed knobs a package exposes (font size, theme, email). Each has a recommended default. | defaults in the package. Values can be set per repo or per machine. |
 | **Platform** | The machine's chain from general to specific, e.g. linux › debian › ubuntu › ubuntu-24.04 (plus arch, plus wsl). Anything can have per-platform sections, and the most specific one wins, so "ubuntu" covers every Ubuntu and "ubuntu-22.04" fixes just that release. | detected |
 | **Overrides** | The user's changes to *anything* (package, bundle, file, setting default, manual step, provider option, priority) without editing the original. One merge grammar everywhere. | `overrides/` (all machines), a committed machine profile's overrides, or the machine-local overrides dir |
-| **Upstream (fork)** | Someone else's repo that this one *extends* at a pinned revision. The user keeps only overrides, and the other person's improvements keep flowing in on update. | declared in the repo manifest, pinned in the lock |
+| **Followed source** | Someone else's repo whose bundles or packages were added. It stays pinned at a revision, the user keeps only overrides, and the other person's improvements come in on pull. | declared in the repo manifest, pinned in the lock |
 | **Manual actions** | Steps a human must do (grant macOS permissions, log out). Tracked as a per-machine todo list. Some verify themselves. | `packages/<pkg>/manual/*.md` |
 | **Lock** | The exact versions and git revisions that were installed, per platform. | `dots.lock` in the repo |
 | **Journal** | Everything `dots` did on this machine, with timestamps and the repo commit it was running from. | local state |
@@ -39,14 +39,14 @@ Config files are either **linked** (the file in the repo *is* the config), **ren
 6. **Overrides** for anything a setting doesn't cover.
 7. **Manual todos**: mark done, skip, or let `dots` auto-verify.
 8. **Experiments**: try changes in a git worktree, switch the machine to it, then come back or keep it.
-9. **Reusing someone else's setup**, either by *copying* packages/bundles (they become the user's own) or by *forking* (following the other repo at a pinned revision and overriding whatever they like), then pulling updates later.
+9. **Reusing someone else's setup**, by **adding** their bundle or package: either *followed* (the default: pinned at a revision, the user overrides whatever they like) or *copied* (the files become the user's own), then pulling their updates later.
 10. **Platform specifics**: general rules for a family (all Ubuntu) and narrower fixes for one release or architecture.
 
 **Where should a change go?** Decide this before editing anything:
 
 - "Only on this machine" → a machine-scope setting, a machine override or an exclude. Nothing gets committed.
 - "On all my machines" → a repo-scope setting or a repo override, or edit the package if it's the user's own package.
-- "This package came from another repo" (copied, it has an origin) or "it's from a forked upstream" → settings and overrides only, never edit the original, so future updates merge cleanly. If the overrides grow bigger than the thing itself, **eject** it into a plain local package.
+- "This package came from another repo" (copied, it has an origin) or "it's from a followed source" → settings and overrides only, never edit the original, so future updates merge cleanly. If the overrides grow bigger than the thing itself, **eject** it into a plain local package.
 - "Only on Ubuntu 22.04 / only on ARM / only under WSL" → a platform section at the *least specific level that's true* (prefer "ubuntu" over "ubuntu-22.04" unless it really is release-specific).
 - "Only on macOS / only on Linux / only at work" → a condition (OS fact or tag), not a separate copy of the file.
 - Never edit rendered output files directly. They are regenerated. Change the source layer, the setting or the override instead. If an app has already edited a rendered file, use **adopt** to pull those edits back into a layer.
@@ -84,8 +84,8 @@ Then:
 - **Pin a version:** pin it in `dots` (which also holds it in brew/apt), not by hand in the package manager.
 - **Remove a tool:** `dots` uninstalls it, removes the links and rendered files it owns, and takes its fragments out of shared files. Confirm with the user first.
 - **Try something risky:** create a trial worktree, switch the machine to it, and experiment. Going back offers to remove, keep or adopt anything that was installed during the trial. Suggest this for any big change (new WM, new shell setup).
-- **Reuse someone's setup, copy or fork?** Ask the user one question: *"Do you want to own these files and change them freely (copy), or follow their setup and keep only your tweaks on top (fork)?"* Recommend **fork** when they want a whole bundle or setup and expect to take the other person's updates. Recommend **copy** for a single package they plan to reshape. Either way, show what comes along (dependencies) and **every script that will run** before confirming.
-- **Update a fork:** show what changed upstream, scripts first. Any stale override (one pointing at something upstream removed or renamed) must be fixed before the update lands. Explain each one to the user and propose the fix.
+- **Reuse someone's setup, follow or copy?** Always say which kind you're adding (a bundle or a single package). Ask the user one question: *"Do you want to follow their setup and keep only your tweaks on top, or own a copy and change it freely?"* Recommend **follow** (the default) when they want a whole bundle or setup and expect to take the other person's updates. Recommend **copy** for a single package they plan to reshape. Either way, show what comes along (dependencies) and **every script that will run** before confirming.
+- **Pull their updates:** show what changed upstream, scripts first. Any stale override (one pointing at something upstream removed or renamed) must be fixed before the update lands. Explain each one to the user and propose the fix.
 
 ## Debugging playbook
 

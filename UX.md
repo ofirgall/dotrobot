@@ -352,7 +352,7 @@ This is a clack-style guided flow: a left rail, one question at a time, and the 
             └─ needs rust ≥1.80   (provided by rustup 1.83.0 ✓)
 ```
 
-`dots add` uses the same tree to show what will be copied, with `+ new`, `= already have (same origin)` and `! name taken` markers. After the tree, there is a **"Code that will run on your machine"** section listing each script with its line count. Press `v` to view each script in the pager before confirming.
+`dots add bundle|pkg` uses the same tree to show what will be added, with `+ new`, `= already have (same origin)` and `! name taken` markers. After the tree, there is a **"Code that will run on your machine"** section listing each script with its line count. Press `v` to view each script in the pager before confirming.
 
 ### 4.11 `dots log`
 

@@ -50,7 +50,7 @@ dots.lock                                        Planner  → Plan (typed action
 - **Lock**: `dots.lock`, committed. It records the resolved versions and the git revs.
 - **Platform**: a chain of increasingly specific keys for this machine (`linux › debian › ubuntu › ubuntu-24.04`). Any object can carry `[platform.<key>]` tables, and more specific keys override more general ones (§4.1).
 - **Override**: a partial definition that changes anything defined elsewhere (a package, bundle, file, setting schema, manual action, provider option or priority) without editing the original (§18).
-- **Upstream (fork)**: another repo you *extend* at a pinned rev instead of copying. You keep only your overrides (§13.2).
+- **Upstream (followed source)**: another repo whose bundles/packages you `dots add`. It stays pinned at a rev, and you keep only your overrides on top (§13.2). `--copy` takes a copy instead.
 - **State**: local and per machine. It records what `dots` owns (links, rendered files, injected blocks), the todo status and the journal.
 
 ---
@@ -86,7 +86,7 @@ dotfiles/
 │       ├── package.toml
 │       ├── karabiner.json
 │       └── manual/permissions.md
-├── overrides/                   # changes to things defined elsewhere (local, copied or forked), §18
+├── overrides/                   # changes to things defined elsewhere (local, copied or followed), §18
 │   ├── dots.toml                        # manifest overrides (priorities, provider options, tags, ...)
 │   ├── packages/ghostty/override.toml   # + any extra layers/files it references
 │   └── bundles/cli.toml
@@ -96,7 +96,7 @@ dotfiles/
 └── lib/                         # shared shell helpers for script packages (sourced via $DOTS_LIB)
 ```
 
-**Rule: a package is self-contained.** Every file a package references lives under its own directory. That makes `dots add other/repo:pkg` a directory copy and not a graph walk over the whole repo. An escape hatch (`src = "//shared/foo"` for a repo-root path) exists for migration only, and `dots lint` warns on it. A package with a `//` reference cannot be copied until it is internalized, and `dots add` refuses it.
+**Rule: a package is self-contained.** Every file a package references lives under its own directory. That makes `dots add pkg other/repo:name --copy` a directory copy and not a graph walk over the whole repo. An escape hatch (`src = "//shared/foo"` for a repo-root path) exists for migration only, and `dots lint` warns on it. A package with a `//` reference cannot be copied until it is internalized, and `dots add --copy` refuses it.
 
 ---
 
@@ -242,7 +242,7 @@ vars = { GHOSTTY_RESOURCES_DIR = "..." }
 post_install = "scripts/install-plugins.sh"
 post_files   = "touch -h ~/.config/karabiner/karabiner.json"   # e.g. karabiner reload
 
-# --- Provenance (written by `dots add`, never by hand) ---
+# --- Provenance (written by `dots add --copy`, never by hand) ---
 [origin]
 repo = "github:ofirgall/dotfiles"
 path = "packages/ghostty"
@@ -954,94 +954,111 @@ JSONL and not SQLite: it is greppable, `tail -f`-able, survives partial writes (
 
 ---
 
-## 13. Reusing other people's setups: copy or fork
+## 13. Reusing other people's setups: `dots add`
 
-### 13.1 Copying
+One verb, `add`. The **kind** of thing being added is spelled out in the command, so you can read the line aloud and know what it does:
 
 ```
-dots add ofirgall/dotfiles:ghostty                 # package
-dots add ofirgall/dotfiles:bundle/cli              # bundle (+ all its packages)
-dots add github:owner/repo@v1.2:pkg                # pinned rev/tag/branch
-dots add git+ssh://git@host/x.git:pkg
-dots add ../other-dots:pkg                         # local path
-dots add ofirgall/dotfiles:ghostty --as ghostty-ofir --no-deps
-dots search ofirgall/dotfiles [query]              # list packages/bundles in a remote, with descriptions
+dots add bundle ofirgall/dotfiles:cli          # follow their `cli` bundle (+ the packages it needs)
+dots add pkg    ofirgall/dotfiles:ghostty      # follow one package
+dots add pkg    ofirgall/dotfiles:ghostty --copy   # copy it into your repo instead of following it
+dots add bundle cli                            # no source: turn on one of YOUR bundles for this machine
+dots search ofirgall/dotfiles [query]          # what bundles/packages does that repo offer?
 ```
 
-Resolution:
+Sources: `owner/repo` (GitHub shorthand), `github:owner/repo@v1.2` (pinned tag/branch/sha), `git+ssh://git@host/x.git`, or a local path `../other-dots`. Options: `--as <name>` renames on a clash, and `--no-deps` skips the `requires` closure, which `status` then shows as unmet.
 
-1. Fetch into `~/.cache/dots/remotes/<host>/<owner>/<repo>.git` (a bare mirror, `git fetch` on reuse), and check out the requested rev into a temp worktree.
+There are two modes, and **following is the default**:
+
+| | follow (default) | `--copy` |
+|---|---|---|
+| Your repo holds | a pinned commit + your overrides | a full copy of their files, with `[origin]` recorded |
+| How you customize | overrides only (§18) | edit freely, or use overrides |
+| Getting their changes | `dots pull`: bump the pinned commit, re-apply overrides | `dots pull`: 3-way merge into your copy |
+| If their repo disappears | the pinned checkout keeps working; you can't pull (eject it) | nothing breaks |
+| Pick it when | you want their setup to keep improving under you | you want to take it and reshape it |
+
+### 13.1 What every `add` does first
+
+1. Fetch into `~/.cache/dots/remotes/<host>/<owner>/<repo>.git` (a bare mirror, `git fetch` on reuse), and check out the requested rev.
 2. Read their `dots.toml` and check `schema`/`requires_dots` compatibility.
-3. Resolve the item: `name` searches packages first. If a bundle has the same name, that is an **error**, and you disambiguate with `pkg/` or `bundle/`.
-4. Compute the closure over `requires` and over bundle membership. Show it as a tree, marking what already exists locally (by name *and* by origin).
-5. **Show what will execute**: every script, hook and `check` command of the copied packages, in a pager. A copied package runs code on your machine, so the user confirms (`--yes` skips this, explicitly).
-6. Copy the dirs into `packages/` and write the `[origin]` table (repo, path, full rev SHA, tree hash). For a bundle, write `bundles/<name>.toml` with `[origin]` as well.
-7. Name collision: refuse, or `--as <name>`. Never overwrite silently.
-8. Custom providers or tags the package uses that do not exist locally are listed with an offer to add them to `dots.toml`.
+3. Resolve the item **of the kind you named**. `add pkg` looks only at packages and `add bundle` only at bundles, so there is no name ambiguity. If the name exists only as the other kind, the error suggests the right command ("`cli` is a bundle in ofirgall/dotfiles: dots add bundle ofirgall/dotfiles:cli").
+4. Compute the closure over `requires` and bundle membership. Show it as a tree, marking what you already have (by name *and* by origin).
+5. **Show what will execute**: every script, hook and `check` command, in a pager. Code from someone else runs on your machine, so you confirm (`--yes` skips this, explicitly).
+6. Name collision with something of yours: refuse, or use `--as <name>`. Never overwrite silently.
+7. Custom providers or tags the items need that you don't have are listed, with an offer to add them to `dots.toml`.
 
-Keeping copies in sync (this is why the base rev is recorded):
+### 13.2 Following (the default)
 
-```
-dots origin status                 # for every package with [origin]: upstream changed? local changed? both?
-dots origin diff ghostty           # upstream base..head diff for that path
-dots origin update ghostty         # 3-way merge: base = origin.rev, ours = local dir, theirs = upstream head (git merge-file per file)
-dots origin detach ghostty         # drop [origin]; it becomes yours
-```
-
-**This is a copy, not a dependency.** There is no runtime reference to the remote. If the remote vanishes, nothing breaks. Updating is an explicit merge.
-
-### 13.2 Forking (extend instead of copy)
-
-Copying gives you ownership of the files. **Forking** keeps someone else's repo (or part of it) as a pinned **upstream**, and your repo holds only your overrides on top. It's the right choice when you mostly like what they have and want their improvements to keep flowing in.
+`add` (without `--copy`) writes one entry. Their files stay in their repo:
 
 ```toml
 # dots.toml
 [[upstream]]
-alias  = "ofir"
-url    = "github:ofirgall/dotfiles"
-follow = "main"                                   # what `dots fork update` moves to
-import = ["bundle:cli", "bundle:mac-desktop"]     # or ["*"]; the requires-closure comes along automatically
-rename = { "pkg:ghostty" = "ghostty-ofir" }       # resolve a name clash with something of yours
-trust  = "review"                                 # review (default): script changes need confirmation on update | auto
+alias   = "ofirgall"                              # defaults to the repo owner
+url     = "github:ofirgall/dotfiles"
+follow  = "main"                                  # what `dots pull` moves to
+import  = ["bundle:cli", "pkg:ghostty"]           # grows with every `dots add` from this source
+rename  = { "pkg:ghostty" = "ghostty-ofir" }      # set by --as
+trust   = "review"                                # review (default): script changes need confirmation on pull | auto
+scripts = "allow"                                 # allow (default) | deny: only declarative packages/files; script-provider packages,
+                                                  # hooks and render-time commands from this source are dropped (status: "blocked by policy")
 ```
 
-The exact rev is pinned in `dots.lock` (`[[upstream]] alias = "ofir", rev = "<sha>"`). A fork never moves without `dots fork update`.
-
-```
-dots fork ofirgall/dotfiles:bundle/cli    # adds/extends an [[upstream]] entry and imports that bundle
-dots fork status                          # per upstream: commits behind, which imported items changed, stale overrides
-dots fork diff ofir                       # upstream pinned..follow, limited to imported items, scripts first
-dots fork update [ofir]                   # fetch, review, check overrides still apply, bump lock rev, show plan
-dots fork pin ofir <rev>                  # go back to (or stay on) a specific upstream rev
-dots fork vendor ofir [item]              # convert to a copy: copies items with [origin], drops the import
-```
+The exact rev is pinned in `dots.lock` (`[[upstream]] alias = "ofirgall", rev = "<sha>"`). Nothing you follow moves without `dots pull`.
 
 How it resolves:
 
-1. **Each upstream is resolved on its own first**: its own upstreams (forks chain, so C → B → A works; a cycle is an error), its definitions and its *committed* overrides. Its machine profiles and machine scope never cross over.
+1. **Each upstream is resolved on its own first**: its own upstreams (following chains, so C → B → A works; a cycle is an error), its definitions and its *committed* overrides. Its machine profiles and machine scope never cross over.
 2. The result is checked out **immutably per rev** at `~/.local/share/dots/upstreams/<alias>/<rev>/`. This lives in the data dir and not the cache, because links and renders point into it. Old revs are garbage-collected once nothing dots owns references them.
-3. **Namespacing:** every upstream item is addressable as `<alias>:<name>` (`ofir:ghostty`). Imported items are *also* available under their bare name, unless that name is already defined locally, which is an error until you `rename` or stop importing it. Two upstreams exporting the same imported name is also an error naming both. Nothing ever shadows silently.
+3. **Namespacing:** every upstream item is addressable as `<alias>:<name>` (`ofirgall:ghostty`). Imported items are *also* available under their bare name, unless you already define that name locally, which is an error until you `--as` or remove it. Two upstreams exporting the same imported name is also an error naming both. Nothing ever shadows silently.
 4. **Layering:** the upstream's `dots.toml` contributions (priorities, provider options, tags, platforms, custom providers, repo-scope setting values) form the **lowest layer**. Your `dots.toml` sits on top, then your `overrides/`. Upstream setting values become an `upstream` scope in the §17.2 precedence table, between bundle and repo.
-5. **You customize with ordinary overrides** (§18), addressed the same way whether the item is local, copied or forked. `overrides/packages/ghostty/override.toml` just works.
+5. **You customize with ordinary overrides** (§18), addressed the same way whether the item is yours, copied or followed. `overrides/packages/ghostty/override.toml` just works.
 
-Updating safely (`dots fork update`):
+### 13.3 Copying (`--copy`)
 
-- Show the changes in imported items, with **new or changed scripts, hooks and checks first**. Under `trust = "review"` they need explicit confirmation, the same as `dots add`.
+`add --copy` copies the item's dirs into `packages/` (or writes `bundles/<name>.toml`) and records provenance:
+
+```toml
+[origin]
+repo = "github:ofirgall/dotfiles"
+path = "packages/ghostty"
+rev  = "f4522416c0d0..."      # full SHA the copy was taken from: the merge base for later pulls
+tree = "<hash of the package tree at copy time>"
+```
+
+**A copy is not a dependency.** There is no runtime reference to the remote. If the remote vanishes, nothing breaks.
+
+### 13.4 Staying in sync: `dots pull`
+
+One verb for both modes:
+
+```
+dots sources                    # every source: commits behind, which items changed, local edits, stale overrides
+dots pull --dry-run [src|item]  # what would change, scripts first
+dots pull [src|item]            # followed: bump the pinned rev · copied: 3-way merge (base = origin.rev, ours = your dir, theirs = their head)
+dots pull ofirgall --to <rev>   # move a followed source to (or back to) a specific rev
+```
+
+`pull` is deliberately not `update`. `dots upgrade` already means "install newer package versions", and `update` next to it would repeat apt's classic confusion.
+
+Pulling safely:
+
+- Show the changes, with **new or changed scripts, hooks and checks first**. Under `trust = "review"` they need explicit confirmation, the same as `add`.
 - **Stale overrides**: an override whose target (file dst, setting, manual id, bundle member) no longer exists upstream is an error. An override that now sets a value identical to upstream is a warning ("this override is now redundant"). A setting whose type changed upstream is an error.
-- Then rebuild the plan. The update is only a lock change plus whatever `apply` does next, so `git revert` of the lock commit is a full rollback.
+- **Copies**: merge conflicts are left as standard conflict markers in your copy, with the list printed, and `status` shows them until they are resolved.
+- Then rebuild the plan. A followed pull is only a lock change plus whatever `apply` does next, so `git revert` of the lock commit is a full rollback.
 - Offline: pinned revs stay checked out, so `apply` works without the network. `doctor` reports a missing checkout.
 
-**Copy vs fork:**
+### 13.5 Switching between modes
 
-| | `dots add` (copy) | `dots fork` (extend) |
-|---|---|---|
-| Who owns the files | you, in `packages/` | upstream, pinned rev |
-| How you customize | edit directly, or overrides | overrides only |
-| Getting their changes | `dots origin update` (3-way merge per item) | `dots fork update` (bump rev; overrides re-applied) |
-| If their repo disappears | nothing breaks | pinned checkout keeps working; you can't update (vendor it) |
-| Best for | taking a piece and making it yours | following someone's setup with your tweaks |
+```
+dots eject <item>               # followed → copied: writes the EFFECTIVE definition (with your overrides folded in) as your own copy
+dots uneject <item>             # copied → followed: only if your local edits can be expressed as overrides
+dots remove bundle|pkg <item>   # stop using it (stops following / deletes the copy; uninstalls what only it needed, after asking)
+```
 
-Converting between them: `dots fork vendor` turns a fork into a copy. `dots origin to-fork <pkg>` turns a copy back into a fork only if your local edits can be expressed as overrides. dots computes the structural diff against the origin rev and writes it to `overrides/`. If some edit can't be expressed that way (for example free text in a linked file), it shows those edits and refuses.
+`uneject` computes the structural diff between your copy and its origin rev and writes it to `overrides/`. If some edit can't be expressed that way (for example free text in a linked file), it shows those edits and refuses.
 
 ---
 
@@ -1086,7 +1103,7 @@ dots upgrade [pkg...|--all] [--provider X] [--commit]
 dots pin | unpin <pkg> [ver]
 dots remove <pkg>                     # removes from bundles + uninstalls + unlinks (asks)
 dots migrate <pkg> --to <provider>
-dots add | search | origin ...
+dots add bundle|pkg <src>:<name> [--copy] | search | sources | pull | eject | uneject   # §13
 dots todo [show|done|skip|check]
 dots adopt <dst> [--layer L]
 dots try | use | roots | diff
@@ -1095,9 +1112,7 @@ dots restore <run-id>
 dots config list|get|set|unset|explain     # §17
 dots questions                             # §17/§19
 dots show <pkg> [--effective]
-dots override list|edit|diff|eject <address>   # §18
-dots fork <src> | status | diff | update | pin | vendor   # §13.2
-dots origin status|diff|update|detach|to-fork          # §13.1
+dots override list|edit|diff <address>        # §18
 dots skill install                         # §19
 dots lint                             # schema, unknown tags/facts, fragment collisions, // escapes, missing check cmds
 dots import dotbot <file.yaml>...     # migration, §16
@@ -1216,7 +1231,7 @@ Rules:
 |---|-------|----------|-----------|-------------|
 | 1 | package default | `packages/<p>/package.toml` | yes | recommended value |
 | 2 | bundle | `[settings.<pkg>]` in a bundle file | yes | "mac-desktop bundle wants font 14" |
-| 3 | upstream | `[settings.<pkg>]` in a forked upstream's `dots.toml` (§13.2) | theirs | values inherited from the setup you forked |
+| 3 | upstream | `[settings.<pkg>]` in a followed upstream's `dots.toml` (§13.2) | theirs | values inherited from the setup you follow |
 | 4 | repo | `[settings.<pkg>]` in `dots.toml` | yes | your personal choice across all machines |
 | 5 | committed machine profile | `machines/<name>.toml` | yes | "work-mbp uses work email" |
 | 6 | machine | `~/.config/dots/machine.toml` `[settings.<pkg>]` | no | this box only, secrets |
@@ -1306,7 +1321,7 @@ Patches apply after the merge, in declaration order. The type of `value` is infe
 
 ## 18. Overrides: everything is customizable
 
-**Principle: anything a repo defines, a consumer can change without editing it.** That covers your own packages, packages copied from someone else (§13) and whole forked setups (§13.2). Settings (§17) are the knobs an author *anticipated*. Overrides are for everything else. Keeping changes out of the original definitions is what makes `origin update` and `fork update` merge cleanly, and it lets machine-local tweaks stay uncommitted.
+**Principle: anything a repo defines, a consumer can change without editing it.** That covers your own packages, packages copied from someone else (§13) and whole followed setups (§13.2). Settings (§17) are the knobs an author *anticipated*. Overrides are for everything else. Keeping changes out of the original definitions is what makes `dots pull` merge cleanly, and it lets machine-local tweaks stay uncommitted.
 
 ### 18.1 Every object has an address
 
@@ -1365,7 +1380,7 @@ Within each layer, that layer's own `[platform.*]` tables apply in chain order. 
 
 ### 18.4 Examples
 
-Package (copied or forked, it doesn't matter):
+Package (yours, copied or followed, it doesn't matter):
 
 ```toml
 # overrides/packages/ghostty/override.toml
@@ -1425,7 +1440,7 @@ gaming = "machines that get Steam etc."
 
 ### 18.5 Ejecting
 
-When an override grows bigger than the thing it overrides, run `dots override eject <address>`. It writes the **effective** definition as a new local package or bundle (files included), records the original under `[origin]` and deletes the override. The item is then plainly yours. For upstream items, that is the same as `dots fork vendor` for one item.
+When an override grows bigger than the thing it overrides, run `dots eject <address>`. It writes the **effective** definition as a new local package or bundle (files included), records the original under `[origin]` and deletes the override. The item is then plainly yours. For a followed item, this is how you stop following it and own it.
 
 ### 18.6 Visibility and safety
 
@@ -1433,7 +1448,7 @@ When an override grows bigger than the thing it overrides, run `dots override ej
 - `dots override list` shows every override grouped by scope, with its target address and a one-line summary of what it changes.
 - `dots override edit <address> [--machine]` scaffolds the right file and opens `$EDITOR`. `dots override diff <address>` shows pristine vs effective, structurally.
 - `dots adopt` (§6.3) can target an override layer: "put the app's edits into my machine override".
-- Lint: an override whose target no longer exists is an **error** ("stale override", typically after `origin update` or `fork update`), and the hint names the closest existing address. A redundant override (same value as underneath) is a **warning**. Type changes are errors.
+- Lint: an override whose target no longer exists is an **error** ("stale override", typically after `dots pull`), and the hint names the closest existing address. A redundant override (same value as underneath) is a **warning**. Type changes are errors.
 
 ---
 
