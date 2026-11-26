@@ -1,0 +1,149 @@
+{
+  "formulae": [],
+  "casks": [
+    {
+      "token": "1password-cli",
+      "full_token": "1password-cli",
+      "tap": "homebrew/cask",
+      "version": "2.42.0",
+      "installed": "2.35.0",
+      "pinned": false,
+      "outdated": true,
+      "artifacts": [
+        {
+          "binary": [
+            "op"
+          ],
+          "target": "/opt/homebrew/bin/op"
+        },
+        {
+          "generate_completions_from_executable": [
+            "op",
+            "completion",
+            {
+              "base_name": null,
+              "shell_parameter_format": null,
+              "shells": [
+                "bash",
+                "zsh",
+                "fish"
+              ]
+            }
+          ]
+        },
+        {
+          "zap": [
+            {
+              "trash": "~/.config/op"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "token": "orbstack",
+      "full_token": "orbstack",
+      "tap": "homebrew/cask",
+      "version": "2.2.5,21124",
+      "installed": "2.2.3,20963",
+      "pinned": false,
+      "outdated": true,
+      "artifacts": [
+        {
+          "uninstall": [
+            {
+              "quit": "dev.kdrag0n.MacVirt",
+              "script": {
+                "executable": "/Applications/OrbStack.app/Contents/MacOS/bin/orbctl",
+                "args": [
+                  "_internal",
+                  "brew-uninstall"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "app": [
+            "OrbStack.app"
+          ],
+          "target": "/Applications/OrbStack.app"
+        },
+        {
+          "binary": [
+            "/Applications/OrbStack.app/Contents/MacOS/bin/orbctl"
+          ],
+          "target": "/opt/homebrew/bin/orbctl"
+        },
+        {
+          "binary": [
+            "/Applications/OrbStack.app/Contents/MacOS/bin/orb"
+          ],
+          "target": "/opt/homebrew/bin/orb"
+        },
+        {
+          "bash_completion": [
+            "/Applications/OrbStack.app/Contents/Resources/completions/bash/orbctl.bash"
+          ],
+          "target": "/opt/homebrew/etc/bash_completion.d/orbctl"
+        },
+        {
+          "zsh_completion": [
+            "/Applications/OrbStack.app/Contents/Resources/completions/zsh/_orbctl"
+          ],
+          "target": "/opt/homebrew/share/zsh/site-functions/_orbctl"
+        },
+        {
+          "zsh_completion": [
+            "/Applications/OrbStack.app/Contents/Resources/completions/zsh/_orb"
+          ],
+          "target": "/opt/homebrew/share/zsh/site-functions/_orb"
+        },
+        {
+          "fish_completion": [
+            "/Applications/OrbStack.app/Contents/Resources/completions/fish/orbctl.fish"
+          ],
+          "target": "/opt/homebrew/share/fish/vendor_completions.d/orbctl.fish"
+        },
+        {
+          "postflight_steps": [
+            {
+              "steps": [
+                {
+                  "command": {
+                    "base": "appdir",
+                    "path": "OrbStack.app/Contents/MacOS/bin/orbctl"
+                  },
+                  "type": "run",
+                  "args": [
+                    "_internal",
+                    "brew-postflight"
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "zap": [
+            {
+              "trash": [
+                "~/.orbstack",
+                "~/Library/Application Scripts/*.dev.orbstack",
+                "~/Library/Caches/dev.kdrag0n.MacVirt",
+                "~/Library/Caches/SentryCrash/OrbStack",
+                "~/Library/Group Containers/*.dev.orbstack",
+                "~/Library/HTTPStorages/dev.kdrag0n.MacVirt",
+                "~/Library/HTTPStorages/dev.kdrag0n.MacVirt.binarycookies",
+                "~/Library/Preferences/dev.kdrag0n.MacVirt.plist",
+                "~/Library/Saved Application State/dev.kdrag0n.MacVirt.savedState",
+                "~/Library/WebKit/dev.kdrag0n.MacVirt"
+              ],
+              "rmdir": "~/OrbStack"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

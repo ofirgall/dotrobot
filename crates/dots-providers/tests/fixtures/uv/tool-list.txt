@@ -1,0 +1,5 @@
+agents-status v0.1.0 [required: file:///home/me/agents-status/core]
+- agents-status-server
+claude-swap v0.29.0
+- claude-swap
+- cswap

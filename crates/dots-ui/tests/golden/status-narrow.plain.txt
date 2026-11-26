@@ -1,0 +1,34 @@
+ [!] 7 things need attention
+
+ dots status
+ ~/dotfiles - main @ f452241 (clean) - work-mb...
+
+ PACKAGES   62 ok   2 outdated   1 drift
+ 1 missing
+
+ [up] bottom
+   outdated - cargo - 0.9.6 -> 0.10.2 - releas...
+   -> dots upgrade bottom
+ [up] delta
+   outdated - cargo - 0.17.0 -> 0.18.2
+ [!=] neovim
+   drift - github - 0.11.4 - lock wants 0.11.5
+   -> dots apply neovim
+ [--] herdr
+   missing - script - not installed
+   -> dots apply herdr
+ [orph] zellij
+   orphan - brew - 0.41.1 - installed in workt...
+   -> dots remove zellij
+   -> dots adopt-package zellij
+
+ FILES   84 ok   1 modified
+
+ [mod] ~/.claude/settings.json
+   modified - render - app changed 2 keys
+   -> dots adopt ~/.claude/settings.json
+ [!!] ~/.config/herdr/
+   conflict - link - herdr.sock, herdr-server....
+   -> dots explain foreign-entries
+
+   [ok] 62 packages - 84 files ok

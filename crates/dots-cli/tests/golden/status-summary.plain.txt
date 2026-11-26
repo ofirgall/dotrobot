@@ -1,0 +1,19 @@
+exit: 2
+--- stdout ---
+ [!] 4 things need attention
+
+ PACKAGES   2 ok   3 outdated
+
+   [up] outdated  o1  script  1.0.0 -> 2.0.0
+                  -> dots upgrade o1
+   [up] outdated  o2  script  1.0.0 -> 2.0.0
+                  -> dots upgrade o2
+   [up] outdated  o3  script  1.0.0 -> 2.0.0
+                  -> dots upgrade o3
+
+ FILES   1 modified
+
+   [mod] modified  ~/.aliases  copy  changed since dots wrote it
+                   -> dots adopt ~/.aliases
+                   -> dots adopt ~/.aliases --machine
+--- stderr ---

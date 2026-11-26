@@ -1,0 +1,33 @@
+[package]
+name = "dots-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "dots"
+path = "src/main.rs"
+
+[dependencies]
+dots-core.workspace = true
+dots-ui.workspace = true
+dots-facts.workspace = true
+dots-files.workspace = true
+dots-model.workspace = true
+dots-providers.workspace = true
+dots-resolve.workspace = true
+dots-engine.workspace = true
+dots-env.workspace = true
+clap.workspace = true
+ctrlc.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+dots-testkit.workspace = true
+jsonschema.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true

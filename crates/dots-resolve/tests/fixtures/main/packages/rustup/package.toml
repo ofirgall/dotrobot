@@ -1,0 +1,7 @@
+schema = 1
+name = "rustup"
+providers_only = true
+
+[providers.script]
+check = "command -v rustup"
+install = "true"

@@ -1,0 +1,6 @@
+schema = 1
+bundles = ["base", "cli"]
+tags = ["work"]
+[settings.git]
+email = "me@work.example"
+name = "Me"

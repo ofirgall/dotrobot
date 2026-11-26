@@ -1,0 +1,14 @@
+ <ESC>[1mPlan: 2 installs · 1 upgrade · 1 removal<ESC>[0m
+
+ <ESC>[1mPackages<ESC>[0m
+
+   <ESC>[38;2;126;231;135m+<ESC>[0m  <ESC>[1;38;2;210;168;255mripgrep<ESC>[0m         <ESC>[38;2;139;148;158mbrew<ESC>[0m   14.1.1
+   <ESC>[38;2;126;231;135m+<ESC>[0m  <ESC>[1;38;2;210;168;255mkv<ESC>[0m              <ESC>[38;2;139;148;158mcargo<ESC>[0m  git:9e1c0b7     builds from source · usually ~2m
+   <ESC>[38;2;227;179;65m↑<ESC>[0m  <ESC>[1;38;2;210;168;255mbottom<ESC>[0m          <ESC>[38;2;139;148;158mcargo<ESC>[0m  0.9.6 → 0.<ESC>[1m10.2<ESC>[0m
+   <ESC>[38;2;255;123;114m-<ESC>[0m  <ESC>[1;38;2;210;168;255mzellij<ESC>[0m          <ESC>[38;2;139;148;158mbrew<ESC>[0m   0.41.1          not declared anymore
+   <ESC>[38;2;255;123;114m↯<ESC>[0m  <ESC>[1;38;2;210;168;255m~/.config/yazi<ESC>[0m  <ESC>[38;2;139;148;158mlink<ESC>[0m                   existing folder moved to backup first
+
+ <ESC>[1mHeads up<ESC>[0m
+
+   <ESC>[38;2;227;179;65m▲<ESC>[0m Needs your password once (apt)
+   <ESC>[38;2;227;179;65m▲<ESC>[0m 1 existing folder will be backed up to ~/.local/state/dots/backup/r-7f3c/

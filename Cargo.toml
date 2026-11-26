@@ -1,0 +1,45 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/dots-cli",
+    "crates/dots-core",
+    "crates/dots-ui",
+    "crates/dots-model",
+    "crates/dots-facts",
+    "crates/dots-resolve",
+    "crates/dots-providers",
+    "crates/dots-engine",
+    "crates/dots-files",
+    "crates/dots-env",
+    "crates/dots-testkit",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[workspace.dependencies]
+# internal
+dots-core = { path = "crates/dots-core" }
+dots-ui = { path = "crates/dots-ui" }
+dots-model = { path = "crates/dots-model" }
+dots-facts = { path = "crates/dots-facts" }
+dots-resolve = { path = "crates/dots-resolve" }
+dots-providers = { path = "crates/dots-providers" }
+dots-engine = { path = "crates/dots-engine" }
+dots-files = { path = "crates/dots-files" }
+dots-env = { path = "crates/dots-env" }
+dots-testkit = { path = "crates/dots-testkit" }
+# external
+clap = { version = "4.6", features = ["derive"] }
+ctrlc = "3.5"
+jsonschema = { version = "0.63", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+thiserror = "2"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"

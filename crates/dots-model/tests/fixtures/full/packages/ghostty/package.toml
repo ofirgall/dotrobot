@@ -1,0 +1,114 @@
+schema = 1
+name = "ghostty"
+description = "Terminal"
+when = 'not(tag = "remote")'
+bin = "ghostty"
+bins = ["ghostty"]
+version = "latest"
+requires = ["nerd-fonts", { name = "rust", version = ">=1.80", when = 'os = "linux"' }]
+after = ["homebrew"]
+conflicts = ["x"]
+replaces = ["y"]
+prefer = ["brew"]
+providers_only = true
+integrity = "enforce"
+
+[providers.brew]
+name = "ghostty"
+cask = true
+
+[providers.apt]
+name = "fd-find"
+bin = "fdfind"
+shim = "fd"
+
+[providers.cargo]
+locked = true
+
+[providers.script]
+check = "command -v ghostty"
+version = "ghostty --version"
+install = "scripts/install-linux.sh"
+when = 'os = "linux"'
+shell = "bash"
+needs_root = false
+timeout = "20m"
+
+[providers.go]
+source = "example.com/x"
+
+[[files]]
+dst = "~/.config/ghostty/config"
+mode = "render"
+layers = ["config/common", { src = "config/macos", when = 'os = "macos"' }]
+format = "text"
+
+[[files]]
+dst = { default = "~/.config/ez/config.toml", macos = "{app_support}/ez/config.toml" }
+mode = "render"
+layers = { dir = "config", auto = true }
+format = "markdown"
+
+[[files.set]]
+path = "a.b"
+value = "@dots(setting.x)@"
+when = 'setting.x != "d"'
+
+[files.merge]
+"keys.bindings" = "append"
+"servers" = { by = "name" }
+
+[[files]]
+dst = "~/.config/ghostty/shaders"
+mode = "git"
+url = "https://example.com/shaders"
+
+[env]
+path = ["~/.local/bin"]
+vars = { A = "b" }
+source = ["~/.cargo/env"]
+
+[hooks]
+post_install = "scripts/install-plugins.sh"
+post_files = "touch -h ~/.x"
+
+[settings.font_size]
+type = "int"
+default = 13
+range = [8, 32]
+description = "points"
+
+[settings.theme]
+type = "enum"
+values = ["dark", "light"]
+default = "dark"
+ask = true
+question = "Theme?"
+
+[settings.git_email]
+type = "string"
+required = true
+secret = false
+validate = '^[^@]+@[^@]+$'
+
+[platform.ubuntu.providers.apt]
+ppa = "ppa:x/y"
+
+[platform."ubuntu-22.04"]
+prefer = ["github-release"]
+
+[platform."ubuntu-22.04".providers.github-release]
+repo = "a/b"
+asset = 'x\.tar\.gz$'
+
+[platform.wsl]
+requires = { add = ["win32yank"] }
+
+[platform.macos.settings.font_size]
+default = 14
+
+[origin]
+repo = "github:ofirgall/dotfiles"
+path = "packages/ghostty"
+rev = "f452"
+tree = "abc"

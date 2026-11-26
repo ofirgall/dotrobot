@@ -1,0 +1,10 @@
+ <ESC>[1;32m✓<ESC>[0m <ESC>[1;32mghostty is ok<ESC>[0m
+
+   <ESC>[90mprovider<ESC>[0m
+     brew (cask)
+   <ESC>[90mversion<ESC>[0m
+     1.2.3
+   <ESC>[90mbundle<ESC>[0m
+     <ESC>[1;35mmac-desktop<ESC>[0m
+   <ESC>[90mconfig<ESC>[0m
+     ~/.config/ghos…sted/folder/for/testing/config

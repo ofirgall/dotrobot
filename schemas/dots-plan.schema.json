@@ -1,0 +1,351 @@
+{
+  "$id": "https://dots.dev/schemas/dots-plan.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "data": {
+      "properties": {
+        "batches": {
+          "items": {
+            "properties": {
+              "after": {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              "commands": {
+                "items": {
+                  "properties": {
+                    "argv": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "needs_root": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "argv",
+                    "needs_root"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "id": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "interactive": {
+                "type": "boolean"
+              },
+              "packages": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "provider": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "provider",
+              "packages",
+              "interactive",
+              "after",
+              "commands"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "empty": {
+          "type": "boolean"
+        },
+        "files": {
+          "items": {
+            "properties": {
+              "detail": {
+                "type": "string"
+              },
+              "dst": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string"
+              },
+              "owned": {
+                "type": "boolean"
+              },
+              "package": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "package",
+              "dst",
+              "kind",
+              "detail",
+              "owned"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "steps": {
+          "items": {
+            "properties": {
+              "action": {
+                "enum": [
+                  "install",
+                  "upgrade",
+                  "downgrade"
+                ]
+              },
+              "after": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "batch": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "bootstrap": {
+                "type": "boolean"
+              },
+              "from": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "interactive": {
+                "type": "boolean"
+              },
+              "name": {
+                "type": "string"
+              },
+              "needs_root": {
+                "type": "boolean"
+              },
+              "package": {
+                "type": "string"
+              },
+              "provider": {
+                "type": "string"
+              },
+              "to": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "package",
+              "provider",
+              "name",
+              "action",
+              "from",
+              "to",
+              "needs_root",
+              "interactive",
+              "bootstrap",
+              "batch",
+              "after"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "summary": {
+          "properties": {
+            "downgrades": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "files": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "packages": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "root_actions": {
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "packages",
+            "files",
+            "downgrades",
+            "root_actions"
+          ],
+          "type": "object"
+        },
+        "unplanned": {
+          "items": {
+            "properties": {
+              "package": {
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "package",
+              "reason"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "empty",
+        "steps",
+        "batches",
+        "files",
+        "unplanned",
+        "summary"
+      ],
+      "type": "object"
+    },
+    "errors": {
+      "items": {
+        "properties": {
+          "code": {
+            "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$",
+            "type": "string"
+          },
+          "hint": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "provenance": {
+            "items": {
+              "properties": {
+                "col": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "file": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "line": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "source": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "source"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "code",
+          "message",
+          "hint",
+          "provenance"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "ok": {
+      "type": "boolean"
+    },
+    "schema": {
+      "const": "dots/plan@1"
+    },
+    "warnings": {
+      "items": {
+        "properties": {
+          "code": {
+            "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$",
+            "type": "string"
+          },
+          "hint": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "provenance": {
+            "items": {
+              "properties": {
+                "col": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "file": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "line": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "source": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "source"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "code",
+          "message",
+          "hint",
+          "provenance"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "schema",
+    "ok",
+    "data",
+    "warnings",
+    "errors"
+  ],
+  "title": "dots plan --json (schema version 1)",
+  "type": "object"
+}

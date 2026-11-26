@@ -1,0 +1,9 @@
+exit: 0
+--- stdout ---
+ 2 executables on PATH   1 managed - 0 unmanaged - 1 unknown - 0 shadowed
+
+ BINS
+
+   [?] unmanaged  foo   ~/.local/bin/foo   ?     -       -      unknown owner
+                  tool  ~/.local/bin/tool  tool  script  1.0.0
+--- stderr ---

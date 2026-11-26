@@ -1,0 +1,2 @@
+ <ESC>[1;32m✓<ESC>[0m <ESC>[1;32mAll good<ESC>[0m
+   <ESC>[32m✓<ESC>[0m <ESC>[90m64 packages · 86 files · 3 git sources<ESC>[0m        <ESC>[90mchecked in 0.8s<ESC>[0m

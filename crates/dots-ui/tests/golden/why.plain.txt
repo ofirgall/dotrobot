@@ -1,0 +1,7 @@
+ kv is installed because
+
+   work-mbp (machine)
+   \-- cli (bundle)
+       \-- koala (bundle)
+           \-- kv                     cargo - git:9e1c0b7
+               \-- needs rust >=1.80  provided by rustup 1.83.0

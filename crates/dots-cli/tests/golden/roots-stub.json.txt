@@ -1,0 +1,17 @@
+exit: 1
+--- stdout ---
+{
+  "data": {},
+  "errors": [
+    {
+      "code": "not-implemented",
+      "hint": "This command is a placeholder in this build; see the roadmap in README.md.",
+      "message": "`roots` is not implemented yet.",
+      "provenance": []
+    }
+  ],
+  "ok": false,
+  "schema": "dots/roots@1",
+  "warnings": []
+}
+--- stderr ---

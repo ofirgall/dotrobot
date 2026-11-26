@@ -1,0 +1,2 @@
+   <ESC>[33m<ESC>[0m <ESC>[33mmodified<ESC>[0m  <ESC>[1m~/.claude/settings.json<ESC>[0m  render
+               <ESC>[36m dots adopt ~/.claude/settings.json<ESC>[0m

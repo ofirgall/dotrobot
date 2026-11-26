@@ -1,0 +1,11 @@
+schema = 1
+name = "vimium"
+
+[providers.browser-ext]
+chrome = "dbepggeogbaibhgnhhndojpepiihcmeb"
+firefox = "{d7742d87}"
+browsers = ["chrome", "firefox"]
+method = "policy"
+
+[providers.browser-ext.managed]
+x = 1

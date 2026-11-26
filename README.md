@@ -66,6 +66,7 @@ Anything can have platform-specific sections, which go from general to specific:
 
 ## Add someone's bundle
 
+<!-- golden-skip: add-bundle | v0.3 | `dots search` and `dots add bundle` need sharing-sources -->
 ```console
 $ dots search ofirgall/dotfiles          # list their bundles and packages
 $ dots add bundle ofirgall/dotfiles:cli
@@ -115,6 +116,7 @@ font-size = 15
 
 Structured formats (TOML, JSON, YAML, gitconfig) merge key by key. For text configs, `dots` uses the app's own include mechanism where one exists (ghostty `config-file`, tmux `source-file`, zsh `source`). Otherwise it appends your layer, which only works for last-value-wins formats. For anything else, override the whole file or use a `dots:if` block. Either way, you keep getting their changes to everything you didn't touch.
 
+<!-- golden-skip: config-and-pull | v0.2 | `dots config set` needs package-settings; v0.3 | `dots pull` needs sharing-sources -->
 ```console
 $ dots config set delta.side_by_side true    # settings are knobs a package declares; this machine only
 $ dots apply
@@ -147,9 +149,10 @@ That's the whole template language. It lives in comments, so the file stays vali
 
 ## One screen for the whole machine
 
+<!-- golden: dashboard -->
 ```console
 $ dots
- dots  ~/dotfiles · main @ f452241 · macOS arm64
+ dots  ~/dotfiles · main @ f452241 · work-mbp · macOS arm64
 
  ▲ 3 things need attention
    ↑ 3 updates available        bottom, delta, yazi        → dots upgrade
@@ -194,7 +197,7 @@ dots apply
 ## Roadmap
 
 - [x] Architecture, terminal UX, agent skill
-- [ ] **v0.1**: packages, bundles, brew/apt/cargo/uv, links and generated configs, `status`/`plan`/`apply`
+- [x] **v0.1**: packages, bundles, brew/apt/cargo/uv, links and generated configs, `status`/`plan`/`apply`
 - [ ] **v0.2**: overrides, settings, platform rules, lock file
 - [ ] **v0.3**: `add`/`pull`, manual steps, worktree trials
 - [ ] Later: Windows (winget, scoop), browser extensions, dotbot importer

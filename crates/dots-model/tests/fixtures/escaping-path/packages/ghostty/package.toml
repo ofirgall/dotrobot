@@ -1,0 +1,6 @@
+schema = 1
+name = "ghostty"
+
+[[files]]
+dst = "~/.config/x"
+src = "../shared/x"

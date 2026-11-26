@@ -1,0 +1,5 @@
+exit: 1
+--- stdout ---
+--- stderr ---
+[38;2;255;123;114merror[not-implemented][0m: `roots` is not implemented yet.
+  [38;2;86;212;221m→[0m [38;2;86;212;221mThis command is a placeholder in this build; see the roadmap in README.md.[0m

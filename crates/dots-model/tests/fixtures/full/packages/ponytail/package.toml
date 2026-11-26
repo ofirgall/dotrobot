@@ -1,0 +1,10 @@
+schema = 1
+name = "ponytail"
+integrity = "enforce"
+
+[providers.agent-skill]
+src = "skill/"
+agents = ["claude", "codex"]
+
+[providers.agent-skill.frontmatter]
+disable-model-invocation = false

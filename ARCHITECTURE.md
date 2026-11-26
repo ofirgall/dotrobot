@@ -114,11 +114,11 @@ name = "ofirgall/dotfiles"
 # Provider priority per platform: the first provider that the package supports AND is available wins.
 # Keyed by platform (§4.1). The MOST SPECIFIC matching key wins (lists replace, they don't merge).
 [priority]
-any     = ["cargo", "uv", "npm", "github-release", "script"]
-macos   = ["brew", "cargo", "uv", "npm", "github-release", "script"]
-debian  = ["apt", "cargo", "uv", "npm", "github-release", "brew", "script"]
-"ubuntu-22.04" = ["cargo", "apt", "uv", "npm", "github-release", "script"]   # 22.04's apt is too old for most CLIs
-windows = ["winget", "scoop", "cargo", "uv", "npm", "github-release", "script"]
+any     = ["cargo", "uv", "npm", "archive", "script"]
+macos   = ["brew", "cargo", "uv", "npm", "archive", "script"]
+debian  = ["apt", "cargo", "uv", "npm", "archive", "brew", "script"]
+"ubuntu-22.04" = ["cargo", "apt", "uv", "npm", "archive", "script"]   # 22.04's apt is too old for most CLIs
+windows = ["winget", "scoop", "cargo", "uv", "npm", "archive", "script"]
 
 # Tags a machine may declare. Declaring them here lets typos be caught.
 [tags]
@@ -264,7 +264,7 @@ Manual actions are discovered automatically from `manual/*.md` (see §9).
 | `arch` | `aarch64`, `x86_64` | runtime (`uname -m`, so it is right under Rosetta) |
 | `distro`, `distro_family`, `distro_version` | `ubuntu`/`debian`, `arch`, `fedora`, ... | `/etc/os-release` |
 | `wsl` | bool | `/proc/sys/kernel/osrelease` contains `microsoft` (case-insensitive; the current `helpers.sh` checks `*"Microsoft"*` and misses WSL2) |
-| `sudo` | bool | `sudo -n true` succeeds, or the user is root, unless overridden |
+| `sudo` | bool | the user is root, or `sudo -n true` succeeds, or the user is in an admin group (`sudo`, `wheel` or `admin`, from `id -Gn`); unless overridden. The matching rule is shown as the source detail (`detected (group admin)`). |
 | `gui` | bool | macOS: always true. Linux: `$WAYLAND_DISPLAY`/`$DISPLAY`/`loginctl`. Overridable. |
 | `hostname`, `user`, `home` | strings | |
 | `shell` | `zsh`, `bash`, `pwsh` | `$SHELL` |
@@ -303,13 +303,13 @@ name = "neovim"
 ppa = "ppa:neovim-ppa/unstable"         # all Ubuntus: use the PPA
 
 [platform."ubuntu-22.04"]
-prefer = ["github-release"]             # 22.04 specifically: PPA is dead, use the release tarball
+prefer = ["archive"]             # 22.04 specifically: PPA is dead, use the release tarball
 
-[platform."ubuntu-22.04".providers.github-release]
+[platform."ubuntu-22.04".providers.archive]
 repo  = "neovim/neovim"
 asset = 'nvim-linux-x86_64\.tar\.gz$'
 
-[platform."linux/aarch64".providers.github-release]
+[platform."linux/aarch64".providers.archive]
 asset = 'nvim-linux-arm64\.tar\.gz$'
 
 [platform.wsl]
@@ -378,7 +378,7 @@ pub trait Provider: Send + Sync {
 
 pub struct Caps {
     pub batch_install: bool,     // apt/brew: yes. cargo: no (one crate per invocation)
-    pub exact_version: Support,  // Yes (cargo, uv, npm, git, github-release) | Limited (apt: only versions in repo) | No (brew: @-formulae only)
+    pub exact_version: Support,  // Yes (cargo, uv, npm, git, archive) | Limited (apt: only versions in repo) | No (brew: @-formulae only)
     pub pin: bool,               // brew pin / apt-mark hold
     pub needs_root: bool,        // apt, dnf, pacman
     pub uninstall: bool,
@@ -402,14 +402,38 @@ Why it is shaped this way:
 | `uv` | `uv tool list --show-version-specifiers` | PyPI JSON API | `uv tool install pkg==ver` | Yes | no |
 | `npm` | `npm ls -g --json --depth=0` (prefix is managed by dots, see §10) | `npm outdated -g --json` | `npm i -g a@v b@v` | Yes | no |
 | `git` | `git -C dst rev-parse HEAD`, `status --porcelain`, ahead/behind | `git ls-remote` | clone / fetch+checkout rev | Yes (rev) | no |
-| `github-release` | version recorded in state + a `version` cmd | GitHub API `/releases/latest` (token optional) | download asset by `asset = "regex"` per os/arch, **verify checksum** if published, extract, place bin | Yes (tag) | no |
+| `archive` (alias `github-release`) | version recorded in state + a `version` cmd | GitHub API `/releases/latest`, or a `latest` URL/cmd for other hosts | download by URL template or GitHub `asset = "regex"`, **verify checksum**, then by asset type: extract and place bins, `dpkg -i` a `.deb`, hand a `.vsix` to `vscode-ext` (§5.2.5) | Yes (tag) | only for `.deb` |
+| `font` | the font dirs (`~/Library/Fonts`, `~/.local/share/fonts`, HKCU Fonts) | via its source (`archive`, brew cask) | download/extract the font files, place them, `fc-cache` (Linux) or register (Windows) (§5.2.4) | Yes | no |
+| `vscode-ext` | `code --list-extensions --show-versions` (one call; `bin = "cursor"`/`"codium"` for forks) | Marketplace / Open VSX API | `code --install-extension id@ver` | Yes | no |
 | `script` | `check` + `version` cmds | optional `latest` cmd | `install` cmd | whatever the script does | declared |
 | `winget`, `scoop` | `winget list` / `scoop export` | `winget upgrade` / `scoop status` | | Limited | no |
 | `mas` | `mas list` | `mas outdated` | `mas install id` | No | no |
 | `browser-ext` | browser profile dirs (§5.2.1) | AMO API (Firefox); none for the Chrome Web Store | external-extension file or policy | No (stores auto-update) | `policy` method only |
 | `pacman`, `dnf` | later; the trait is the same as apt's | | | | yes |
 
-`github-release` replaces `download_latest_release` in `helpers.sh`, together with every `curl ... | sh`. It uses a checksum if the release publishes one. When none is published, `dots` records the SHA-256 of the asset in the lock on first install (trust on first use) and warns if the asset for the same tag later changes.
+`archive` (§5.2.5) replaces `download_latest_release` in `helpers.sh`. Installer scripts piped from `curl` become `script` `fetch` (§5.3). It uses a checksum if the release publishes one. When none is published, `dots` records the SHA-256 of the asset in the lock on first install (trust on first use) and warns if the asset for the same tag later changes.
+
+**apt repositories.** An apt package may name the repository it comes from. The PPA is no longer refused:
+
+```toml
+[providers.apt]
+name = "code"
+repo = { url = "https://packages.microsoft.com/repos/code", suite = "stable", components = ["main"],
+         key = "https://packages.microsoft.com/keys/microsoft.asc", fingerprint = "BC528686B50D79E339D3721CEB3E94ADBE1229CF" }
+# or: repo = { ppa = "git-core/ppa" }
+# optional: pin = { origin = "packages.mozilla.org", priority = 1000 }   # e.g. Firefox from the PPA over the snap
+```
+
+- **Owned files.** `dots` writes the key to `/etc/apt/keyrings/dots-<name>.asc` (it must match `fingerprint`), the source to `/etc/apt/sources.list.d/dots-<name>.sources` (deb822 with `Signed-By`), and the optional pin to `/etc/apt/preferences.d/dots-<name>`. All three are owned files (§6.4).
+- **Updates.** Adding or changing a repository triggers one `apt-get update` before the batched install.
+- **Removal.** The repository is reference-counted: it is removed when the last package that names it goes.
+- **No `apt-key`.** It is never used. A key that doesn't match its fingerprint is `integrity-mismatch` (§6.6).
+
+**Local and git sources for cargo and uv.**
+- `[providers.cargo] path = "herdr-last-tab"` is relative to the package dir and runs `cargo install --path`. Its version is the crate version plus the repo rev, so a change in the repo makes it outdated.
+- `git = "…"` with `git_fetch_with_cli = true` sets `CARGO_NET_GIT_FETCH_WITH_CLI` for private ssh repos.
+- `[providers.uv]` accepts the same `path`/`git` keys (`uv tool install <path>`, `git+ssh://…`).
+- These replace the last `pip install --break-system-packages` and `cargo install --path` lines in `install_scripts/`.
 
 `pip` is deliberately **not** a provider in the sense of `pip install --break-system-packages`. Python CLIs go through `uv tool` (each tool gets an isolated venv). For libraries that a script needs (for example `libtmux` for a tmux plugin), declare a `uv` package with `[providers.uv] kind = "lib", python = "system"`. That runs `uv pip install --system`, and it is explicit and greppable. `scripts/requirements.txt` becomes a uv-managed venv at `~/.local/share/dots/venvs/scripts` (a `uv` package with `kind = "venv"`, `requirements = "requirements.txt"`).
 
@@ -481,6 +505,131 @@ disable-model-invocation = false
 - **Patch the body.** A patch layer (§6.1) changes lines of `SKILL.md` or any script in the skill: `overrides/packages/ponytail/SKILL.md.patch`. If their next version no longer matches the patch, `dots pull` stops and names it, the same as a stale override.
 - **Skills are code for your agent.** New or changed skills are listed with scripts in every `add`/`pull` review (§13), and skill files are **integrity-enforced** by default (§6.6).
 
+### 5.2.3 App plugins (worked example: herdr)
+
+Many apps have their own plugin manager: herdr, yazi (`ya pkg`), tmux (tpm), Neovim (lazy.nvim), zsh, VS Code. `dots` does not reimplement them. **The app's plugin manager is a provider, and each plugin is a package.** The app owns its plugin directory, lockfile and build steps. `dots` decides *which* plugins should exist, at *which* rev, and checks that they do.
+
+Rule of thumb for choosing the shape:
+
+| The plugin manager… | Model it as |
+|---------------------|-------------|
+| has a CLI with install/list/uninstall (herdr, `ya pkg`, `code --install-extension`) | a **declarative provider** (§5.4), one package per plugin |
+| is driven by a config file the app reads itself (lazy.nvim spec, tpm's `@plugin` lines, `.zsh_plugins.txt`) | **no provider**: the config file is a normal `[[files]]` entry of the app's package, plus a `post_files` hook that runs the manager's sync (`nvim --headless "+Lazy! restore" +qa`, `~/.tmux/plugins/tpm/bin/install_plugins`). Plugin versions live in the manager's own lockfile (`lazy-lock.json`), which is a tracked file. |
+| has nothing (a plugin is just a repo in a dir) | the `git` provider (§5.2) with `dst` |
+
+**herdr, today.** `install_herdr.sh` runs `herdr plugin list | grep -q X || herdr plugin install owner/X --yes` eight times, and `macos.conf.yaml` links all of `dotfiles/herdr/` into `~/.config/herdr`. herdr then writes `plugins/`, `plugins.json`, `.locks/`, sockets, logs and sessions into the repo (P6). Local plugins under `~/workspace/personal/herdr-plugins` were linked by hand and appear nowhere in the repo.
+
+**herdr, with `dots`.** The provider is declared once, in `dots.toml` or in the `herdr` package. A package may declare providers, scoped to its dependents. herdr's CLI already has everything a provider needs:
+
+```toml
+[providers.herdr-plugin]
+bootstrap = "herdr"                                        # the plugin's package gains requires = ["herdr"]
+installed = { cmd = "herdr plugin list --json", parse = "json:result.plugins[].{id: plugin_id, version: source.resolved_commit, source: source}" }
+install   = { github = "herdr plugin install {source} --ref {version|default} --yes",
+              local  = "herdr plugin link {source}" }      # keyed by source kind
+upgrade   = { github = "herdr plugin install {source} --ref {version|default} --yes" }  # --ref moves it; `herdr plugin update` only knows "latest"
+uninstall = { github = "herdr plugin uninstall {name}", local = "herdr plugin unlink {name}" }
+latest    = { github = "git ls-remote https://github.com/{source|repo} HEAD | cut -f1" }   # |repo = owner/repo without /subdir
+batch     = false                                          # herdr installs one plugin per call
+```
+
+```toml
+# packages/herdr-nvim-aware/package.toml
+schema = 1
+name = "herdr-nvim-aware"
+requires = ["herdr"]
+
+[providers.herdr-plugin]
+source  = "KoalaVim/herdr-nvim-aware"          # owner/repo[/subdir]; the plugin_id may differ from the package name:
+id      = "herdr-nvim-aware"                    # matched against plugin_id in `list --json` (e.g. "persiyanov.reviewr")
+version = "5e9c1ec"                             # rev, or "latest"; recorded as resolved_commit in dots.lock
+enabled = true                                  # false = installed but disabled (`herdr plugin disable`)
+
+# packages/extrakto-herdr/package.toml: one of my own, developed locally
+[providers.herdr-plugin]
+source = "local:~/workspace/personal/herdr-plugins/extrakto-herdr"   # `herdr plugin link`, versionless
+```
+
+A bundle `herdr-plugins` lists them. `status` shows each plugin as a normal row (`ok`, `missing`, `outdated` against `latest`).
+
+**What this fixes and decides:**
+
+- **One batched read.** `installed()` is a single `herdr plugin list --json`, never one call per plugin (§5.1).
+- **Pinning works.** `resolved_commit` is the installed version, `--ref` installs an exact rev, and `dots.lock` records it like a cargo git rev. `dots upgrade herdr-navigator` moves the rev, which herdr's own `update` can't do selectively.
+- **Plugin config is a file of the plugin's package.** `herdr-automatic-rename/config.sh` belongs to the `herdr-automatic-rename` package as a `[[files]]` entry. Its `dst` comes from the app (`herdr plugin config-dir <id>`), exposed as a path variable that the provider fills: `dst = "{plugin_config}/config.sh"`. Provider path variables are resolved in the files phase, which runs after installs (§14.1), so the plugin exists by then. If the plugin isn't installed yet, `plan` shows the destination as `{plugin_config}/config.sh (resolved after install)`.
+- **Enabled is a setting, not an install.** `enabled = false` maps to `herdr plugin disable <id>`. It is checked via the `enabled` field of the same list call, so a disabled plugin is `ok`, not `missing`.
+- **Build steps are code that runs on your machine.** herdr plugins declare `build` commands in `herdr-plugin.toml` (`cargo build --release`, `cc …`, and in one case `curl … | bash`). herdr runs them on install, so `dots` cannot sandbox them. The provider reads the manifest at the pinned rev **before** installing and lists its `build`, `startup` and `events` commands in the `add`/`pull` code review (§13), exactly like package scripts. A changed build command on `pull` is a review item. `scripts = "deny"` (§13) refuses plugins that have any.
+- **The repo stops being herdr's runtime dir.** The `herdr` package links `config.toml` (a `render`, §6.1) and `herdr-256color.terminfo` as files. `plugins/`, `plugins.json`, `.locks/`, `*.sock`, `*.log`, `sessions/` and `session-snapshots/` stay in `~/.config/herdr`, owned by herdr. While the old directory link still exists, `status` reports them as `foreign-entries`, and `import dotbot` (§16) proposes this split.
+- **herdr's own install moves too.** `cargo install --git https://github.com/ofirgall/herdr` becomes a `cargo` package with `git = …`. `herdr-last-tab` (`cargo install --path`) becomes a `cargo` package with `path = "herdr-last-tab"`, relative to the repo. `tic -x …terminfo` becomes the `herdr` package's `post_files` hook, with a `check` of `infocmp herdr-256color`.
+
+**Declarative provider extensions this needs** (all general, not herdr-specific; added to §5.4): `install`/`upgrade`/`uninstall`/`latest` may be a table keyed by **source kind** (`github`, `local`, …, derived from the `source` prefix); `parse = "json:…"` may project several fields (`id`, `version`, `source`, `enabled`); providers may supply **path variables** to their packages (`{plugin_config}`); and a provider may declare a **manifest reader** (`review = { manifest = "herdr-plugin.toml", commands = ["build[].command", "startup[].command", "events[].command"] }`) so the code review can show what an install will run.
+
+### 5.2.4 Fonts (`font`)
+
+Fonts are installed three different ways in `install_scripts/` (brew casks on macOS, release tarballs on Linux, zip plus a registry loop on Windows). In `dots`, a font is one package:
+
+```toml
+# packages/font-jetbrains-mono-nerd/package.toml
+schema = 1
+name = "font-jetbrains-mono-nerd"
+version = "3.4.0"
+
+[providers.font]
+source = "github:ryanoasis/nerd-fonts"           # any `archive` source (§5.2.5)
+asset  = "JetBrainsMono.tar.xz"
+files  = ["*.ttf"]                               # glob inside the archive; default *.ttf, *.otf
+sha256 = "…"                                     # optional author pin (§6.6)
+
+[providers.brew]                                 # preferred on macOS via [priority]
+name = "font-jetbrains-mono-nerd-font"
+cask = true
+```
+
+- **Ownership.** `font` is an ordinary provider candidate. Provider selection (§5.5) picks `brew` (the cask) or `font` per platform, and the chosen provider owns `installed()`. On macOS with the cask selected, `brew` reports the font. The `font` provider is only consulted where it is chosen.
+- **Placement.** Files go to the per-user font dir: macOS `~/Library/Fonts`, Linux `~/.local/share/fonts/dots/<pkg>/`, Windows `%LOCALAPPDATA%\Microsoft\Windows\Fonts`. They are owned files.
+- **Registration.** Linux runs one `fc-cache -f` per run, not one per font. Windows writes the `HKCU\…\Fonts` values, which are owned registry entries (§6.7).
+- **`installed()`** reads the ownership ledger and checks that the files still exist. No process runs.
+- **Versions.** The version is the release tag, so `outdated` works. The lock records the content hash (§6.6).
+
+### 5.2.5 Archives and release assets (`archive`)
+
+`github-release` generalizes to any URL. The GitHub form stays as sugar:
+
+```toml
+[providers.archive]                     # Go from go.dev
+url     = "https://go.dev/dl/go{version}.{os}-{arch|go}.tar.gz"
+latest  = { url = "https://go.dev/VERSION?m=text", parse = "regex:^go(\\S+)" }
+sha256  = { url = "https://go.dev/dl/?mode=json", parse = "json:…" }   # or a literal, or omitted (trust on first use)
+extract = { strip = 1, to = "{data}/go" }         # an owned directory, user-level: no /usr/local, no sudo
+bins    = ["bin/go", "bin/gofmt"]                 # linked into ~/.local/bin
+
+[providers.archive]                     # bluetuith from GitHub
+source = "github:darkhz/bluetuith"
+asset  = { linux-x86_64 = "bluetuith_.*_Linux_x86_64.tar.gz", macos-aarch64 = "…" }
+```
+
+- **Asset types.** The asset type decides the install step:
+  - archives (`tar.*`, `zip`) are extracted and their bins linked;
+  - a single binary is placed;
+  - a `.deb` is installed with `dpkg -i` and needs root (the taskwarrior-tui case);
+  - a `.vsix` is handed to `vscode-ext` (codelldb).
+- **Checksums.** A published checksum is verified first. Otherwise the asset hash is recorded on first install and checked on every later download (§6.6).
+- **What it replaces:** `download_latest_release` in `helpers.sh`, `install_go.sh`, Zig in `install_ghostty.sh`, proton-ge (with `extract.to` under Steam's `compatibilitytools.d`) and win32yank.
+
+### 5.2.6 Bundled provider definitions
+
+Some providers are user-defined (§5.4) but common enough to ship with `dots`, as TOML in its standard library. A repo enables one with `[providers] use = ["gh-ext", "pi-package"]`, and can override any of its keys.
+
+| id | installed() via | install | covers |
+|----|-----------------|---------|--------|
+| `gh-ext` | `gh extension list` | `gh extension install owner/repo [--pin rev]` | gh-dash, gh-enhance, gh-markdown-preview (all 3 OSes) |
+| `herdr-plugin` | `herdr plugin list --json` | `herdr plugin install` / `link` (§5.2.3) | 8 herdr plugins |
+| `pi-package` | `pi list` | `pi install npm:…` / `git:…` | pi-subagents, pi-powerline-footer, pi-community-themes |
+| `hyprpm` | `hyprpm list` | `hyprpm add <url> && hyprpm enable <name>` | hyprland-virtual-desktops, monocle |
+| `psmodule` | `Get-InstalledModule \| ConvertTo-Json` | `Install-Module <name> -Scope CurrentUser -RequiredVersion <ver>` | BurntToast, PSFzf |
+
+The bundled definitions run the same conformance suite as built-in providers (§5.1), driven by recorded fixtures.
+
 ### 5.3 The `script` provider (the escape hatch, kept honest)
 
 ```toml
@@ -495,7 +644,14 @@ shell     = "bash"                                    # bash | sh | pwsh; defaul
 needs_root = false
 interactive = false                                    # true = stdin attached, cannot run in parallel
 timeout   = "20m"
+fetch     = { url = "https://sh.rustup.rs", sha256 = "…" }   # optional: download this exact file, verify, run it as `install`
 ```
+
+**`curl | sh` becomes `fetch`.** rustup, Homebrew, bun, deno, fx and vicinae ship installer scripts. With `fetch`:
+- `dots` downloads the installer to the package's cache and checks its hash. `sha256` is optional. When it is present, it must match. When it is absent, the hash in `dots.lock` must match. With neither, the hash is recorded on first use and written to the lock (§6.6). `integrity = "enforce"` makes a missing `sha256` a lint error.
+- It then runs the installer as `install`, with `{fetched}` as its path: `install = "sh {fetched} -y --no-modify-path"`.
+- The installer is shown in the code review (§13) like any script, and a changed hash on `pull` is a review item.
+- An unpinned `curl … | sh` in a script is a lint warning that suggests `fetch`.
 
 The runtime contract for every script the engine runs:
 
@@ -521,7 +677,16 @@ install   = "go install {source}@{version|latest}"
 batch     = false
 ```
 
-Placeholders are templated by minijinja with the spec and facts in scope. If a declarative provider proves popular, promote it to built-in Rust.
+Placeholders are templated by minijinja with the spec and facts in scope. Filters on `source`: `|repo` (`owner/repo`, dropping any `/subdir`), `|kind` (`github`, `local`, …) and `|path` (for `local:` sources, expanded). If a declarative provider proves popular, promote it to built-in Rust.
+
+Further keys, needed by app plugin managers (§5.2.3):
+
+- **Optional commands:** `upgrade`, `uninstall` and `latest`. Without `uninstall`, the plan shows "cannot uninstall".
+- **Per-source-kind commands:** any command may be a table keyed by the kind of `source` (`github = "…"`, `local = "…"`). The kind is the source's prefix (`local:`, `github:`), defaulting to `github` for a bare `owner/repo`.
+- **Multi-field parsing:** `parse = "json:<path>.{id: …, version: …, enabled: …}"` projects several fields from one call. `enabled = false` on an installed entry reports as `ok` (disabled), not `missing`.
+- **Path variables for packages:** `vars = { plugin_config = "herdr plugin config-dir {id}" }`. Packages using the provider can then write `dst = "{plugin_config}/…"`.
+- **Code review of what an install runs:** `review = { manifest = "<file in the plugin source>", commands = ["<json/toml path>", …] }`. At the pinned rev, `add`/`pull` list those commands in the code review (§13).
+- **Scope:** a provider declared in a package's `package.toml` is visible only to packages that `requires` that package, directly or transitively. Being in the same bundle is not enough. A provider declared in `dots.toml` is visible to every package.
 
 ### 5.5 Provider selection algorithm
 
@@ -551,6 +716,7 @@ Every file entry has a `mode`:
 | `fragment` | contribute part of a file that **several packages** assemble | the same as render | `~/.gitconfig` gets `[delta]` from the delta package and `[core]` from base |
 | `git` | clone a repo to dst (git provider) | a directory | shaders, plugin managers (tpm), KoalaConfig |
 | `dir` | `mkdir -p` | a directory | `~/workspace/personal` (replaces dotbot `create`) |
+| `terminfo` | compile the source with `tic -x -o ~/.terminfo`; `ok` when `infocmp -x <name>` matches the compiled entry | a compiled terminfo entry | `herdr-256color` (undercurl), `tmux-256color` on macOS |
 
 Per-platform destinations: `dst = { default = "~/.config/ez/config.toml", macos = "{app_support}/ez/config.toml" }`.
 
@@ -650,9 +816,65 @@ rev  = "f4522416c0d0…"
 tree = "sha256:9b1f…"          # hash of the package dir at that rev
 ```
 
-Policy per package, bundle or upstream: `integrity = "warn" | "enforce"`. The default is `enforce` for skills, scripts and hooks (code that runs, or that instructs an agent), and `warn` for configs, because apps rewrite their own configs and that is `modified`, not an attack. Under `enforce`, a changed deployed file is `tampered`: `apply` restores it, and `dots adopt` refuses unless you pass the item explicitly. `dots verify [item]` recomputes every hash (sources, deployed files, binaries from `github-release`) and lists each mismatch with what it expected and where that expectation came from. `pull` shows changed hashes of enforced files first, with the scripts.
+Policy per package, bundle or upstream: `integrity = "warn" | "enforce"`. The default is `enforce` for skills, scripts and hooks (code that runs, or that instructs an agent), and `warn` for configs, because apps rewrite their own configs and that is `modified`, not an attack. Under `enforce`, a changed deployed file is `tampered`: `apply` restores it, and `dots adopt` refuses unless you pass the item explicitly. `dots verify [item]` recomputes every hash (sources, deployed files, binaries from `archive`) and lists each mismatch with what it expected and where that expectation came from. `pull` shows changed hashes of enforced files first, with the scripts.
 
 ---
+
+### 6.7 System settings (`[[defaults]]`, `[[registry]]`, `[[xdg]]`)
+
+Some config isn't a file. macOS keeps it in `defaults` domains, Windows in the registry, and Linux desktops in `xdg-mime`/`xdg-settings`. `install_scripts/mac/setup_once.sh` alone runs 17 `defaults write` lines that nobody re-checks. In `dots`, these are declared values on a package, with drift detection like files:
+
+```toml
+[[defaults]]                                   # macOS; implies when = 'os = "macos"'
+domain = "NSGlobalDomain"
+key    = "KeyRepeat"
+value  = 2                                     # type from the TOML value: int, float, bool, string, array, dict
+restart = []                                   # apps to restart after a change, e.g. ["Dock"]
+
+[[defaults]]
+domain = "com.apple.symbolichotkeys"
+key    = "AppleSymbolicHotKeys.64"             # a dotted key edits one entry of a dict (dict-add semantics)
+value  = { enabled = false }
+
+[[defaults]]
+domain = "com.apple.universalaccess"
+key    = "cursorFill"
+value  = { red = 1.0, green = 0.4, blue = 0.0, alpha = 1.0 }
+root   = true                                  # `sudo defaults write`; part of the run's one sudo prompt (§14)
+
+[[registry]]                                   # Windows; implies when = 'os = "windows"'
+key   = 'HKCU\Control Panel\Keyboard'
+name  = "KeyboardDelay"
+type  = "REG_SZ"
+value = "0"
+
+[[xdg]]                                        # Linux
+mime    = ["text/markdown"]                    # xdg-mime default <app> <mime>…
+app     = "gh-markdown-preview.desktop"
+# or: setting = "default-web-browser", value = "hypr-browser.desktop"
+```
+
+- **Read before write.** `plan` reads each value (`defaults read`/`export`, the registry API, `xdg-mime query`) in one batched pass per domain or hive. Only values that differ become steps.
+- **Status vocabulary.** The states are the same as for files (§6.3). `ok` means the value matches. `drift` means someone changed it, with the observed and wanted values shown, plus a `dots adopt` resolution that writes the observed value back into the package.
+- **Ownership and removal.** The original value is recorded the first time `dots` changes a key, in the ownership ledger, the same as a file backup. Removing the declaration restores it (or deletes the key if it didn't exist). `dots restore <run-id>` works for these too.
+- **`restart`** collects apps across the run and restarts each once at the end (`killall Dock`). It is the same mechanism as a manual action's `requires: [restart-app:<name>]` (§9): both feed one aggregated list. An entry that only takes effect after logout declares `requires = ["logout"]`. When it changes, `dots` raises an auto-closing "log out to apply" item (§9) instead of a silent no-op.
+- **Out of scope.** These are deliberately limited to user preferences. Anything that needs MDM or SIP changes is a manual action.
+
+### 6.8 Services (`[service]`)
+
+```toml
+[service]
+name    = "sketchybar"
+manager = "auto"            # auto | brew | launchd | systemd-user | windows-startup
+enabled = true              # start at login
+running = true              # and keep it running now
+# launchd/systemd-user only: unit = "services/autolock.service"   (a file in the package, linked into the unit dir)
+```
+
+- **Choosing the manager.** `auto` picks `brew services` when the package was installed by brew on macOS, `launchd` (a `LaunchAgents` plist owned as a file) for other macOS services, `systemd --user` on Linux, and the Startup folder or the tool's own autostart (`komorebic enable-autostart`) on Windows.
+- **Order.** Services run after files and settings in the apply pipeline (§14.1), so a service starts with its config in place. A changed config file (or unit) restarts the service once, but only if it is running. A service with `running = false` is never started by a config change.
+- **Status.** `status` shows `running`, `stopped` or `failed`, read with one call per manager (`brew services list --json`, `launchctl print gui/<uid>`, `systemctl --user show`).
+- **What it fixes.** `services/autolock.service` is linked today but never enabled. With `enabled = true` it would be enabled, and `status` would say so if it isn't.
 
 ## 7. Status and visibility
 
@@ -735,7 +957,7 @@ How it is built. The steps below run in parallel per provider, and the results s
    | cargo | the `bins` arrays in `~/.cargo/.crates2.json` (exact, no subprocess) |
    | uv | `uv tool list --show-paths` (entry points per tool) |
    | npm | the `bin` field of each global package's `package.json` under the dots-managed prefix |
-   | github-release / script / shims | the paths dots placed, recorded in `state.json` when it installed them. Scripts may also declare `bins = [...]`. |
+   | archive / script / shims | the paths dots placed, recorded in `state.json` when it installed them. Scripts may also declare `bins = [...]`. |
    | git | none, unless the package declares `bins` |
    | custom providers | an optional `bins` command template; otherwise the package's declared `bins` |
 
@@ -765,7 +987,7 @@ There is **one small grammar** with five forms. It deliberately has no `^`, no `
 | `"1.2.3"` | **Exact.** | `1.2.3` only |
 | `"1.2"` / `"1"` | **Prefix**, matched component by component. The newest matching version wins. | `"1.2"` → `1.2.0`, `1.2.17`; not `1.20.0` or `1.3.0` |
 | `">=1.2"` | **Floor.** Any version at or above it. The newest wins. | `1.2.0`, `1.9`, `2.0` |
-| `"git:<ref>"` | A git ref (sha, tag or branch), for git-sourced packages only (git, cargo-git, github-release by tag). | `git:v0.4.1`, `git:main`, `git:9e1c0b7` |
+| `"git:<ref>"` | A git ref (sha, tag or branch), for git-sourced packages only (git, cargo-git, archive by tag). | `git:v0.4.1`, `git:main`, `git:9e1c0b7` |
 
 That covers every real case: "don't care" (latest), "stay on the 0.11 line" (prefix), "I need a feature from 1.4" (floor), "reproduce exactly" (exact), and "track a repo" (git).
 
@@ -804,7 +1026,7 @@ provider = "git"
 rev = "3a77c1e..."
 ```
 
-- It is **keyed by platform** because brew on macOS and apt on Ubuntu resolve the same package to different versions. One lock covers all machines, and each machine reads its own rows. The key is the machine's **most specific chain key plus its arch** (`ubuntu-24.04/x86_64`, `macos-15/aarch64`), because 22.04 and 24.04 apt really do differ. For providers whose versions don't depend on the platform (cargo, uv, npm, git, github-release by tag), the row uses `platform = "*"` and is shared.
+- It is **keyed by platform** because brew on macOS and apt on Ubuntu resolve the same package to different versions. One lock covers all machines, and each machine reads its own rows. The key is the machine's **most specific chain key plus its arch** (`ubuntu-24.04/x86_64`, `macos-15/aarch64`), because 22.04 and 24.04 apt really do differ. For providers whose versions don't depend on the platform (cargo, uv, npm, git, archive by tag), the row uses `platform = "*"` and is shared.
 - It is sorted deterministically, one block per entry, so merging between branches and worktrees causes few conflicts. `dots lock --fix` regenerates the file after a bad merge.
 - `apply` installs the **locked** version where the provider supports exact versions. Where it does not (brew, apt), it installs what the repo offers and reports `drift` if that differs. The lock is honest about what it can guarantee: `dots status --strict` treats `Limited` drift as an error, and by default it is a warning.
 - `dots upgrade [pkg...|--all] [--provider cargo]` upgrades, rewrites the lock entries for **this platform** and journals the change. It does not commit. `dots upgrade --commit` makes one commit with a generated message: `dots: upgrade bottom 0.9.6→0.10.2, delta 0.17→0.18 (macos-aarch64)`.
@@ -898,6 +1120,7 @@ dots todo check                 # run all `check`s; auto-close what passes
 - Status is per machine in the state: `{id, revision, status: pending|done|skipped|auto, at, repo_rev, note}`.
 - A `check` turns a todo into a self-verifying item. `apply` runs the checks at the end and closes what passes. Anything without a check stays pending until a human marks it done.
 - `apply` ends with a summary block such as "2 manual actions pending, 1 requires logout". This is where today's `MANUAL.md` content goes, one file per action.
+- **Account and session changes are manual actions with a check**, because they need a re-login anyway. Examples are `chsh -s zsh` (`check: '[ "$(dscl . -read ~ UserShell | awk "{print \$2}")" = "$(command -v zsh)" ]'`, or `getent passwd` on Linux) and group membership (`usermod -aG dialout,input`, `check: 'id -nG | grep -qw dialout'`, `requires: [logout]`). They use `after: always`, so they are checked on every run. `dots` doesn't change accounts itself.
 - Both manual items and scripts that need a terminal set `interactive`. `apply` collects them and runs them **last, serially, with a prompt before each**. An unattended `apply --yes` never blocks on them: they become todos instead.
 
 ---
@@ -978,7 +1201,9 @@ dots roots                      # list known roots, which one is active, danglin
 
 Two complementary records, each answering a different question.
 
-**A. Repo history ("what did I decide?")**: git itself. Package dirs and `dots.lock` are committed, so the git log of `packages/<p>` and its lock rows tells you when the package was added and when its version moved. Commits made by dots (`upgrade --commit`, `add`, `pin`) carry trailers:
+**A. Repo history ("what did I decide?")**: git itself. Package dirs and `dots.lock` are committed, so the git log of `packages/<p>` and its lock rows tells you when the package was added and when its version moved.
+
+**dots never commits on its own.** Repo-changing commands (`upgrade`, `pin`, `unpin`, `add`, `pull`, `eject`, `uneject`, `remove`, `config set --repo`) edit files and leave them uncommitted. A dirty repo shows in `status`. Only with `--commit` does the command make one commit. `apply` never commits. Commits made by dots carry trailers:
 
 ```
 dots: add ghostty from ofirgall/dotfiles@f4522416
@@ -1166,7 +1391,7 @@ resolve ──► package set (bundles ∪ requires, minus exclude, `when` appli
 query  ──► provider.installed() ×N in parallel; fs stat of all dsts; state.json
    │
 diff   ──► Plan: typed actions with deps
-   │         Bootstrap(provider) → Install/Upgrade(batched per provider) → Files → Hooks → Env → Todos(check)
+   │         Bootstrap(provider) → Install/Upgrade(batched per provider) → Files → Settings (§6.7) → Services (§6.8) → Hooks → Env → Todos(check)
    │
 show   ──► `plan` stops here. `apply` prints it and asks unless --yes or the plan only touches files.
    │
@@ -1190,17 +1415,19 @@ dots apply [pkg|bundle...] [--files-only|--packages-only] [--yes] [--dry-run] [-
 dots plan  [...same selectors]
 dots status | outdated | why | which | bins | doctor | facts
 dots upgrade [pkg...|--all] [--provider X] [--commit]
-dots pin | unpin <pkg> [ver]
-dots remove <pkg>                     # removes from bundles + uninstalls + unlinks (asks)
+dots pin <pkg> [ver] [--commit]
+dots unpin <pkg> [--commit]
+dots remove <pkg> [--commit]          # removes from bundles + uninstalls + unlinks (asks)
 dots migrate <pkg> --to <provider>
-dots add bundle|pkg <src>:<name> [--copy] | search | sources | pull | eject | uneject   # §13
+dots add bundle|pkg <src>:<name> [--copy] [--commit] | search | sources   # §13
+dots pull | eject | uneject [--commit]   # §13
 dots todo [show|done|skip|check]
 dots adopt <dst> [--layer L]
 dots try | use | roots | diff
 dots log [pkg]
 dots verify [item]                    # recompute every checksum (§6.6)
 dots restore <run-id>
-dots config list|get|set|unset|explain     # §17
+dots config list|get|set|unset|explain     # §17 (`set --repo --commit` commits)
 dots questions                             # §17/§19
 dots show <pkg> [--effective]
 dots override list|edit|diff <address>        # §18
@@ -1220,7 +1447,7 @@ dots init --from ofirgall/dotfiles          # clones to ~/dotfiles, asks bundles
 dots apply
 ```
 
-Homebrew, rustup and uv are ordinary packages that act as provider bootstraps. `dots` itself is a package too (provider `github-release`), so it upgrades itself through the same path and its version is recorded in the lock.
+Homebrew, rustup and uv are ordinary packages that act as provider bootstraps. `dots` itself is a package too (provider `archive`), so it upgrades itself through the same path and its version is recorded in the lock.
 
 ---
 
@@ -1263,7 +1490,24 @@ Testing strategy:
    - Links are grouped into packages by the first path component of their source (`dotfiles/ghostty` → package `ghostty`) and the files are moved with `git mv`, so history is preserved.
    - `shell:` steps become `script` packages with `check = "false  # TODO"`, so they show as **unverified** in `status` until someone writes a real check. Nothing pretends to be idempotent.
    - `create:` steps become `dir` entries.
-2. Hand-convert the hot paths: the `brew install` lines, the `cargo install` lines and the `apt install` lines become declarative packages (`dots import scan install_scripts/` can propose them by grepping the `brew|apt|cargo|pip|npm install` lines, and you confirm each one).
+2. Hand-convert the hot paths: the `brew install` lines, the `cargo install` lines and the `apt install` lines become declarative packages (`dots import scan install_scripts/` can propose them by grepping the `brew|apt|cargo|pip|npm install` lines, and you confirm each one). The scan also recognizes the other mechanisms the survey of `install_scripts/` found, and proposes the matching package shape:
+
+   | Today | Becomes |
+   |-------|---------|
+   | `add-apt-repository ppa:…`, keyring + `sources.list.d` lines | `[providers.apt] repo = …` (§5.2) |
+   | `cargo install --path`, `--git` with `CARGO_NET_GIT_FETCH_WITH_CLI` | `[providers.cargo] path`/`git` (§5.2) |
+   | `pip install --break-system-packages`, `git+ssh://…` | `uv` tool, lib or git package |
+   | `download_latest_release`, `wget …/releases/download/…`, go.dev/ziglang tarballs, `.deb` + `dpkg -i` | `archive` (§5.2.5) |
+   | nerd-fonts/Maple/Cilantro downloads, `font-*` casks, the Windows font registry loop | `font` (§5.2.4) |
+   | `code --install-extension` loop over `editors/vscode/extensions` | one `vscode-ext` package per line |
+   | `gh extension install`, `herdr plugin install`, `pi install`, `hyprpm add`, `Install-Module` | bundled provider definitions (§5.2.6) |
+   | `curl … \| sh` (rustup, brew, bun, deno, fx, vicinae) | `script` with `fetch` (§5.3) |
+   | `defaults write`, `reg add`/`Set-ItemProperty`, `xdg-mime default` | `[[defaults]]`, `[[registry]]`, `[[xdg]]` (§6.7) |
+   | `brew services start`, `systemctl --user`, Startup-folder copies | `[service]` (§6.8) |
+   | `tic -x …terminfo` | `terminfo` file mode (§6) |
+   | `chsh`, `usermod -aG` | manual actions with a check (§9) |
+   | tpm/zinit/lazy bootstrap clones | `git` packages; their plugin lists stay config files (§5.2.3) |
+   | source builds (ghostty via zig, tmux, gamescope, aerospace-switcher) | `script` packages with a real `check` |
 3. Submodules become `git` packages. Remove `dotbot`, the `.githooks` submodule auto-add and the `Makefile update`.
 4. `MANUAL.md` sections become `manual/*.md` files under the owning packages.
 5. herdr `generate-config.sh` becomes a `render` with `[files.merge]` paths. `DEV_REPLACE_PATHS` turns into `"<path>" = "replace"` lines, and since replace is now the default for arrays, most lines simply go away.
@@ -1314,7 +1558,7 @@ Rules:
   - directives inside config files (§17.3),
   - structured patches (§17.4),
   - scripts as `DOTS_SETTING_<NAME>` (lists are newline-joined; bools are `1`/`0`).
-- A setting may choose behaviour beyond files. For example, `[providers.brew] when = 'setting.channel = "stable"'` / `[providers.github-release] when = 'setting.channel = "nightly"'` lets a setting choose between stable and nightly neovim.
+- A setting may choose behaviour beyond files. For example, `[providers.brew] when = 'setting.channel = "stable"'` / `[providers.archive] when = 'setting.channel = "nightly"'` lets a setting choose between stable and nightly neovim.
 
 ### 17.2 Where values come from (precedence, low → high)
 
@@ -1476,7 +1720,7 @@ Package (yours, copied or followed, it doesn't matter):
 ```toml
 # overrides/packages/ghostty/override.toml
 schema = 1
-prefer  = ["github-release", "brew"]
+prefer  = ["archive", "brew"]
 version = "1.2"                                   # stay on the 1.2 line
 requires = { add = ["nerd-fonts-extra"] }
 
@@ -1522,7 +1766,7 @@ Repo manifest:
 ```toml
 # overrides/dots.toml
 [priority]
-macos = { prepend = ["github-release"] }          # prefer release binaries over brew on macOS
+macos = { prepend = ["archive"] }          # prefer release binaries over brew on macOS
 [provider.brew]
 cask_args = ["--no-quarantine"]
 [tags]
@@ -1566,8 +1810,10 @@ The architecture requirements that follow from the skill:
 
 ---
 
-## 21. Open questions (decide before implementing)
+## 21. Decisions on the former open questions
 
-1. **Should `apply` auto-commit lock changes?** Proposal: never by default. `--commit` is opt-in. A dirty lock shows in `status`.
-2. **Committed machine profiles (`machines/*.toml`)**: are they worth it, or is local-only `machine.toml` enough? Proposal: support both, with the local file overriding the committed one.
-3. **Interactive TUI (`dots ui`, ratatui)** for status/todo/plan: v1 or later? Proposal: later. Ship `--json` first, so the TUI and the statusbar both consume the same data.
+All three are resolved (change `implement-dots-v1`, design D8 and D9).
+
+1. **Auto-commit of lock changes: resolved, never.** Nothing commits without `--commit` (§12). `apply` never commits. This extends to `add` and `pull`, so the repo only gains an entry when you commit it. A dirty lock shows in `status`.
+2. **Committed machine profiles (`machines/*.toml`): resolved, both are supported.** A committed profile and a local `machine.toml` can coexist. The local file wins, key by key.
+3. **Interactive TUI (`dots ui`): resolved, later.** v1 ships `--json` first, so a later TUI and the status bar consume the same reports.

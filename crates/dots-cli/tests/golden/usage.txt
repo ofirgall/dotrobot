@@ -1,0 +1,80 @@
+Usage: dots init [--from <source>] [--root <path>] [--defaults]
+
+Usage: dots apply [<pkg|bundle>...] [--files-only|--packages-only] [--yes] [--dry-run] [--allow-downgrade] [--root <path>] [--home <dir>]
+
+Usage: dots plan [<pkg|bundle>...] [--files-only|--packages-only] [--check]
+
+Usage: dots status [<pkg>] [--all] [--strict]
+
+Usage: dots outdated [<pkg>...] [--refresh]
+
+Usage: dots why <pkg>
+
+Usage: dots which <bin>
+
+Usage: dots bins [<pkg|provider>] [--managed|--unmanaged|--unknown|--shadowed]
+
+Usage: dots doctor
+
+Usage: dots facts
+
+Usage: dots upgrade [<pkg>...|--all] [--provider <id>] [--commit]
+
+Usage: dots pin <pkg> [<version>] [--commit]
+
+Usage: dots unpin <pkg> [--commit]
+
+Usage: dots remove <pkg> [--commit]
+       dots remove bundle|pkg <item> [--commit]
+
+Usage: dots migrate <pkg> --to <provider>
+
+Usage: dots add bundle|pkg <source>:<name> [--copy] [--as <name>] [--no-deps] [--dry-run] [--yes] [--exclude <pkg>...] [--commit]
+       dots add bundle|pkg <name> [--copy] [--as <name>] [--no-deps] [--dry-run] [--yes] [--exclude <pkg>...] [--commit]
+
+Usage: dots search <source> [<query>]
+
+Usage: dots sources
+
+Usage: dots pull [<source|item>] [--dry-run] [--to <rev>] [--commit]
+
+Usage: dots eject <address> [--commit]
+
+Usage: dots uneject <address> [--commit]
+
+Usage: dots todo [show <id>|done <id> [--note <text>]|skip <id>|check]
+
+Usage: dots adopt <dst> [--layer <layer>] [--as-patch] [--machine]
+
+Usage: dots try <name> [--from <ref>]
+
+Usage: dots use <name|path|->
+
+Usage: dots roots
+
+Usage: dots diff <a>..<b>
+
+Usage: dots log [<pkg>] [--since <duration>] [--host <name>]
+
+Usage: dots verify [<item>]
+
+Usage: dots restore <run-id>
+
+Usage: dots config list | get <pkg>.<key> | set <pkg>.<key> <value> [--repo [--commit]|--machine] | unset <pkg>.<key> | explain <pkg>.<key>
+
+Usage: dots questions
+
+Usage: dots show <address> [--effective]
+
+Usage: dots override list | edit <address> [--machine] | diff <address>
+
+Usage: dots skill install [--agent <id>...]
+
+Usage: dots lint
+
+Usage: dots lock --fix
+
+Usage: dots import dotbot <file>... | scan <dir>
+
+Usage: dots completions <bash|zsh|fish|pwsh>
+

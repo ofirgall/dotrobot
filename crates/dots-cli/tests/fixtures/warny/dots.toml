@@ -1,0 +1,4 @@
+schema = 1
+
+[priority]
+any = ["script"]

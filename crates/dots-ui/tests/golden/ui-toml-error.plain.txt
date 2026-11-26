@@ -1,0 +1,3 @@
+error[schema-unknown-key]: unknown key `colour` in ~/.config/dots/ui.toml:1
+  at ~/.config/dots/ui.toml:1
+  -> Did you mean `color`?

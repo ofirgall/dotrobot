@@ -1,0 +1,233 @@
+{
+  "$id": "https://dots.dev/schemas/dots-which.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "data": {
+      "properties": {
+        "bin": {
+          "type": "string"
+        },
+        "copies": {
+          "items": {
+            "properties": {
+              "bin": {
+                "type": "string"
+              },
+              "class": {
+                "enum": [
+                  "managed",
+                  "orphan",
+                  "unmanaged",
+                  "unknown"
+                ]
+              },
+              "hint": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "native": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "notes": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "package": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "path": {
+                "type": "string"
+              },
+              "provider": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "real_path": {
+                "type": "string"
+              },
+              "shadowed": {
+                "type": "boolean"
+              },
+              "shim": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "version": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "wins": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "bin",
+              "path",
+              "real_path",
+              "package",
+              "native",
+              "provider",
+              "version",
+              "class",
+              "wins",
+              "shadowed",
+              "shim",
+              "notes",
+              "hint"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "bin",
+        "copies"
+      ],
+      "type": "object"
+    },
+    "errors": {
+      "items": {
+        "properties": {
+          "code": {
+            "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$",
+            "type": "string"
+          },
+          "hint": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "provenance": {
+            "items": {
+              "properties": {
+                "col": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "file": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "line": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "source": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "source"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "code",
+          "message",
+          "hint",
+          "provenance"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "ok": {
+      "type": "boolean"
+    },
+    "schema": {
+      "const": "dots/which@1"
+    },
+    "warnings": {
+      "items": {
+        "properties": {
+          "code": {
+            "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$",
+            "type": "string"
+          },
+          "hint": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "provenance": {
+            "items": {
+              "properties": {
+                "col": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "file": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "line": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "source": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "source"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "code",
+          "message",
+          "hint",
+          "provenance"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "schema",
+    "ok",
+    "data",
+    "warnings",
+    "errors"
+  ],
+  "title": "dots which --json (schema version 1)",
+  "type": "object"
+}

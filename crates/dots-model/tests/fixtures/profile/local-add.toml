@@ -1,0 +1,5 @@
+schema = 1
+profile = "work-mbp"
+bundles = { add = ["gaming"] }
+[settings.git]
+name = "Local"

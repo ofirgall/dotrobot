@@ -1,0 +1,624 @@
+{
+  "formulae": [
+    {
+      "name": "acli",
+      "full_name": "atlassian/acli/acli",
+      "tap": "atlassian/acli",
+      "versions": {
+        "stable": "1.3.40-stable",
+        "head": null,
+        "bottle": false
+      },
+      "revision": 0,
+      "installed": [
+        {
+          "version": "1.3.22-stable",
+          "installed_on_request": true
+        }
+      ],
+      "linked_keg": "1.3.22-stable",
+      "pinned": false,
+      "outdated": true,
+      "keg_only": false
+    },
+    {
+      "name": "bat",
+      "full_name": "bat",
+      "tap": "homebrew/core",
+      "versions": {
+        "stable": "0.26.1",
+        "head": "HEAD",
+        "bottle": true
+      },
+      "revision": 0,
+      "installed": [
+        {
+          "version": "0.26.1",
+          "installed_on_request": true
+        }
+      ],
+      "linked_keg": "0.26.1",
+      "pinned": false,
+      "outdated": false,
+      "keg_only": false
+    },
+    {
+      "name": "ffmpeg",
+      "full_name": "ffmpeg",
+      "tap": "homebrew/core",
+      "versions": {
+        "stable": "9.0.2",
+        "head": "HEAD",
+        "bottle": true
+      },
+      "revision": 1,
+      "installed": [
+        {
+          "version": "9.0.2_1",
+          "installed_on_request": true
+        }
+      ],
+      "linked_keg": "9.0.2_1",
+      "pinned": false,
+      "outdated": false,
+      "keg_only": false
+    },
+    {
+      "name": "jpeg-turbo",
+      "full_name": "jpeg-turbo",
+      "tap": "homebrew/core",
+      "versions": {
+        "stable": "3.2.1",
+        "head": "HEAD",
+        "bottle": true
+      },
+      "revision": 0,
+      "installed": [
+        {
+          "version": "3.2.0",
+          "installed_on_request": false
+        },
+        {
+          "version": "3.2.1",
+          "installed_on_request": false
+        }
+      ],
+      "linked_keg": "3.2.1",
+      "pinned": false,
+      "outdated": false,
+      "keg_only": false
+    },
+    {
+      "name": "llvm",
+      "full_name": "llvm",
+      "tap": "homebrew/core",
+      "versions": {
+        "stable": "23.1.5",
+        "head": "HEAD",
+        "bottle": true
+      },
+      "revision": 1,
+      "installed": [
+        {
+          "version": "22.1.8",
+          "installed_on_request": false
+        }
+      ],
+      "linked_keg": null,
+      "pinned": false,
+      "outdated": true,
+      "keg_only": true
+    },
+    {
+      "name": "ripgrep",
+      "full_name": "ripgrep",
+      "tap": "homebrew/core",
+      "versions": {
+        "stable": "15.2.0",
+        "head": "HEAD",
+        "bottle": true
+      },
+      "revision": 0,
+      "installed": [
+        {
+          "version": "15.1.0",
+          "installed_on_request": true
+        }
+      ],
+      "linked_keg": "15.1.0",
+      "pinned": true,
+      "outdated": true,
+      "keg_only": false
+    }
+  ],
+  "casks": [
+    {
+      "token": "1password-cli",
+      "full_token": "1password-cli",
+      "tap": "homebrew/cask",
+      "version": "2.42.0",
+      "installed": "2.35.0",
+      "pinned": false,
+      "outdated": true,
+      "artifacts": [
+        {
+          "binary": [
+            "op"
+          ],
+          "target": "/opt/homebrew/bin/op"
+        },
+        {
+          "generate_completions_from_executable": [
+            "op",
+            "completion",
+            {
+              "base_name": null,
+              "shell_parameter_format": null,
+              "shells": [
+                "bash",
+                "zsh",
+                "fish"
+              ]
+            }
+          ]
+        },
+        {
+          "zap": [
+            {
+              "trash": "~/.config/op"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "token": "aerospace",
+      "full_token": "nikitabobko/tap/aerospace",
+      "tap": "nikitabobko/tap",
+      "version": "0.21.3-Beta",
+      "installed": "0.21.2-Beta",
+      "pinned": false,
+      "outdated": true,
+      "artifacts": [
+        {
+          "app": [
+            "AeroSpace-v0.21.3-Beta/AeroSpace.app"
+          ],
+          "target": "/Applications/AeroSpace.app"
+        },
+        {
+          "binary": [
+            "AeroSpace-v0.21.3-Beta/bin/aerospace"
+          ],
+          "target": "/opt/homebrew/bin/aerospace"
+        },
+        {
+          "binary": [
+            "AeroSpace-v0.21.3-Beta/shell-completion/zsh/_aerospace",
+            {
+              "target": "/opt/homebrew/share/zsh/site-functions/_aerospace"
+            }
+          ],
+          "target": "/opt/homebrew/share/zsh/site-functions/_aerospace"
+        },
+        {
+          "binary": [
+            "AeroSpace-v0.21.3-Beta/shell-completion/bash/aerospace",
+            {
+              "target": "/opt/homebrew/etc/bash_completion.d/aerospace"
+            }
+          ],
+          "target": "/opt/homebrew/etc/bash_completion.d/aerospace"
+        },
+        {
+          "binary": [
+            "AeroSpace-v0.21.3-Beta/shell-completion/fish/aerospace.fish",
+            {
+              "target": "/opt/homebrew/share/fish/vendor_completions.d/aerospace.fish"
+            }
+          ],
+          "target": "/opt/homebrew/share/fish/vendor_completions.d/aerospace.fish"
+        },
+        {
+          "postflight_steps": [
+            {
+              "steps": [
+                {
+                  "command": {
+                    "path": "/usr/bin/xattr"
+                  },
+                  "allow_failure": true,
+                  "type": "run",
+                  "args": [
+                    "-d",
+                    "com.apple.quarantine",
+                    "{{staged_path}}/AeroSpace-v{{version}}/bin/aerospace"
+                  ]
+                },
+                {
+                  "command": {
+                    "path": "/usr/bin/xattr"
+                  },
+                  "allow_failure": true,
+                  "type": "run",
+                  "args": [
+                    "-d",
+                    "com.apple.quarantine",
+                    "{{appdir}}/AeroSpace.app"
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "token": "gcloud-cli",
+      "full_token": "gcloud-cli",
+      "tap": "homebrew/cask",
+      "version": "593.0.0",
+      "installed": "588.0.0",
+      "pinned": false,
+      "outdated": false,
+      "artifacts": [
+        {
+          "preflight_steps": [
+            {
+              "steps": [
+                {
+                  "source": {
+                    "base": "staged_path",
+                    "path": "google-cloud-sdk/."
+                  },
+                  "target": {
+                    "base": "homebrew_prefix",
+                    "path": "share/google-cloud-sdk"
+                  },
+                  "recursive": true,
+                  "type": "copy"
+                },
+                {
+                  "paths": [
+                    {
+                      "base": "staged_path",
+                      "path": "google-cloud-sdk"
+                    }
+                  ],
+                  "recursive": true,
+                  "type": "remove"
+                },
+                {
+                  "source": {
+                    "path": "{{HOMEBREW_PREFIX}}/share/google-cloud-sdk"
+                  },
+                  "target": {
+                    "base": "staged_path",
+                    "path": "google-cloud-sdk"
+                  },
+                  "type": "symlink"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "uninstall": [
+            {
+              "trash": "/opt/homebrew/Caskroom/gcloud-cli/latest"
+            }
+          ]
+        },
+        {
+          "installer": [
+            {
+              "script": {
+                "executable": "google-cloud-sdk/install.sh",
+                "args": [
+                  "--quiet",
+                  "--usage-reporting",
+                  "false",
+                  "--bash-completion",
+                  "false",
+                  "--path-update",
+                  "false",
+                  "--rc-path",
+                  "false",
+                  "--update-installed-components",
+                  "--install-python",
+                  "false"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "binary": [
+            "google-cloud-sdk/bin/bq"
+          ],
+          "target": "/opt/homebrew/bin/bq"
+        },
+        {
+          "binary": [
+            "google-cloud-sdk/bin/gcloud"
+          ],
+          "target": "/opt/homebrew/bin/gcloud"
+        },
+        {
+          "binary": [
+            "google-cloud-sdk/bin/docker-credential-gcloud"
+          ],
+          "target": "/opt/homebrew/bin/docker-credential-gcloud"
+        },
+        {
+          "binary": [
+            "google-cloud-sdk/bin/git-credential-gcloud.sh",
+            {
+              "target": "git-credential-gcloud"
+            }
+          ],
+          "target": "/opt/homebrew/bin/git-credential-gcloud"
+        },
+        {
+          "binary": [
+            "google-cloud-sdk/bin/gsutil"
+          ],
+          "target": "/opt/homebrew/bin/gsutil"
+        },
+        {
+          "bash_completion": [
+            "google-cloud-sdk/completion.bash.inc",
+            {
+              "target": "google-cloud-sdk"
+            }
+          ],
+          "target": "/opt/homebrew/etc/bash_completion.d/google-cloud-sdk"
+        },
+        {
+          "zsh_completion": [
+            "google-cloud-sdk/completion.zsh.inc",
+            {
+              "target": "_google_cloud_sdk"
+            }
+          ],
+          "target": "/opt/homebrew/share/zsh/site-functions/_google_cloud_sdk"
+        },
+        {
+          "postflight_steps": [
+            {
+              "steps": [
+                {
+                  "source": {
+                    "path": "{{staged_path}}"
+                  },
+                  "target": {
+                    "path": "{{caskroom_path}}/latest"
+                  },
+                  "force": true,
+                  "guards": [
+                    {
+                      "path": "{{caskroom_path}}/latest",
+                      "condition": "unless_exists",
+                      "id": "1"
+                    }
+                  ],
+                  "type": "symlink"
+                },
+                {
+                  "command": {
+                    "base": "homebrew_prefix",
+                    "path": "share/google-cloud-sdk/bin/gcloud"
+                  },
+                  "guards": [
+                    {
+                      "condition": "on",
+                      "value": "macos",
+                      "id": "2"
+                    },
+                    {
+                      "path": "~/.config/gcloud/virtenv",
+                      "condition": "if_exists",
+                      "id": "3"
+                    }
+                  ],
+                  "type": "run",
+                  "args": [
+                    "config",
+                    "virtualenv",
+                    "delete",
+                    "-q"
+                  ],
+                  "env": {
+                    "CLOUDSDK_PYTHON": "{{HOMEBREW_PREFIX}}/opt/python@3.14/libexec/bin/python"
+                  }
+                },
+                {
+                  "command": {
+                    "base": "homebrew_prefix",
+                    "path": "share/google-cloud-sdk/bin/gcloud"
+                  },
+                  "network_access": true,
+                  "guards": [
+                    {
+                      "condition": "on",
+                      "value": "macos",
+                      "id": "2"
+                    }
+                  ],
+                  "type": "run",
+                  "args": [
+                    "config",
+                    "virtualenv",
+                    "create",
+                    "--python-to-use",
+                    "{{HOMEBREW_PREFIX}}/opt/python@3.14/libexec/bin/python"
+                  ],
+                  "env": {
+                    "CLOUDSDK_PYTHON": "{{HOMEBREW_PREFIX}}/opt/python@3.14/libexec/bin/python"
+                  }
+                },
+                {
+                  "command": {
+                    "base": "homebrew_prefix",
+                    "path": "share/google-cloud-sdk/bin/gcloud"
+                  },
+                  "guards": [
+                    {
+                      "condition": "on",
+                      "value": "macos",
+                      "id": "2"
+                    }
+                  ],
+                  "type": "run",
+                  "args": [
+                    "config",
+                    "virtualenv",
+                    "enable"
+                  ],
+                  "env": {
+                    "CLOUDSDK_PYTHON": "{{HOMEBREW_PREFIX}}/opt/python@3.14/libexec/bin/python"
+                  }
+                },
+                {
+                  "command": {
+                    "base": "homebrew_prefix",
+                    "path": "share/google-cloud-sdk/bin/gcloud"
+                  },
+                  "guards": [
+                    {
+                      "condition": "on",
+                      "value": "macos",
+                      "id": "2"
+                    }
+                  ],
+                  "type": "run",
+                  "args": [
+                    "version"
+                  ],
+                  "env": {
+                    "CLOUDSDK_PYTHON": "{{HOMEBREW_PREFIX}}/opt/python@3.14/libexec/bin/python"
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "zap": [
+            {
+              "trash": [
+                "/opt/homebrew/share/google-cloud-sdk.staging",
+                "/opt/homebrew/share/google-cloud-sdk"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "token": "orbstack",
+      "full_token": "orbstack",
+      "tap": "homebrew/cask",
+      "version": "2.2.5,21124",
+      "installed": "2.2.3,20963",
+      "pinned": false,
+      "outdated": true,
+      "artifacts": [
+        {
+          "uninstall": [
+            {
+              "quit": "dev.kdrag0n.MacVirt",
+              "script": {
+                "executable": "/Applications/OrbStack.app/Contents/MacOS/bin/orbctl",
+                "args": [
+                  "_internal",
+                  "brew-uninstall"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "app": [
+            "OrbStack.app"
+          ],
+          "target": "/Applications/OrbStack.app"
+        },
+        {
+          "binary": [
+            "/Applications/OrbStack.app/Contents/MacOS/bin/orbctl"
+          ],
+          "target": "/opt/homebrew/bin/orbctl"
+        },
+        {
+          "binary": [
+            "/Applications/OrbStack.app/Contents/MacOS/bin/orb"
+          ],
+          "target": "/opt/homebrew/bin/orb"
+        },
+        {
+          "bash_completion": [
+            "/Applications/OrbStack.app/Contents/Resources/completions/bash/orbctl.bash"
+          ],
+          "target": "/opt/homebrew/etc/bash_completion.d/orbctl"
+        },
+        {
+          "zsh_completion": [
+            "/Applications/OrbStack.app/Contents/Resources/completions/zsh/_orbctl"
+          ],
+          "target": "/opt/homebrew/share/zsh/site-functions/_orbctl"
+        },
+        {
+          "zsh_completion": [
+            "/Applications/OrbStack.app/Contents/Resources/completions/zsh/_orb"
+          ],
+          "target": "/opt/homebrew/share/zsh/site-functions/_orb"
+        },
+        {
+          "fish_completion": [
+            "/Applications/OrbStack.app/Contents/Resources/completions/fish/orbctl.fish"
+          ],
+          "target": "/opt/homebrew/share/fish/vendor_completions.d/orbctl.fish"
+        },
+        {
+          "postflight_steps": [
+            {
+              "steps": [
+                {
+                  "command": {
+                    "base": "appdir",
+                    "path": "OrbStack.app/Contents/MacOS/bin/orbctl"
+                  },
+                  "type": "run",
+                  "args": [
+                    "_internal",
+                    "brew-postflight"
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "zap": [
+            {
+              "trash": [
+                "~/.orbstack",
+                "~/Library/Application Scripts/*.dev.orbstack",
+                "~/Library/Caches/dev.kdrag0n.MacVirt",
+                "~/Library/Caches/SentryCrash/OrbStack",
+                "~/Library/Group Containers/*.dev.orbstack",
+                "~/Library/HTTPStorages/dev.kdrag0n.MacVirt",
+                "~/Library/HTTPStorages/dev.kdrag0n.MacVirt.binarycookies",
+                "~/Library/Preferences/dev.kdrag0n.MacVirt.plist",
+                "~/Library/Saved Application State/dev.kdrag0n.MacVirt.savedState",
+                "~/Library/WebKit/dev.kdrag0n.MacVirt"
+              ],
+              "rmdir": "~/OrbStack"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

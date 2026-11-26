@@ -1,0 +1,9 @@
+schema = 1
+name = "fixture/good"
+
+[priority]
+any = ["cargo", "brew"]
+
+[tags]
+work = "work machine"
+remote = "headless box"

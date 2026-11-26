@@ -1,0 +1,18 @@
+[package]
+name = "dots-env"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+dots-core.workspace = true
+dots-model.workspace = true
+dots-files.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

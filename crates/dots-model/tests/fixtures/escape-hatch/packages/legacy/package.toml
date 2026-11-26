@@ -1,0 +1,6 @@
+schema = 1
+name = "legacy"
+
+[[files]]
+dst = "~/.legacy"
+src = "//shared/legacy"

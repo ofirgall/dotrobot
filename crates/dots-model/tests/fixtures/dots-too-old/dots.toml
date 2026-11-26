@@ -1,0 +1,2 @@
+schema = 1
+requires_dots = ">=0.3"

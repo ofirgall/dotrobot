@@ -1,0 +1,23 @@
+[package]
+name = "dots-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+dots-core.workspace = true
+dots-env.workspace = true
+dots-model.workspace = true
+dots-providers.workspace = true
+dots-resolve.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+dots-facts.workspace = true
+dots-testkit.workspace = true
+tempfile.workspace = true

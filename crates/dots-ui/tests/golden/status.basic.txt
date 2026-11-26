@@ -1,0 +1,25 @@
+ <ESC>[1;33m▲<ESC>[0m <ESC>[1;33m7 things need attention<ESC>[0m
+
+ <ESC>[1;35m dots <ESC>[0m <ESC>[1mstatus<ESC>[0m   <ESC>[90m~/dotfiles · main @ f452241 (clean) · work-mbp · macOS arm64<ESC>[0m
+
+ <ESC>[1mPACKAGES<ESC>[0m   <ESC>[32m62 ok<ESC>[0m   <ESC>[33m2 outdated<ESC>[0m   <ESC>[33m1 drift<ESC>[0m   <ESC>[31m1 missing<ESC>[0m
+
+   <ESC>[33m↑<ESC>[0m <ESC>[33moutdated<ESC>[0m  <ESC>[1;35mbottom<ESC>[0m  <ESC>[90mcargo<ESC>[0m   0.9.6 → 0.<ESC>[1m10.2<ESC>[0m   released 4 days ago
+               <ESC>[36m→ dots upgrade bottom<ESC>[0m
+   <ESC>[33m↑<ESC>[0m <ESC>[33moutdated<ESC>[0m  <ESC>[1;35mdelta<ESC>[0m   <ESC>[90mcargo<ESC>[0m   0.17.0 → 0.<ESC>[1m18.2<ESC>[0m
+   <ESC>[33m≠<ESC>[0m <ESC>[33mdrift<ESC>[0m     <ESC>[1;35mneovim<ESC>[0m  <ESC>[90mgithub<ESC>[0m  0.11.4           lock wants 0.11.5
+               <ESC>[36m→ dots apply neovim<ESC>[0m
+   <ESC>[31m✗<ESC>[0m <ESC>[31mmissing<ESC>[0m   <ESC>[1;35mherdr<ESC>[0m   <ESC>[90mscript<ESC>[0m                   not installed
+               <ESC>[36m→ dots apply herdr<ESC>[0m
+   <ESC>[90m◌<ESC>[0m <ESC>[90morphan<ESC>[0m    <ESC>[1;35mzellij<ESC>[0m  <ESC>[90mbrew<ESC>[0m    0.41.1           installed in worktree try-zellij, Nov 20
+               <ESC>[36m→ dots remove zellij<ESC>[0m
+               <ESC>[36m→ dots adopt-package zellij<ESC>[0m
+
+ <ESC>[1mFILES<ESC>[0m   <ESC>[32m84 ok<ESC>[0m   <ESC>[33m1 modified<ESC>[0m
+
+   <ESC>[33m✎<ESC>[0m <ESC>[33mmodified<ESC>[0m  <ESC>[1m~/.claude/settings.json<ESC>[0m  render
+               <ESC>[36m→ dots adopt ~/.claude/settings.json<ESC>[0m
+   <ESC>[31m↯<ESC>[0m <ESC>[31mconflict<ESC>[0m  <ESC>[1m~/.config/herdr/<ESC>[0m         link
+               <ESC>[36m→ dots explain foreign-entries<ESC>[0m
+
+   <ESC>[32m✓<ESC>[0m <ESC>[90m62 packages · 84 files ok<ESC>[0m        <ESC>[90mchecked in 0.9s<ESC>[0m

@@ -1,0 +1,2 @@
+ [ok] All good
+   [ok] 64 packages - 86 files - 3 git sources        checked in 0.8s

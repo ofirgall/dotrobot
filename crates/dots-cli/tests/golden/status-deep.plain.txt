@@ -1,0 +1,20 @@
+exit: 2
+--- stdout ---
+ [!] o1   outdated
+
+ Provider
+
+   provider: script
+
+   script chosen: first usable in the no priority list
+
+ Version
+
+   wanted     latest
+   installed  1.0.0
+   locked     -
+   latest     2.0.0
+   path       machine -> all -> o1
+
+   -> dots upgrade o1
+--- stderr ---

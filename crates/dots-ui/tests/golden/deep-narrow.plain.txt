@@ -1,0 +1,10 @@
+ [ok] ghostty is ok
+
+   provider
+     brew (cask)
+   version
+     1.2.3
+   bundle
+     mac-desktop
+   config
+     ~/.config/ghos...ed/folder/for/testing/config

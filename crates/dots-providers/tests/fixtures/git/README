@@ -1,0 +1,1 @@
+Git fixtures are built at test time (real git, local bare repo): see tests/git.rs.

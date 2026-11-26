@@ -1,0 +1,4 @@
+exit: 0
+--- stdout ---
+ [ok] All good. 9 checks passed
+--- stderr ---

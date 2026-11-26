@@ -1,0 +1,269 @@
+{
+  "$id": "https://dots.dev/schemas/dots-bins.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "data": {
+      "properties": {
+        "bins": {
+          "items": {
+            "properties": {
+              "bin": {
+                "type": "string"
+              },
+              "class": {
+                "enum": [
+                  "managed",
+                  "orphan",
+                  "unmanaged",
+                  "unknown"
+                ]
+              },
+              "hint": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "native": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "notes": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "package": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "path": {
+                "type": "string"
+              },
+              "provider": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "real_path": {
+                "type": "string"
+              },
+              "shadowed": {
+                "type": "boolean"
+              },
+              "shim": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "version": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "wins": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "bin",
+              "path",
+              "real_path",
+              "package",
+              "native",
+              "provider",
+              "version",
+              "class",
+              "wins",
+              "shadowed",
+              "shim",
+              "notes",
+              "hint"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "summary": {
+          "properties": {
+            "managed": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "shadowed": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "total": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "unknown": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "unmanaged": {
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "total",
+            "managed",
+            "unmanaged",
+            "unknown",
+            "shadowed"
+          ],
+          "type": "object"
+        },
+        "target": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "target",
+        "bins",
+        "summary"
+      ],
+      "type": "object"
+    },
+    "errors": {
+      "items": {
+        "properties": {
+          "code": {
+            "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$",
+            "type": "string"
+          },
+          "hint": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "provenance": {
+            "items": {
+              "properties": {
+                "col": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "file": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "line": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "source": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "source"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "code",
+          "message",
+          "hint",
+          "provenance"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "ok": {
+      "type": "boolean"
+    },
+    "schema": {
+      "const": "dots/bins@1"
+    },
+    "warnings": {
+      "items": {
+        "properties": {
+          "code": {
+            "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$",
+            "type": "string"
+          },
+          "hint": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "provenance": {
+            "items": {
+              "properties": {
+                "col": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "file": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "line": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "source": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "source"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "code",
+          "message",
+          "hint",
+          "provenance"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "schema",
+    "ok",
+    "data",
+    "warnings",
+    "errors"
+  ],
+  "title": "dots bins --json (schema version 1)",
+  "type": "object"
+}

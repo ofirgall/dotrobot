@@ -1,0 +1,364 @@
+{
+  "$id": "https://dots.dev/schemas/dots-why.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "data": {
+      "properties": {
+        "condition": {
+          "type": "string"
+        },
+        "constraints": {
+          "items": {
+            "properties": {
+              "file": {
+                "type": "string"
+              },
+              "from": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "source": {
+                "enum": [
+                  "own",
+                  "requires",
+                  "override"
+                ]
+              },
+              "spec": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "spec",
+              "source",
+              "file"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "package": {
+          "type": "string"
+        },
+        "paths": {
+          "items": {
+            "properties": {
+              "active": {
+                "type": "boolean"
+              },
+              "conditions": {
+                "items": {
+                  "properties": {
+                    "on": {
+                      "type": "string"
+                    },
+                    "result": {
+                      "type": "boolean"
+                    },
+                    "when": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "on",
+                    "when",
+                    "result"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "steps": {
+                "items": {
+                  "properties": {
+                    "kind": {
+                      "enum": [
+                        "machine",
+                        "bundle",
+                        "package",
+                        "requires",
+                        "bootstrap"
+                      ]
+                    },
+                    "label": {
+                      "type": "string"
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "version": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "label"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "text": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "text",
+              "active",
+              "steps",
+              "conditions"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "provider": {
+          "properties": {
+            "candidates": {
+              "items": {
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "installed": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "outcome": {
+                    "enum": [
+                      "chosen",
+                      "standby",
+                      "skipped"
+                    ]
+                  },
+                  "reason": {
+                    "type": "string"
+                  },
+                  "skip": {
+                    "enum": [
+                      "when-false",
+                      "unavailable",
+                      "needs-root",
+                      "cannot-satisfy",
+                      "bootstrap"
+                    ]
+                  }
+                },
+                "required": [
+                  "id",
+                  "outcome"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "chosen": {
+              "properties": {
+                "bootstrap": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "sticky": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "id",
+                "name",
+                "sticky"
+              ],
+              "type": [
+                "object",
+                "null"
+              ]
+            },
+            "hint": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "ranking": {
+              "type": "string"
+            },
+            "reasons": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "chosen",
+            "ranking",
+            "candidates",
+            "reasons"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "replaced_by": {
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "active",
+            "inert",
+            "excluded",
+            "replaced",
+            "not-included"
+          ]
+        }
+      },
+      "required": [
+        "package",
+        "status",
+        "paths",
+        "provider",
+        "constraints"
+      ],
+      "type": "object"
+    },
+    "errors": {
+      "items": {
+        "properties": {
+          "code": {
+            "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$",
+            "type": "string"
+          },
+          "hint": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "provenance": {
+            "items": {
+              "properties": {
+                "col": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "file": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "line": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "source": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "source"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "code",
+          "message",
+          "hint",
+          "provenance"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "ok": {
+      "type": "boolean"
+    },
+    "schema": {
+      "const": "dots/why@1"
+    },
+    "warnings": {
+      "items": {
+        "properties": {
+          "code": {
+            "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$",
+            "type": "string"
+          },
+          "hint": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "provenance": {
+            "items": {
+              "properties": {
+                "col": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "file": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "line": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "source": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "source"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "code",
+          "message",
+          "hint",
+          "provenance"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "schema",
+    "ok",
+    "data",
+    "warnings",
+    "errors"
+  ],
+  "title": "dots why --json (schema version 1)",
+  "type": "object"
+}

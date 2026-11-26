@@ -1,0 +1,14 @@
+ <ESC>[1mPlan: 2 installs · 1 upgrade · 1 removal<ESC>[0m
+
+ <ESC>[1mPackages<ESC>[0m
+
+   <ESC>[32m+<ESC>[0m  <ESC>[1;35mripgrep<ESC>[0m         <ESC>[90mbrew<ESC>[0m   14.1.1
+   <ESC>[32m+<ESC>[0m  <ESC>[1;35mkv<ESC>[0m              <ESC>[90mcargo<ESC>[0m  git:9e1c0b7     builds from source · usually ~2m
+   <ESC>[33m↑<ESC>[0m  <ESC>[1;35mbottom<ESC>[0m          <ESC>[90mcargo<ESC>[0m  0.9.6 → 0.<ESC>[1m10.2<ESC>[0m
+   <ESC>[31m-<ESC>[0m  <ESC>[1;35mzellij<ESC>[0m          <ESC>[90mbrew<ESC>[0m   0.41.1          not declared anymore
+   <ESC>[31m↯<ESC>[0m  <ESC>[1;35m~/.config/yazi<ESC>[0m  <ESC>[90mlink<ESC>[0m                   existing folder moved to backup first
+
+ <ESC>[1mHeads up<ESC>[0m
+
+   <ESC>[33m▲<ESC>[0m Needs your password once (apt)
+   <ESC>[33m▲<ESC>[0m 1 existing folder will be backed up to ~/.local/state/dots/backup/r-7f3c/

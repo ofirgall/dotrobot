@@ -1,0 +1,68 @@
+{
+  "formulae": [
+    {
+      "name": "bat",
+      "full_name": "bat",
+      "tap": "homebrew/core",
+      "versions": {
+        "stable": "0.26.1",
+        "head": "HEAD",
+        "bottle": true
+      },
+      "revision": 0,
+      "installed": [
+        {
+          "version": "0.26.1",
+          "installed_on_request": true
+        }
+      ],
+      "linked_keg": "0.26.1",
+      "pinned": false,
+      "outdated": false,
+      "keg_only": false
+    },
+    {
+      "name": "ripgrep",
+      "full_name": "ripgrep",
+      "tap": "homebrew/core",
+      "versions": {
+        "stable": "15.2.0",
+        "head": "HEAD",
+        "bottle": true
+      },
+      "revision": 0,
+      "installed": [
+        {
+          "version": "15.1.0",
+          "installed_on_request": true
+        }
+      ],
+      "linked_keg": "15.1.0",
+      "pinned": false,
+      "outdated": true,
+      "keg_only": false
+    },
+    {
+      "name": "ffmpeg",
+      "full_name": "ffmpeg",
+      "tap": "homebrew/core",
+      "versions": {
+        "stable": "9.0.2",
+        "head": "HEAD",
+        "bottle": true
+      },
+      "revision": 1,
+      "installed": [
+        {
+          "version": "9.0.2_1",
+          "installed_on_request": true
+        }
+      ],
+      "linked_keg": "9.0.2_1",
+      "pinned": false,
+      "outdated": false,
+      "keg_only": false
+    }
+  ],
+  "casks": []
+}

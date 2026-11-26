@@ -1,0 +1,51 @@
+exit: 2
+{
+  "data": {
+    "description": null,
+    "detail": "",
+    "env": {
+      "path": [],
+      "source": [],
+      "vars": {}
+    },
+    "files": [],
+    "header": null,
+    "history": [],
+    "inclusion": "machine → all → o1",
+    "overrides": [],
+    "package": "o1",
+    "provider": {
+      "candidates": [
+        {
+          "id": "script",
+          "installed": "1.0.0",
+          "outcome": "chosen"
+        }
+      ],
+      "chosen": {
+        "bootstrap": null,
+        "id": "script",
+        "name": "o1",
+        "sticky": false
+      },
+      "hint": null,
+      "ranking": "no priority list",
+      "reasons": [
+        "script chosen: first usable in the no priority list"
+      ]
+    },
+    "state": "outdated",
+    "todos": [],
+    "versions": {
+      "installed": "1.0.0",
+      "latest": "2.0.0",
+      "locked": null,
+      "wanted": "latest"
+    },
+    "view": "package"
+  },
+  "errors": [],
+  "ok": false,
+  "schema": "dots/status@1",
+  "warnings": []
+}

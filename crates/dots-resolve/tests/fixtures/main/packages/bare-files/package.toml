@@ -1,0 +1,6 @@
+schema = 1
+name = "bare-files"
+
+[[files]]
+src = "x"
+dst = "{home}/.x"

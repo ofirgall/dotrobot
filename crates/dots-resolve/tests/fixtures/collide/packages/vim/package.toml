@@ -1,0 +1,4 @@
+schema = 1
+name = "vim"
+bin = "vim"
+requires = ["vim-runtime"]

@@ -1,0 +1,7 @@
+ <ESC>[1mkv is installed because<ESC>[0m
+
+   <ESC>[38;2;139;148;158mwork-mbp (machine)<ESC>[0m
+   <ESC>[38;2;139;148;158m└─ <ESC>[0mcli (bundle)
+   <ESC>[38;2;139;148;158m   └─ <ESC>[0mkoala (bundle)
+   <ESC>[38;2;139;148;158m      └─ <ESC>[0m<ESC>[1;38;2;210;168;255mkv<ESC>[0m                   <ESC>[38;2;139;148;158mcargo · git:9e1c0b7<ESC>[0m
+   <ESC>[38;2;139;148;158m         └─ <ESC>[0mneeds rust ≥1.80  <ESC>[38;2;139;148;158mprovided by rustup 1.83.0<ESC>[0m

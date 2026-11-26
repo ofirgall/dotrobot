@@ -1,0 +1,25 @@
+ <ESC>[1;38;2;227;179;65m▲<ESC>[0m <ESC>[1;38;2;227;179;65m7 things need attention<ESC>[0m
+
+ <ESC>[1;38;2;210;168;255;48;2;48;38;66m dots <ESC>[0m <ESC>[1mstatus<ESC>[0m   <ESC>[38;2;139;148;158m~/dotfiles · main @ f452241 (clean) · work-mbp · macOS arm64<ESC>[0m
+
+ <ESC>[1mPACKAGES<ESC>[0m   <ESC>[38;2;126;231;135m62 ok<ESC>[0m   <ESC>[38;2;227;179;65m2 outdated<ESC>[0m   <ESC>[38;2;227;179;65m1 drift<ESC>[0m   <ESC>[38;2;255;123;114m1 missing<ESC>[0m
+
+   <ESC>[38;2;227;179;65m↑<ESC>[0m <ESC>[38;2;227;179;65moutdated<ESC>[0m  <ESC>[1;38;2;210;168;255mbottom<ESC>[0m  <ESC>[38;2;139;148;158mcargo<ESC>[0m   0.9.6 → 0.<ESC>[1m10.2<ESC>[0m
+               <ESC>[38;2;86;212;221m→ dots upgrade bottom<ESC>[0m
+   <ESC>[38;2;227;179;65m↑<ESC>[0m <ESC>[38;2;227;179;65moutdated<ESC>[0m  <ESC>[1;38;2;210;168;255mdelta<ESC>[0m   <ESC>[38;2;139;148;158mcargo<ESC>[0m   0.17.0 → 0.<ESC>[1m18.2<ESC>[0m
+   <ESC>[38;2;227;179;65m≠<ESC>[0m <ESC>[38;2;227;179;65mdrift<ESC>[0m     <ESC>[1;38;2;210;168;255mneovim<ESC>[0m  <ESC>[38;2;139;148;158mgithub<ESC>[0m  0.11.4
+               <ESC>[38;2;86;212;221m→ dots apply neovim<ESC>[0m
+   <ESC>[38;2;255;123;114m✗<ESC>[0m <ESC>[38;2;255;123;114mmissing<ESC>[0m   <ESC>[1;38;2;210;168;255mherdr<ESC>[0m   <ESC>[38;2;139;148;158mscript<ESC>[0m
+               <ESC>[38;2;86;212;221m→ dots apply herdr<ESC>[0m
+   <ESC>[38;2;139;148;158m◌<ESC>[0m <ESC>[38;2;139;148;158morphan<ESC>[0m    <ESC>[1;38;2;210;168;255mzellij<ESC>[0m  <ESC>[38;2;139;148;158mbrew<ESC>[0m    0.41.1
+               <ESC>[38;2;86;212;221m→ dots remove zellij<ESC>[0m
+               <ESC>[38;2;86;212;221m→ dots adopt-package zellij<ESC>[0m
+
+ <ESC>[1mFILES<ESC>[0m   <ESC>[38;2;126;231;135m84 ok<ESC>[0m   <ESC>[38;2;227;179;65m1 modified<ESC>[0m
+
+   <ESC>[38;2;227;179;65m✎<ESC>[0m <ESC>[38;2;227;179;65mmodified<ESC>[0m  <ESC>[1m~/.claude/settings.json<ESC>[0m  render
+               <ESC>[38;2;86;212;221m→ dots adopt ~/.claude/settings.json<ESC>[0m
+   <ESC>[38;2;255;123;114m↯<ESC>[0m <ESC>[38;2;255;123;114mconflict<ESC>[0m  <ESC>[1m~/.config/herdr/<ESC>[0m         link
+               <ESC>[38;2;86;212;221m→ dots explain foreign-entries<ESC>[0m
+
+   <ESC>[38;2;126;231;135m✓<ESC>[0m <ESC>[38;2;139;148;158m62 packages · 84 files ok<ESC>[0m        <ESC>[38;2;139;148;158mchecked in 0.9s<ESC>[0m

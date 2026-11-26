@@ -1,0 +1,11 @@
+schema = 1
+name = "fixture/main"
+
+[priority]
+any = ["cargo", "brew"]
+debian = ["apt", "cargo"]
+"ubuntu-22.04" = ["cargo", "apt"]
+
+[tags]
+remote = "headless box"
+work = "work machine"

@@ -1,0 +1,8 @@
+schema = 1
+
+[priority]
+any = ["cargo"]
+"ubunut-22.04" = ["apt"]
+
+[tags]
+work = "work machine"

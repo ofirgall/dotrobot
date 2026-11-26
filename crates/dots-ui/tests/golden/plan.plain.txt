@@ -1,0 +1,14 @@
+ Plan: 2 installs - 1 upgrade - 1 removal
+
+ Packages
+
+   +   ripgrep         brew   14.1.1
+   +   kv              cargo  git:9e1c0b7      builds from source - usually ~2m
+   ^   bottom          cargo  0.9.6 -> 0.10.2
+   -   zellij          brew   0.41.1           not declared anymore
+   !!  ~/.config/yazi  link                    existing folder moved to backup first
+
+ Heads up
+
+   [!] Needs your password once (apt)
+   [!] 1 existing folder will be backed up to ~/.local/state/dots/backup/r-7f3c/

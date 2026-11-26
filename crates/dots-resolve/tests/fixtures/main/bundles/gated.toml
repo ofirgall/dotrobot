@@ -1,0 +1,2 @@
+schema = 1
+packages = [{ name = "gated", when = 'tag = "work"' }]

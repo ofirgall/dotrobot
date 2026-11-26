@@ -1,0 +1,71 @@
+exit: 0
+--- stdout ---
+Manage dotfiles, packages and machines from one repo.
+
+Usage: dots [OPTIONS] [COMMAND]
+
+Set up and change this machine:
+  init         Create a dots repo, or bootstrap from a source
+  apply        Make this machine match the repo
+  plan         Show what apply would do
+  upgrade      Upgrade packages
+  pin          Pin a package to a version
+  unpin        Remove a pin
+  remove       Remove a package or an entry from the repo
+  migrate      Move a package to another provider
+
+Inspect:
+  status       Show what is healthy and what needs attention
+  outdated     List packages with newer versions available
+  why          Explain why a package is on this machine
+  which        Say which package provides an executable
+  bins         List executables and who owns them
+  doctor       Check the dots setup itself
+  facts        Show what dots detected about this machine
+  show         Show a package, bundle or file
+  log          Show the history of changes
+  verify       Recompute checksums and report drift
+  diff         Compare two roots
+
+Share and reuse:
+  add          Add a bundle or package from a source
+  search       Search a source for bundles and packages
+  sources      List configured sources
+  pull         Update followed sources
+  eject        Take ownership of a followed item
+  uneject      Follow the source again
+
+Files and settings:
+  adopt        Bring a changed file back into the repo
+  restore      Put back files replaced by a run
+  config       Read and change package settings
+  questions    List unanswered settings as structured questions
+  override     Manage overrides
+  lint         Check the repo for mistakes
+  lock         Repair dots.lock
+
+Tasks and roots:
+  todo         List and complete manual actions
+  try          Try a package or branch in a scratch worktree
+  use          Switch the active root
+  roots        List known roots
+
+Other:
+  import       Import an existing dotfiles setup
+  skill        Install the dots skill for coding agents
+  completions  Print a shell completion script
+
+Options:
+      --json                   Write one JSON document to stdout
+  -v, --verbose...             More detail (-v, -vv)
+  -q, --quiet                  Errors only
+      --color <when>           When to use color [possible values: auto, always, never]
+      --no-input               Never prompt; a required confirmation fails instead
+      --offline                No network access
+      --machine-config <path>  Use an alternate machine.toml
+      --home <dir>             Redirect ~ and every dots directory under <dir>
+  -h, --help                   Print help
+  -V, --version                Print version
+
+Run `dots <command> --help` for a command's arguments.
+--- stderr ---

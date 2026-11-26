@@ -1,0 +1,6 @@
+schema = 1
+name = "onlyscript"
+providers_only = true
+
+[providers.script]
+check = "true"

@@ -1,0 +1,7 @@
+schema = 1
+name = "whenprov"
+
+[providers.apt]
+when = 'os = "macos"'
+
+[providers.cargo]

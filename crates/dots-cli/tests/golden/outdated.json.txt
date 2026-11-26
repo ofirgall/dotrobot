@@ -1,0 +1,48 @@
+exit: 0
+{
+  "data": {
+    "header": null,
+    "offline": true,
+    "outdated": 3,
+    "packages": [
+      {
+        "installed": "1.0.0",
+        "latest": "1.0.0",
+        "package": "fine",
+        "provider": "script",
+        "state": "ok",
+        "wanted": "latest"
+      },
+      {
+        "installed": "1.0.0",
+        "latest": "2.0.0",
+        "package": "o1",
+        "provider": "script",
+        "state": "outdated",
+        "wanted": "latest"
+      },
+      {
+        "installed": "1.0.0",
+        "latest": "2.0.0",
+        "package": "o2",
+        "provider": "script",
+        "state": "outdated",
+        "wanted": "latest"
+      },
+      {
+        "installed": "1.0.0",
+        "latest": "2.0.0",
+        "package": "o3",
+        "provider": "script",
+        "state": "outdated",
+        "wanted": "latest"
+      }
+    ],
+    "refreshed": false,
+    "unknown": []
+  },
+  "errors": [],
+  "ok": true,
+  "schema": "dots/outdated@1",
+  "warnings": []
+}

@@ -1,0 +1,11 @@
+schema = 1
+include = ["base"]
+packages = [
+  "ripgrep",
+  "jless",
+  "fd",
+  "spotify",
+  "macapp",
+  { name = "zed" },
+  { name = "remote-only", when = 'tag = "remote"' },
+]

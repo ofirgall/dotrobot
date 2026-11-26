@@ -1,0 +1,107 @@
+exit: 2
+{
+  "data": {
+    "attention": 4,
+    "counts": {
+      "bins": {},
+      "files": {
+        "modified": 1
+      },
+      "git": {},
+      "packages": {
+        "ok": 2,
+        "outdated": 3
+      },
+      "todos": {}
+    },
+    "header": null,
+    "items": [
+      {
+        "area": "packages",
+        "detail": "",
+        "have": "1.0.0",
+        "hints": [],
+        "latest": "1.0.0",
+        "name": "fine",
+        "package": "fine",
+        "provider": "script",
+        "state": "ok",
+        "want": "latest"
+      },
+      {
+        "area": "packages",
+        "detail": "",
+        "have": "1.0.0",
+        "hints": [
+          "dots upgrade o1"
+        ],
+        "latest": "2.0.0",
+        "name": "o1",
+        "package": "o1",
+        "provider": "script",
+        "state": "outdated",
+        "want": "latest"
+      },
+      {
+        "area": "packages",
+        "detail": "",
+        "have": "1.0.0",
+        "hints": [
+          "dots upgrade o2"
+        ],
+        "latest": "2.0.0",
+        "name": "o2",
+        "package": "o2",
+        "provider": "script",
+        "state": "outdated",
+        "want": "latest"
+      },
+      {
+        "area": "packages",
+        "detail": "",
+        "have": "1.0.0",
+        "hints": [
+          "dots upgrade o3"
+        ],
+        "latest": "2.0.0",
+        "name": "o3",
+        "package": "o3",
+        "provider": "script",
+        "state": "outdated",
+        "want": "latest"
+      },
+      {
+        "area": "packages",
+        "detail": "files only",
+        "have": null,
+        "hints": [],
+        "latest": null,
+        "name": "shellcfg",
+        "package": "shellcfg",
+        "provider": null,
+        "state": "ok",
+        "want": "latest"
+      },
+      {
+        "area": "files",
+        "detail": "changed since dots wrote it",
+        "have": null,
+        "hints": [
+          "dots adopt ~/.aliases",
+          "dots adopt ~/.aliases --machine"
+        ],
+        "latest": null,
+        "name": "~/.aliases",
+        "package": "shellcfg",
+        "provider": "copy",
+        "state": "modified",
+        "want": null
+      }
+    ],
+    "view": "all"
+  },
+  "errors": [],
+  "ok": false,
+  "schema": "dots/status@1",
+  "warnings": []
+}

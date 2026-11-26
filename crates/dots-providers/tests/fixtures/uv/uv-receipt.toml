@@ -1,0 +1,6 @@
+[tool]
+requirements = [{ name = "claude-swap" }]
+entrypoints = [
+    { name = "claude-swap", install-path = "/home/me/.local/bin/claude-swap", from = "claude-swap" },
+    { name = "cswap", install-path = "/home/me/.local/bin/cswap", from = "claude-swap" },
+]

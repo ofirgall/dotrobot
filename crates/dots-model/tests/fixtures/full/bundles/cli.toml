@@ -1,0 +1,14 @@
+schema = 1
+description = "Terminal tooling"
+include = ["base"]
+recommended = true
+packages = [
+  "ripgrep",
+  { name = "wiremix", when = 'os = "linux"' },
+]
+
+[settings.ghostty]
+font_size = 15
+
+[platform.macos]
+include = ["mac"]

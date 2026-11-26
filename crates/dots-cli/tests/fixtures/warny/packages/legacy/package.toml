@@ -1,0 +1,7 @@
+schema = 1
+name = "legacy"
+
+[[files]]
+src = "//shared/legacy.conf"
+dst = "~/.legacy.conf"
+mode = "link"

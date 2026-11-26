@@ -1,0 +1,2 @@
+ <ESC>[1;38;2;126;231;135m✓<ESC>[0m <ESC>[1;38;2;126;231;135mAll good<ESC>[0m
+   <ESC>[38;2;126;231;135m✓<ESC>[0m <ESC>[38;2;139;148;158m64 packages · 86 files · 3 git sources<ESC>[0m        <ESC>[38;2;139;148;158mchecked in 0.8s<ESC>[0m

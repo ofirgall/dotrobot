@@ -1,0 +1,716 @@
+{
+  "$id": "https://dots.dev/schemas/dots-status.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "data": {
+      "properties": {
+        "attention": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "counts": {
+          "properties": {
+            "bins": {
+              "additionalProperties": {
+                "minimum": 1,
+                "type": "integer"
+              },
+              "type": "object"
+            },
+            "files": {
+              "additionalProperties": {
+                "minimum": 1,
+                "type": "integer"
+              },
+              "type": "object"
+            },
+            "git": {
+              "additionalProperties": {
+                "minimum": 1,
+                "type": "integer"
+              },
+              "type": "object"
+            },
+            "packages": {
+              "additionalProperties": {
+                "minimum": 1,
+                "type": "integer"
+              },
+              "type": "object"
+            },
+            "todos": {
+              "additionalProperties": {
+                "minimum": 1,
+                "type": "integer"
+              },
+              "type": "object"
+            }
+          },
+          "required": [
+            "packages",
+            "files",
+            "todos",
+            "git",
+            "bins"
+          ],
+          "type": "object"
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "detail": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "env": {
+          "properties": {
+            "path": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "source": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "vars": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            }
+          },
+          "required": [
+            "path",
+            "vars",
+            "source"
+          ],
+          "type": "object"
+        },
+        "files": {
+          "items": {
+            "properties": {
+              "area": {
+                "enum": [
+                  "packages",
+                  "files",
+                  "todos",
+                  "git",
+                  "bins"
+                ]
+              },
+              "detail": {
+                "type": "string"
+              },
+              "have": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "hints": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "latest": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "name": {
+                "type": "string"
+              },
+              "package": {
+                "type": "string"
+              },
+              "provider": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "state": {
+                "enum": [
+                  "ok",
+                  "outdated",
+                  "missing",
+                  "drift",
+                  "orphan",
+                  "unmanaged",
+                  "excluded",
+                  "n/a",
+                  "pending-restart",
+                  "blocked-by-policy",
+                  "conflict",
+                  "modified",
+                  "stale",
+                  "dangling",
+                  "foreign-entries",
+                  "tampered",
+                  "pending",
+                  "done",
+                  "skipped",
+                  "auto",
+                  "failed",
+                  "running"
+                ]
+              },
+              "want": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "area",
+              "name",
+              "package",
+              "state",
+              "provider",
+              "want",
+              "have",
+              "latest",
+              "detail",
+              "hints"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "header": {
+          "properties": {
+            "arch": {
+              "type": "string"
+            },
+            "branch": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "commit": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "dirty": {
+              "type": "boolean"
+            },
+            "machine": {
+              "type": "string"
+            },
+            "os": {
+              "type": "string"
+            },
+            "platform": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "root": {
+              "type": "string"
+            },
+            "tags": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "root",
+            "branch",
+            "commit",
+            "dirty",
+            "machine",
+            "platform",
+            "os",
+            "arch",
+            "tags"
+          ],
+          "type": "object"
+        },
+        "history": {
+          "items": {
+            "properties": {
+              "exit": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "from": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "op": {
+                "type": "string"
+              },
+              "provider": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "run": {
+                "type": "string"
+              },
+              "to": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "ts": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "ts",
+              "op"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "inclusion": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "items": {
+          "items": {
+            "properties": {
+              "area": {
+                "enum": [
+                  "packages",
+                  "files",
+                  "todos",
+                  "git",
+                  "bins"
+                ]
+              },
+              "detail": {
+                "type": "string"
+              },
+              "have": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "hints": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "latest": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "name": {
+                "type": "string"
+              },
+              "package": {
+                "type": "string"
+              },
+              "provider": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "state": {
+                "enum": [
+                  "ok",
+                  "outdated",
+                  "missing",
+                  "drift",
+                  "orphan",
+                  "unmanaged",
+                  "excluded",
+                  "n/a",
+                  "pending-restart",
+                  "blocked-by-policy",
+                  "conflict",
+                  "modified",
+                  "stale",
+                  "dangling",
+                  "foreign-entries",
+                  "tampered",
+                  "pending",
+                  "done",
+                  "skipped",
+                  "auto",
+                  "failed",
+                  "running"
+                ]
+              },
+              "want": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "area",
+              "name",
+              "package",
+              "state",
+              "provider",
+              "want",
+              "have",
+              "latest",
+              "detail",
+              "hints"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "overrides": {
+          "items": {
+            "properties": {
+              "file": {
+                "type": "string"
+              },
+              "scope": {
+                "enum": [
+                  "repo",
+                  "machine"
+                ]
+              }
+            },
+            "required": [
+              "scope",
+              "file"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "package": {
+          "type": "string"
+        },
+        "provider": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "state": {
+          "enum": [
+            "ok",
+            "outdated",
+            "missing",
+            "drift",
+            "orphan",
+            "unmanaged",
+            "excluded",
+            "n/a",
+            "pending-restart",
+            "blocked-by-policy",
+            "conflict",
+            "modified",
+            "stale",
+            "dangling",
+            "foreign-entries",
+            "tampered",
+            "pending",
+            "done",
+            "skipped",
+            "auto",
+            "failed",
+            "running"
+          ]
+        },
+        "todos": {
+          "items": {
+            "properties": {
+              "area": {
+                "enum": [
+                  "packages",
+                  "files",
+                  "todos",
+                  "git",
+                  "bins"
+                ]
+              },
+              "detail": {
+                "type": "string"
+              },
+              "have": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "hints": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "latest": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "name": {
+                "type": "string"
+              },
+              "package": {
+                "type": "string"
+              },
+              "provider": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "state": {
+                "enum": [
+                  "ok",
+                  "outdated",
+                  "missing",
+                  "drift",
+                  "orphan",
+                  "unmanaged",
+                  "excluded",
+                  "n/a",
+                  "pending-restart",
+                  "blocked-by-policy",
+                  "conflict",
+                  "modified",
+                  "stale",
+                  "dangling",
+                  "foreign-entries",
+                  "tampered",
+                  "pending",
+                  "done",
+                  "skipped",
+                  "auto",
+                  "failed",
+                  "running"
+                ]
+              },
+              "want": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "area",
+              "name",
+              "package",
+              "state",
+              "provider",
+              "want",
+              "have",
+              "latest",
+              "detail",
+              "hints"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "versions": {
+          "properties": {
+            "installed": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "latest": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "locked": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "wanted": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "wanted",
+            "installed",
+            "locked",
+            "latest"
+          ],
+          "type": "object"
+        },
+        "view": {
+          "enum": [
+            "summary",
+            "all",
+            "package"
+          ]
+        }
+      },
+      "required": [
+        "view",
+        "header"
+      ],
+      "type": "object"
+    },
+    "errors": {
+      "items": {
+        "properties": {
+          "code": {
+            "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$",
+            "type": "string"
+          },
+          "hint": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "provenance": {
+            "items": {
+              "properties": {
+                "col": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "file": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "line": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "source": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "source"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "code",
+          "message",
+          "hint",
+          "provenance"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "ok": {
+      "type": "boolean"
+    },
+    "schema": {
+      "const": "dots/status@1"
+    },
+    "warnings": {
+      "items": {
+        "properties": {
+          "code": {
+            "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$",
+            "type": "string"
+          },
+          "hint": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "provenance": {
+            "items": {
+              "properties": {
+                "col": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "file": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "line": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "source": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "source"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "code",
+          "message",
+          "hint",
+          "provenance"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "schema",
+    "ok",
+    "data",
+    "warnings",
+    "errors"
+  ],
+  "title": "dots status --json (schema version 1)",
+  "type": "object"
+}

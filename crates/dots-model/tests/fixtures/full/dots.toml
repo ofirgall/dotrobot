@@ -1,0 +1,45 @@
+schema = 1
+requires_dots = ">=0.1"
+name = "ofirgall/dotfiles"
+recommended = ["base"]
+
+[priority]
+any = ["cargo", "script"]
+macos = ["brew", "cargo"]
+"ubuntu-22.04" = ["cargo", "apt"]
+
+[tags]
+remote = "headless box"
+gui = { description = "has a desktop", recommended = { macos = true, linux = false } }
+
+[paths]
+app_support = { macos = "~/Library/Application Support", linux = "~/.config" }
+shared = "~/.shared"
+
+[platforms.pop]
+parent = "ubuntu"
+
+[providers.go]
+available = "command -v go"
+bootstrap = "go"
+installed = { cmd = "ls ~/go/bin", parse = "lines" }
+install = "go install {source}@{version|latest}"
+batch = false
+
+[provider.brew]
+cask_args = ["--no-quarantine"]
+
+[settings.ghostty]
+font_size = 14
+
+[[upstream]]
+alias = "ofirgall"
+url = "github:ofirgall/dotfiles"
+follow = "main"
+import = ["bundle:cli"]
+rename = { "pkg:ghostty" = "ghostty-ofir" }
+trust = "review"
+scripts = "allow"
+
+[platform.macos.priority]
+macos = ["brew"]

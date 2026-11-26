@@ -1,0 +1,6 @@
+schema = 1
+name = "pinned"
+
+[integrity]
+"skill/SKILL.md" = "sha256:abc"
+tree = "sha256:def"
