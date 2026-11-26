@@ -34,6 +34,26 @@ pub fn plan_summary(plan: &Plan) -> String {
     if removals > 0 {
         parts.push(plural(removals, "file removal", "file removals"));
     }
+    if !plan.settings.is_empty() {
+        parts.push(plural(
+            plan.settings.len(),
+            "setting change",
+            "setting changes",
+        ));
+    }
+    if !plan.services.is_empty() {
+        parts.push(plural(
+            plan.services.len(),
+            "service action",
+            "service actions",
+        ));
+    }
+    if !plan.shims.is_empty() {
+        parts.push(plural(plan.shims.len(), "shim", "shims"));
+    }
+    if !plan.hooks.is_empty() {
+        parts.push(plural(plan.hooks.len(), "hook", "hooks"));
+    }
     parts.join(" \u{b7} ")
 }
 
@@ -80,6 +100,9 @@ pub fn plan_blocks(plan: &Plan, backup_dir: &str) -> Vec<Block> {
             if s.needs_root {
                 notes.push("needs sudo");
             }
+            if let Some(n) = &s.note {
+                notes.push(n);
+            }
             if s.interactive {
                 notes.push("interactive, runs last");
             }
@@ -120,15 +143,173 @@ pub fn plan_blocks(plan: &Plan, backup_dir: &str) -> Vec<Block> {
                     f.detail.clone()
                 }));
             if f.action == "failed" {
-                row = row.hint(format!("dots lint  # then fix {}", f.package));
+                // `message → command`: a blocked render names the command that unblocks it.
+                row = match f.detail.split_once(" \u{2192} ") {
+                    Some((_, cmd)) => row.hint(cmd.to_string()),
+                    None => row.hint(format!("dots lint  # then fix {}", f.package)),
+                };
             }
             t.push(row);
         }
         out.push(Block::Section(Section::new("Files").block(t)));
     }
 
+    if !plan.settings.is_empty() {
+        let mut t = Table::new()
+            .styled_column("kind", 3, dots_core::Style::Muted)
+            .styled_column("change", 4, dots_core::Style::Muted);
+        for s in &plan.settings {
+            let lead: Lead = match s.action.as_str() {
+                "restore" => Marker::Replace.into(),
+                "delete" => Marker::Remove.into(),
+                _ => Marker::Change.into(),
+            };
+            let note = if s.root {
+                format!("{} (sudo)", s.detail)
+            } else {
+                s.detail.clone()
+            };
+            t.push(
+                Row::new(lead, s.label.clone())
+                    .cell(Cell::muted(s.kind.clone()))
+                    .cell(Cell::muted(note)),
+            );
+        }
+        out.push(Block::Section(Section::new("Settings").block(t)));
+    }
+    if !plan.services.is_empty() {
+        let mut t = Table::new()
+            .styled_column("manager", 3, dots_core::Style::Muted)
+            .styled_column("why", 3, dots_core::Style::Muted);
+        for s in &plan.services {
+            t.push(
+                Row::new(Marker::Change, format!("{} {}", s.action, s.name))
+                    .cell(Cell::muted(s.manager.clone()))
+                    .cell(Cell::muted(s.detail.clone())),
+            );
+        }
+        out.push(Block::Section(Section::new("Services").block(t)));
+        let lines: Vec<String> = plan
+            .services
+            .iter()
+            .flat_map(|s| s.commands.iter().cloned())
+            .collect();
+        if !lines.is_empty() {
+            out.push(Block::Section(
+                Section::new("Service commands").block(Block::Code { title: None, lines }),
+            ));
+        }
+    }
+
+    if !plan.shims.is_empty() {
+        let mut t = Table::new()
+            .styled_column("package", 3, dots_core::Style::Muted)
+            .styled_column("target", 3, dots_core::Style::Muted);
+        for sh in &plan.shims {
+            let target = match (&sh.target, sh.action.as_str()) {
+                (_, "remove") => String::new(),
+                (Some(t), _) => t.display().to_string(),
+                (None, _) => sh.bin.clone(),
+            };
+            let marker = if sh.action == "remove" {
+                Marker::Remove
+            } else {
+                Marker::Add
+            };
+            t.push(
+                Row::new(marker, format!("{} {}", sh.action, sh.dst))
+                    .cell(Cell::muted(sh.package.clone()))
+                    .cell(Cell::muted(target)),
+            );
+        }
+        out.push(Block::Section(Section::new("Shims").block(t)));
+    }
+    if !plan.hooks.is_empty() {
+        let mut t = Table::new()
+            .styled_column("package", 3, dots_core::Style::Muted)
+            .styled_column("why", 3, dots_core::Style::Muted);
+        for h in &plan.hooks {
+            t.push(
+                Row::new(Marker::Change, format!("{}  {}", h.event, h.short()))
+                    .cell(Cell::muted(h.package.clone()))
+                    .cell(Cell::muted(h.why.clone())),
+            );
+        }
+        out.push(Block::Section(Section::new("Hooks").block(t)));
+    }
+
+    // dots.lock rows that change, and what a provider cannot hold to.
+    let shown: Vec<_> = plan
+        .lock
+        .iter()
+        .filter(|l| (l.rewrite && (l.from.is_some() || l.has_step)) || l.drift.is_some())
+        .collect();
+    if !shown.is_empty() {
+        let mut t = Table::new()
+            .styled_column("platform", 3, dots_core::Style::Muted)
+            .column("lock", 4)
+            .styled_column("note", 2, dots_core::Style::Muted);
+        for l in shown {
+            let lead: Lead = if l.drift.is_some() && !l.rewrite {
+                State::Drift.into()
+            } else if l.from.is_none() {
+                Marker::Add.into()
+            } else {
+                Marker::Change.into()
+            };
+            let cell = match (&l.from, &l.to) {
+                (Some(f), Some(t)) => Cell::version(f, t),
+                (None, Some(t)) => Cell::new(t.clone(), dots_core::Style::Version),
+                (Some(f), None) => {
+                    Cell::new(format!("{f} \u{2192} (installed)"), dots_core::Style::Plain)
+                }
+                (None, None) => Cell::muted("(installed)"),
+            };
+            t.push(
+                Row::new(lead, l.package.clone())
+                    .cell(Cell::muted(l.platform.clone()))
+                    .cell(cell)
+                    .cell(Cell::muted(l.drift.clone().unwrap_or_default())),
+            );
+        }
+        out.push(Block::Section(Section::new("Lock").block(t)));
+    }
+
     // Heads up: risks come before any confirmation.
     let mut heads: Vec<Block> = Vec::new();
+    let apps: std::collections::BTreeSet<&str> = plan
+        .settings
+        .iter()
+        .flat_map(|s| s.restart.iter().map(String::as_str))
+        .chain(plan.settings.iter().flat_map(|s| {
+            s.requires
+                .iter()
+                .filter_map(|r| r.strip_prefix("restart-app:"))
+        }))
+        .collect();
+    if !apps.is_empty() {
+        heads.push(Block::callout(format!(
+            "{} will be restarted once, at the end",
+            apps.into_iter().collect::<Vec<_>>().join(", ")
+        )));
+    }
+    let needs = |what: &str| {
+        plan.settings
+            .iter()
+            .any(|s| s.requires.iter().any(|r| r == what))
+    };
+    match (needs("logout"), needs("reboot")) {
+        (true, true) => heads.push(Block::callout(
+            "Some settings only take effect after you log out, and some after a reboot",
+        )),
+        (true, false) => heads.push(Block::callout(
+            "Some settings only take effect after you log out",
+        )),
+        (false, true) => heads.push(Block::callout(
+            "Some settings only take effect after a reboot",
+        )),
+        (false, false) => {}
+    }
     if plan.needs_root() {
         heads.push(Block::callout("Needs your password once (sudo)"));
     }
@@ -141,6 +322,14 @@ pub fn plan_blocks(plan: &Plan, backup_dir: &str) -> Vec<Block> {
         heads.push(Block::callout(format!(
             "{} will be backed up to {backup_dir} first",
             plural(backups, "existing file", "existing files")
+        )));
+    }
+    for s in plan.steps.iter().filter(|s| s.kind == StepKind::Downgrade) {
+        heads.push(Block::callout(format!(
+            "\u{26a0} downgrade {} {} \u{2192} {}: apply asks first, even with --yes (--allow-downgrade skips the question)",
+            s.package,
+            s.from.as_deref().unwrap_or("?"),
+            s.to.as_deref().unwrap_or("?")
         )));
     }
     for s in plan.steps.iter().filter(|s| s.interactive) {
@@ -209,7 +398,14 @@ pub fn apply_report(mut report: Report, r: &ApplyReport, backup_dir: &str) -> Re
         }
         _ => {}
     }
-    if r.steps.is_empty() && r.files.is_empty() && r.status == Status::Done {
+    if r.steps.is_empty()
+        && r.files.is_empty()
+        && r.settings.is_empty()
+        && r.services.is_empty()
+        && r.hooks.is_empty()
+        && r.shims.is_empty()
+        && r.status == Status::Done
+    {
         return report.with_headline(
             Tone::Ok,
             "Nothing to do: the machine already matches the repo.",
@@ -226,9 +422,23 @@ pub fn apply_report(mut report: Report, r: &ApplyReport, backup_dir: &str) -> Re
         .iter()
         .filter(|s| s.status == StepStatus::Failed)
         .count()
-        + r.files.iter().filter(|f| !f.ok).count();
-    let total = r.steps.len() + r.files.len();
-    let done = ok + r.files.iter().filter(|f| f.ok).count();
+        + r.files.iter().filter(|f| !f.ok).count()
+        + r.settings.iter().filter(|s| !s.ok).count()
+        + r.services.iter().filter(|s| !s.ok).count()
+        + r.hooks.iter().filter(|h| !h.ok).count()
+        + r.shims.iter().filter(|s| !s.ok).count();
+    let total = r.steps.len()
+        + r.files.len()
+        + r.settings.len()
+        + r.services.len()
+        + r.hooks.len()
+        + r.shims.len();
+    let done = ok
+        + r.files.iter().filter(|f| f.ok).count()
+        + r.settings.iter().filter(|s| s.ok).count()
+        + r.services.iter().filter(|s| s.ok).count()
+        + r.hooks.iter().filter(|h| h.ok).count()
+        + r.shims.iter().filter(|s| s.ok).count();
     let (tone, text) = if r.status == Status::Interrupted {
         (
             Tone::Warn,
@@ -292,6 +502,100 @@ pub fn apply_report(mut report: Report, r: &ApplyReport, backup_dir: &str) -> Re
         }
         report.push(Block::Section(Section::new("Files").block(t)));
     }
+    if !r.settings.is_empty() {
+        let mut t = Table::new()
+            .styled_column("kind", 3, dots_core::Style::Muted)
+            .styled_column("change", 3, dots_core::Style::Muted);
+        for s in &r.settings {
+            let state = if s.ok { State::Done } else { State::Failed };
+            let detail = if s.ok {
+                s.step.detail.clone()
+            } else {
+                s.detail.clone().unwrap_or_default()
+            };
+            t.push(
+                Row::new(state, s.step.label.clone())
+                    .cell(Cell::muted(s.step.kind.clone()))
+                    .cell(Cell::muted(detail)),
+            );
+        }
+        report.push(Block::Section(Section::new("Settings").block(t)));
+    }
+    if !r.restarts.is_empty() {
+        let names: Vec<String> = r.restarts.iter().map(|x| x.app.clone()).collect();
+        report.push(Block::text(format!("Restarted {}", names.join(", "))));
+    }
+    if !r.services.is_empty() {
+        let mut t = Table::new()
+            .styled_column("manager", 3, dots_core::Style::Muted)
+            .styled_column("detail", 3, dots_core::Style::Muted);
+        for s in &r.services {
+            let state = if s.ok { State::Done } else { State::Failed };
+            let detail = if s.ok {
+                s.step.detail.clone()
+            } else {
+                s.detail.clone().unwrap_or_default()
+            };
+            t.push(
+                Row::new(state, format!("{} {}", s.step.action, s.step.name))
+                    .cell(Cell::muted(s.step.manager.clone()))
+                    .cell(Cell::muted(detail)),
+            );
+        }
+        report.push(Block::Section(Section::new("Services").block(t)));
+    }
+    if !r.shims.is_empty() {
+        let mut t = Table::new()
+            .styled_column("package", 3, dots_core::Style::Muted)
+            .styled_column("detail", 3, dots_core::Style::Muted);
+        for sh in &r.shims {
+            let state = if sh.ok { State::Done } else { State::Failed };
+            let detail = if sh.ok {
+                sh.step
+                    .target
+                    .as_ref()
+                    .map_or_else(String::new, |t| t.display().to_string())
+            } else {
+                sh.detail.clone().unwrap_or_default()
+            };
+            t.push(
+                Row::new(state, format!("{} {}", sh.step.action, sh.step.dst))
+                    .cell(Cell::muted(sh.step.package.clone()))
+                    .cell(Cell::muted(detail)),
+            );
+        }
+        report.push(Block::Section(Section::new("Shims").block(t)));
+    }
+    if !r.hooks.is_empty() {
+        let mut t = Table::new()
+            .styled_column("package", 3, dots_core::Style::Muted)
+            .styled_column("detail", 3, dots_core::Style::Muted);
+        for h in &r.hooks {
+            let state = if h.ok { State::Done } else { State::Failed };
+            let detail = if h.ok {
+                dur(h.dur_ms)
+            } else {
+                h.detail.clone().unwrap_or_default()
+            };
+            t.push(
+                Row::new(state, format!("{}  {}", h.step.event, h.step.short()))
+                    .cell(Cell::muted(h.step.package.clone()))
+                    .cell(Cell::muted(detail)),
+            );
+        }
+        report.push(Block::Section(Section::new("Hooks").block(t)));
+    }
+    if !r.hooks_skipped.is_empty() {
+        report.push(Block::text(format!(
+            "{} not run: {}",
+            plural(r.hooks_skipped.len(), "hook", "hooks"),
+            r.hooks_skipped
+                .iter()
+                .map(|(h, why)| format!("{} {} ({why})", h.package, h.event))
+                .collect::<Vec<_>>()
+                .join("; ")
+        )));
+    }
     for s in r.steps.iter().filter(|s| s.status == StepStatus::Failed) {
         if let Some(e) = &s.error {
             report.push(Block::Code {
@@ -305,6 +609,21 @@ pub fn apply_report(mut report: Report, r: &ApplyReport, backup_dir: &str) -> Re
             "{} left alone: their package did not install",
             plural(r.files_skipped.len(), "file", "files")
         )));
+    }
+    if !r.settings_skipped.is_empty() || !r.services_skipped.is_empty() {
+        report.push(Block::text(format!(
+            "{} left alone: their package did not install or configure",
+            plural(
+                r.settings_skipped.len() + r.services_skipped.len(),
+                "setting or service",
+                "settings and services"
+            )
+        )));
+    }
+    for t in &r.todos {
+        if t.reason.starts_with("logout:") || t.reason.starts_with("reboot:") {
+            report.push(Block::text(format!("{}: {}", t.package, t.reason)));
+        }
     }
     if !r.todos.is_empty() {
         report.push(Block::hint("dots todo"));

@@ -163,6 +163,12 @@ pub struct Package {
     #[serde(rename = "providers")]
     raw_providers: BTreeMap<String, Value>,
     pub files: Vec<FileEntry>,
+    /// `[[defaults]]` (macOS), `[[registry]]` (Windows), `[[xdg]]` (Linux): system settings.
+    pub defaults: Vec<DefaultsEntry>,
+    pub registry: Vec<RegistryEntry>,
+    pub xdg: Vec<XdgEntry>,
+    /// `[service]`: a background service the package keeps enabled and running.
+    pub service: Option<ServiceDecl>,
     pub settings: BTreeMap<String, SettingDecl>,
     pub env: EnvSpec,
     pub hooks: Hooks,
@@ -259,6 +265,8 @@ pub struct FileEntry {
     pub format: Option<String>,
     pub kind: Option<String>,
     pub template: Option<String>,
+    /// Line-comment leader for directives and generated headers (`//` for jsonc, `#` otherwise).
+    pub comment: Option<String>,
     pub when: Option<String>,
     pub url: Option<String>,
     pub rev: Option<String>,
@@ -336,9 +344,9 @@ macro_rules! provider_struct {
 }
 
 provider_struct!(Brew { cask: bool, tap: Option<String> });
-provider_struct!(Apt { ppa: Option<String> });
-provider_struct!(Cargo { locked: Option<bool>, git: Option<String>, rev: Option<String>, features: Vec<String> });
-provider_struct!(Uv { kind: Option<String>, python: Option<String>, requirements: Option<String> });
+provider_struct!(Apt { ppa: Option<String>, repo: Option<AptRepo>, pin: Option<AptPin> });
+provider_struct!(Cargo { locked: Option<bool>, git: Option<String>, rev: Option<String>, features: Vec<String>, path: Option<String>, git_fetch_with_cli: bool });
+provider_struct!(Uv { kind: Option<String>, python: Option<String>, requirements: Option<String>, path: Option<String>, git: Option<String>, rev: Option<String>, git_fetch_with_cli: bool, break_system_packages: bool });
 provider_struct!(Npm {});
 provider_struct!(GitProvider { url: Option<String>, rev: Option<String> });
 provider_struct!(GithubRelease { repo: Option<String>, asset: Option<String>, sha256: Option<String>, version: Option<String> });
@@ -354,7 +362,39 @@ provider_struct!(Script {
     interactive: bool,
     versionless: bool,
     timeout: Option<String>,
+    lock: Option<String>,
+    fetch: Option<ScriptFetch>,
 });
+
+/// `repo = { ppa }` or `{ url, suite, components, key, fingerprint }` of an apt package.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct AptRepo {
+    pub ppa: Option<String>,
+    pub url: Option<String>,
+    pub suite: Option<String>,
+    /// `[]` (or `flat = true`) declares a flat repository.
+    pub components: Option<Vec<String>>,
+    pub flat: bool,
+    pub key: Option<String>,
+    pub fingerprint: Option<String>,
+}
+
+/// `pin = { origin, priority }`: an apt preferences stanza.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct AptPin {
+    pub origin: Option<String>,
+    pub priority: Option<i64>,
+}
+
+/// `fetch = { url, sha256 }` of a script package.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct ScriptFetch {
+    pub url: Option<String>,
+    pub sha256: Option<String>,
+}
 provider_struct!(PlainProvider { id: Option<String> });
 provider_struct!(BrowserExt {
     chrome: Option<String>,
@@ -548,4 +588,65 @@ pub struct MachineFile {
     pub platform_extra: Option<ListSpec>,
     pub facts: BTreeMap<String, Value>,
     pub settings: SettingValues,
+}
+
+// ------------------------------------------------------- system settings, services
+
+/// `[[defaults]]`: one macOS `defaults` value (a dotted `key` edits one entry of a dict).
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct DefaultsEntry {
+    pub domain: String,
+    pub key: String,
+    pub value: Option<Value>,
+    /// Apps restarted once, at the end of the run, after a change.
+    pub restart: Vec<String>,
+    pub root: bool,
+    /// `logout`, `reboot` or `restart-app:<name>`: what a change needs before it takes effect.
+    pub requires: Vec<String>,
+}
+
+/// `[[registry]]`: one Windows registry value.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct RegistryEntry {
+    pub key: String,
+    pub name: String,
+    #[serde(rename = "type")]
+    pub ty: Option<String>,
+    pub value: Option<Value>,
+}
+
+/// `[[xdg]]`: a Linux default application (`mime` + `app`) or an `xdg-settings` value.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct XdgEntry {
+    pub mime: Vec<String>,
+    pub app: Option<String>,
+    pub setting: Option<String>,
+    pub value: Option<String>,
+}
+
+/// `[service]`: `manager` is `auto`, `brew`, `launchd`, `systemd-user` or `windows-startup`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct ServiceDecl {
+    pub name: String,
+    pub manager: String,
+    pub enabled: bool,
+    pub running: bool,
+    /// A file in the package, linked into the manager's unit directory.
+    pub unit: Option<String>,
+}
+
+impl Default for ServiceDecl {
+    fn default() -> Self {
+        ServiceDecl {
+            name: String::new(),
+            manager: "auto".into(),
+            enabled: true,
+            running: true,
+            unit: None,
+        }
+    }
 }

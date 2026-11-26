@@ -125,10 +125,74 @@ fn library_mode_installs_into_system_python() {
             "libtmux"
         ]
     );
+    let err = p
+        .plan(&[op(OpKind::Install, "x", Some("kind=conda"), None)])
+        .unwrap_err()
+        .to_string();
     assert!(
-        p.plan(&[op(OpKind::Install, "x", Some("kind=venv"), None)])
-            .is_err()
+        err.contains("`conda`") && err.contains("`tool`, `lib` or `venv`"),
+        "{err}"
     );
+}
+
+/// ARCHITECTURE 5.2: `kind = "venv"` + `requirements` creates `~/.local/share/dots/venvs/<name>`
+/// and installs the requirements into it (it used to be refused as "not supported yet").
+#[test]
+fn venv_kind_creates_the_venv_and_installs_requirements() {
+    let p = UvProvider::with_bin("/u/uv").with_venv_root("/h/venvs");
+    let spec = "kind=venv;requirements=requirements.txt;pkg_dir=/repo/packages/scripts";
+    let actions = p
+        .plan(&[op(OpKind::Install, "scripts", Some(spec), None)])
+        .unwrap();
+    assert_eq!(actions.len(), 2);
+    assert!(actions[0].ops.is_empty(), "venv creation is a prep action");
+    assert_eq!(
+        actions[0].argv,
+        ["/u/uv", "venv", "--allow-existing", "/h/venvs/scripts"]
+    );
+    assert_eq!(actions[1].ops.len(), 1);
+    assert_eq!(
+        actions[1].argv,
+        [
+            "/u/uv",
+            "pip",
+            "install",
+            "--python",
+            "/h/venvs/scripts/bin/python",
+            "-r",
+            "/repo/packages/scripts/requirements.txt"
+        ]
+    );
+    let up = p
+        .plan(&[op(OpKind::Upgrade, "scripts", Some(spec), None)])
+        .unwrap();
+    assert!(up[1].argv.contains(&"--upgrade".to_string()));
+    assert_eq!(
+        argv(&p, op(OpKind::Remove, "scripts", Some("kind=venv"), None)),
+        ["/bin/rm", "-rf", "/h/venvs/scripts"]
+    );
+}
+
+#[test]
+fn a_venv_directory_counts_as_installed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let bin = tmp.path().join(".local/bin/uv");
+    std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+    std::fs::write(&bin, "").unwrap();
+    let venv = tmp.path().join(".local/share/dots/venvs/scripts");
+    std::fs::create_dir_all(&venv).unwrap();
+    std::fs::write(venv.join("pyvenv.cfg"), "home = /usr/bin\n").unwrap();
+    std::fs::create_dir_all(tmp.path().join(".local/share/dots/venvs/half")).unwrap();
+    let rec = Arc::new(RecordingRunner::new());
+    rec.on(&[bin.to_str().unwrap(), "tool", "list"], Output::ok(""));
+    let ctx = Ctx {
+        runner: rec,
+        home: tmp.path().into(),
+        ..Ctx::default()
+    };
+    let m = UvProvider::for_ctx(&ctx).installed(&ctx).unwrap();
+    assert!(m.contains_key("scripts"));
+    assert!(!m.contains_key("half"), "no pyvenv.cfg, not a venv");
 }
 
 #[test]
@@ -273,4 +337,310 @@ fn exec_resolves_bare_program() {
     assert_eq!(a.argv[0], "uv");
     assert!(p.exec(&ctx, &a).unwrap().success);
     assert_eq!(rec.commands()[0].program, bin);
+}
+
+#[test]
+fn path_and_git_sources() {
+    let p = UvProvider::with_bin("/u/uv");
+    let path = op(
+        OpKind::Install,
+        "mytool",
+        Some("path=mytool;pkg_dir=/repo/packages/x"),
+        None,
+    );
+    assert_eq!(
+        argv(&p, path.clone()),
+        ["/u/uv", "tool", "install", "/repo/packages/x/mytool"]
+    );
+    let up = Op {
+        kind: OpKind::Upgrade,
+        ..path
+    };
+    assert_eq!(
+        argv(&p, up),
+        [
+            "/u/uv",
+            "tool",
+            "install",
+            "--force",
+            "/repo/packages/x/mytool"
+        ]
+    );
+    let git = op(
+        OpKind::Install,
+        "mytool",
+        Some("git=git+ssh://git@github.com/x/y"),
+        None,
+    );
+    assert_eq!(
+        argv(&p, git),
+        ["/u/uv", "tool", "install", "git+ssh://git@github.com/x/y"]
+    );
+    let rev = op(
+        OpKind::Install,
+        "mytool",
+        Some("git=ssh://git@github.com/x/y;rev=abc;git_fetch_with_cli=true"),
+        None,
+    );
+    assert_eq!(
+        argv(&p, rev),
+        [
+            "/u/uv",
+            "tool",
+            "install",
+            "git+ssh://git@github.com/x/y@abc"
+        ]
+    );
+    assert!(
+        p.plan(&[op(OpKind::Install, "t", Some("path=a;git=b"), None)])
+            .is_err()
+    );
+    assert!(
+        p.plan(&[op(OpKind::Install, "t", Some("git=b"), Some("1.0"))])
+            .is_err()
+    );
+}
+
+#[test]
+fn local_tool_goes_outdated_when_its_repo_changes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let krate = tmp.path().join("mytool");
+    std::fs::create_dir_all(&krate).unwrap();
+    std::fs::write(
+        krate.join("pyproject.toml"),
+        "[project]\nname = \"mytool\"\nversion = \"0.5.1\"\n",
+    )
+    .unwrap();
+    let home = tmp.path().join("home");
+    std::fs::create_dir_all(home.join(".local/bin")).unwrap();
+    std::fs::write(home.join(".local/bin/uv"), "").unwrap();
+    let rec = Arc::new(RecordingRunner::new());
+    rec.on(&["/usr/bin/git"], Output::ok("2\n"));
+    rec.on(
+        &[home.join(".local/bin/uv").to_str().unwrap(), "tool", "list"],
+        Output::ok("mytool v0.5.1\n- mytool\n"),
+    );
+    let ctx = Ctx {
+        runner: rec.clone(),
+        home: home.clone(),
+        log_dir: tmp.path().join("logs"),
+        ..Ctx::default()
+    };
+    let receipt_dir = home.join(".local/share/uv/tools/mytool");
+    std::fs::create_dir_all(&receipt_dir).unwrap();
+    std::fs::write(
+        receipt_dir.join("uv-receipt.toml"),
+        format!(
+            "[tool]\nrequirements = [{{ name = \"mytool\", directory = \"{}\" }}]\n",
+            krate.display()
+        ),
+    )
+    .unwrap();
+    let spec = Spec::new("mytool").opt("path", &krate.to_string_lossy());
+    let p = UvProvider::for_ctx(&ctx);
+    let a = p
+        .plan(&[Op {
+            kind: OpKind::Install,
+            spec: spec.clone(),
+            version: None,
+        }])
+        .unwrap()
+        .remove(0);
+    assert!(p.exec(&ctx, &a).unwrap().success);
+    let have = p.installed(&ctx).unwrap()["mytool"].version.clone();
+    let latest = p.latest(&ctx, std::slice::from_ref(&spec)).unwrap()["mytool"]
+        .version
+        .clone();
+    if std::path::Path::new("/usr/bin/git").is_file() {
+        assert!(have.starts_with("0.5.1.2+"), "{have}");
+        assert_eq!(have, latest);
+        // The tree gains a commit.
+        rec.clear();
+        let rec2 = Arc::new(RecordingRunner::new());
+        rec2.on(&["/usr/bin/git"], Output::ok("3\n"));
+        let ctx2 = Ctx {
+            runner: rec2,
+            ..ctx
+        };
+        let newer = p.latest(&ctx2, &[spec]).unwrap()["mytool"].version.clone();
+        assert!(newer.starts_with("0.5.1.3+"), "{newer}");
+        assert_ne!(newer, have);
+    }
+}
+
+/// A stale path-rev sidecar entry must not override the version of a tool that has since
+/// been installed from a registry.
+#[test]
+fn stale_path_rev_does_not_override_a_registry_tool() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let uv = home.join(".local/bin/uv");
+    std::fs::create_dir_all(uv.parent().unwrap()).unwrap();
+    std::fs::write(&uv, "").unwrap();
+    let tools = home.join(".local/share/uv/tools");
+    for (name, req) in [
+        ("regtool", "{ name = \"regtool\" }".to_string()),
+        (
+            "pathtool",
+            "{ name = \"pathtool\", directory = \"/src/pathtool\" }".to_string(),
+        ),
+    ] {
+        std::fs::create_dir_all(tools.join(name)).unwrap();
+        std::fs::write(
+            tools.join(name).join("uv-receipt.toml"),
+            format!("[tool]\nrequirements = [{req}]\n"),
+        )
+        .unwrap();
+    }
+    std::fs::write(
+        home.join(".local/share/uv/dots-path-revs.json"),
+        r#"{"regtool":"0.5.1.2+abc","pathtool":"0.5.1.2+abc"}"#,
+    )
+    .unwrap();
+    let rec = Arc::new(RecordingRunner::new());
+    rec.on(
+        &[uv.to_str().unwrap(), "tool", "list"],
+        Output::ok("regtool v2.0.0\n- regtool\npathtool v0.5.1\n- pathtool\n"),
+    );
+    let ctx = Ctx {
+        runner: rec,
+        home,
+        ..Ctx::default()
+    };
+    let m = UvProvider::for_ctx(&ctx).installed(&ctx).unwrap();
+    assert_eq!(
+        m["regtool"].version, "2.0.0",
+        "registry tool keeps its real version"
+    );
+    assert_eq!(
+        m["pathtool"].version, "0.5.1.2+abc",
+        "path tool uses the sidecar"
+    );
+}
+
+/// A context whose runner reports a system python with the given stdlib dir, and uv installed.
+fn lib_ctx(stdlib: &std::path::Path) -> (tempfile::TempDir, Arc<RecordingRunner>, Ctx) {
+    let tmp = tempfile::tempdir().unwrap();
+    let bin = tmp.path().join(".local/bin/uv");
+    std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+    std::fs::write(&bin, "").unwrap();
+    let rec = Arc::new(RecordingRunner::new());
+    rec.on(
+        &["python3", "-c"],
+        Output::ok(&format!(
+            "{}\n{}/site-packages\n",
+            stdlib.display(),
+            stdlib.display()
+        )),
+    );
+    let ctx = Ctx {
+        runner: rec.clone(),
+        home: tmp.path().into(),
+        log_dir: tmp.path().join("logs"),
+        ..Ctx::default()
+    };
+    (tmp, rec, ctx)
+}
+
+/// PEP 668 (Ubuntu 24.04): a system lib on an externally managed python fails clearly, runs
+/// nothing, and points at `kind = "venv"` and the opt-in.
+#[test]
+fn system_lib_on_externally_managed_python_is_refused() {
+    let std_dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        std_dir.path().join("EXTERNALLY-MANAGED"),
+        "[externally-managed]\n",
+    )
+    .unwrap();
+    let (_t, rec, ctx) = lib_ctx(std_dir.path());
+    let p = UvProvider::new();
+    let a = p
+        .plan(&[op(
+            OpKind::Install,
+            "libtmux",
+            Some("kind=lib;python=system"),
+            None,
+        )])
+        .unwrap()
+        .remove(0);
+    assert!(!a.needs_root);
+    let err = p.exec(&ctx, &a).unwrap_err().to_string();
+    assert!(
+        err.contains("externally managed")
+            && err.contains("kind = \"venv\"")
+            && err.contains("break_system_packages = true"),
+        "{err}"
+    );
+    assert!(
+        rec.lines().iter().all(|l| !l.contains("pip install")),
+        "{:?}",
+        rec.lines()
+    );
+}
+
+/// A python without the marker installs as before.
+#[test]
+fn system_lib_on_unmanaged_python_installs() {
+    let std_dir = tempfile::tempdir().unwrap();
+    let (_t, rec, ctx) = lib_ctx(std_dir.path());
+    let p = UvProvider::new();
+    let a = p
+        .plan(&[op(
+            OpKind::Install,
+            "libtmux",
+            Some("kind=lib;python=system"),
+            None,
+        )])
+        .unwrap()
+        .remove(0);
+    assert!(p.exec(&ctx, &a).unwrap().success);
+    assert!(
+        rec.lines()
+            .iter()
+            .any(|l| l.contains("pip install --system libtmux"))
+    );
+}
+
+/// The opt-in passes `--break-system-packages`, skips the marker check, and asks for root only
+/// when the target is not writable.
+#[test]
+fn break_system_packages_opt_in() {
+    let std_dir = tempfile::tempdir().unwrap();
+    std::fs::write(std_dir.path().join("EXTERNALLY-MANAGED"), "").unwrap();
+    let (_t, rec, ctx) = lib_ctx(std_dir.path());
+    let opts = "kind=lib;python=system;break_system_packages=true";
+    for (root, want) in [(false, false), (true, true)] {
+        let p = UvProvider::new().with_system_root(root);
+        let a = p
+            .plan(&[op(OpKind::Install, "libtmux", Some(opts), Some("0.37.0"))])
+            .unwrap()
+            .remove(0);
+        assert_eq!(a.needs_root, want);
+        assert_eq!(
+            a.argv,
+            [
+                "uv",
+                "pip",
+                "install",
+                "--system",
+                "--break-system-packages",
+                "libtmux==0.37.0"
+            ]
+        );
+        assert!(p.exec(&ctx, &a).unwrap().success);
+    }
+    let rm = UvProvider::new()
+        .plan(&[op(OpKind::Remove, "libtmux", Some(opts), None)])
+        .unwrap()
+        .remove(0);
+    assert!(
+        rm.argv.contains(&"--break-system-packages".to_string()),
+        "{:?}",
+        rm.argv
+    );
+    assert!(
+        rec.lines()
+            .iter()
+            .any(|l| l.contains("--break-system-packages"))
+    );
 }

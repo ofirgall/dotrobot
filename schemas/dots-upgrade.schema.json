@@ -3,6 +3,70 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "properties": {
     "data": {
+      "properties": {
+        "upgrade": {
+          "properties": {
+            "commit": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "skipped": {
+              "items": {
+                "properties": {
+                  "package": {
+                    "type": "string"
+                  },
+                  "reason": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "package",
+                  "reason"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "targets": {
+              "items": {
+                "properties": {
+                  "from": {
+                    "type": "string"
+                  },
+                  "package": {
+                    "type": "string"
+                  },
+                  "provider": {
+                    "type": "string"
+                  },
+                  "to": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "package",
+                  "provider",
+                  "from",
+                  "to"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "targets",
+            "skipped"
+          ],
+          "type": "object"
+        }
+      },
       "type": "object"
     },
     "errors": {

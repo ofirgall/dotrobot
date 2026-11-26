@@ -1,8 +1,12 @@
 //! The `uv` provider: `uv tool` for CLIs, `uv pip` for libraries (library mode).
 //!
 //! Per-package options are `Spec::opts` keys:
-//! `kind=tool` (default) | `kind=lib` with `python=system|<interpreter>`. `kind=venv` is not
-//! supported yet and is refused at plan time.
+//! `kind=tool` (default) | `kind=lib` with `python=system|<interpreter>` | `kind=venv` with an
+//! optional `requirements` file (ARCHITECTURE 5.2): the package name is the venv's name, it
+//! lives at `~/.local/share/dots/venvs/<name>`, is created with `uv venv` and filled with
+//! `uv pip install -r <requirements>` (a relative path is relative to the package directory).
+//! A venv counts as installed when its `pyvenv.cfg` exists; `upgrade` re-runs the pip install
+//! with `--upgrade`, which is how a changed requirements file is applied.
 //!
 //! `installed()` makes ONE `uv tool list` call, plus, only when lib packages are registered
 //! ([`UvProvider::lib`]), ONE `uv pip list --format json` call per distinct python target
@@ -16,6 +20,7 @@ use std::path::{Path, PathBuf};
 use dots_facts::Facts;
 
 use crate::cargo::{command_env, exec_action, first_file, pep440_req, resolve_bare};
+use crate::pathsrc;
 use crate::{
     Action, Availability, BinEntry, Caps, Cmd, Ctx, Installed, Latest, Op, OpKind, Outcome,
     Provider, ProviderError, Result, Spec, Support,
@@ -38,6 +43,33 @@ fn availability(home: &Path) -> Availability {
     }
 }
 
+fn default_venv_root(home: &Path) -> PathBuf {
+    home.join(".local/share/dots/venvs")
+}
+
+fn revs_file(ctx: &Ctx) -> PathBuf {
+    let tools = tool_dir(ctx);
+    tools.parent().unwrap_or(&tools).join("dots-path-revs.json")
+}
+
+/// True when the tool's source is a local directory or file: its `tool list` requirement is a
+/// path/`file://` URL, or its receipt names a `directory`, `editable` or `path` requirement.
+fn is_path_tool(ctx: &Ctx, name: &str, source: Option<&str>) -> bool {
+    if source.is_some_and(|s| s.starts_with('/') || s.starts_with("file://")) {
+        return true;
+    }
+    let Ok(text) = std::fs::read_to_string(tool_dir(ctx).join(name).join("uv-receipt.toml")) else {
+        return false;
+    };
+    let marker = format!("name = \"{name}\"");
+    text.lines().any(|l| {
+        l.contains(&marker)
+            && ["directory = \"", "editable = \"", ", path = \""]
+                .iter()
+                .any(|k| l.contains(k))
+    })
+}
+
 fn tool_dir(ctx: &Ctx) -> PathBuf {
     if let Some(d) = ctx.env.get("UV_TOOL_DIR").filter(|d| !d.is_empty()) {
         return PathBuf::from(d);
@@ -51,8 +83,12 @@ fn tool_dir(ctx: &Ctx) -> PathBuf {
 #[derive(Debug, Clone)]
 pub struct UvProvider {
     bin: PathBuf,
+    /// Where `kind=venv` packages live (`~/.local/share/dots/venvs`).
+    venv_root: PathBuf,
     /// Registered library packages: name -> python target (`system` or an interpreter path).
     libs: BTreeMap<String, String>,
+    /// Test seam: overrides whether a `break_system_packages` install needs root.
+    system_root: Option<bool>,
 }
 
 impl Default for UvProvider {
@@ -66,15 +102,25 @@ impl UvProvider {
     pub fn new() -> Self {
         UvProvider {
             bin: PathBuf::from("uv"),
+            venv_root: default_venv_root(Path::new(&std::env::var("HOME").unwrap_or_default())),
             libs: BTreeMap::new(),
+            system_root: None,
         }
     }
 
     pub fn with_bin(bin: impl Into<PathBuf>) -> Self {
         UvProvider {
             bin: bin.into(),
+            venv_root: default_venv_root(Path::new(&std::env::var("HOME").unwrap_or_default())),
             libs: BTreeMap::new(),
+            system_root: None,
         }
+    }
+
+    /// Where `kind=venv` packages are created.
+    pub fn with_venv_root(mut self, root: impl Into<PathBuf>) -> Self {
+        self.venv_root = root.into();
+        self
     }
 
     /// Register a `kind=lib` package so `installed()` reports it. `python` is `system` or an
@@ -84,12 +130,122 @@ impl UvProvider {
         self
     }
 
+    /// Force whether opted-in system lib installs need root (otherwise probed from the system
+    /// python's site-packages).
+    pub fn with_system_root(mut self, needs_root: bool) -> Self {
+        self.system_root = Some(needs_root);
+        self
+    }
+
+    /// Does installing into the system python's site-packages need root? Not when we are root
+    /// or the directory is writable.
+    fn system_needs_root(&self) -> bool {
+        if let Some(r) = self.system_root {
+            return r;
+        }
+        if is_root() {
+            return false;
+        }
+        let out = std::process::Command::new("python3")
+            .args([
+                "-c",
+                "import sysconfig; print(sysconfig.get_path('purelib'))",
+            ])
+            .output();
+        match out {
+            Ok(o) if o.status.success() => {
+                !dir_writable(Path::new(String::from_utf8_lossy(&o.stdout).trim()))
+            }
+            _ => false,
+        }
+    }
+
     /// Resolve uv from the context (never `PATH`); falls back to a bare `uv`.
     pub fn for_ctx(ctx: &Ctx) -> Self {
-        match resolve_bin(&ctx.home) {
+        let p = match resolve_bin(&ctx.home) {
             Some(b) => Self::with_bin(b),
             None => Self::new(),
+        };
+        p.with_venv_root(default_venv_root(&ctx.home))
+    }
+}
+
+impl UvProvider {
+    /// `kind=venv`: `uv venv` (a preparatory action, no ops) then `uv pip install -r` for the
+    /// package's `requirements`; removal deletes the directory.
+    fn plan_venv(&self, bin: &str, op: &Op) -> Result<Vec<Action>> {
+        let v = |a: &[&str]| -> Vec<String> { a.iter().map(|s| (*s).to_string()).collect() };
+        let name = &op.spec.name;
+        let o = &op.spec.opts;
+        if name.is_empty() || name.contains(['/', '\\']) || name.starts_with('.') {
+            return Err(ProviderError::Other(format!(
+                "uv: `{name}` is not usable as a venv name"
+            )));
         }
+        let dir = self.venv_root.join(name);
+        let dir_s = dir.to_string_lossy().into_owned();
+        let act = |ops: Vec<Op>, argv: Vec<String>| Action {
+            kind: op.kind,
+            ops,
+            argv,
+            needs_root: false,
+        };
+        let reqs = o.get("requirements").map(|r| {
+            let p = Path::new(r);
+            match o.get("pkg_dir") {
+                Some(d) if p.is_relative() => Path::new(d).join(p),
+                _ => p.to_path_buf(),
+            }
+            .to_string_lossy()
+            .into_owned()
+        });
+        match op.kind {
+            OpKind::Pin | OpKind::Unpin => Err(no_pin()),
+            OpKind::Remove => Ok(vec![act(vec![op.clone()], v(&["/bin/rm", "-rf", &dir_s]))]),
+            OpKind::Install | OpKind::Upgrade => {
+                let mut create = v(&[bin, "venv", "--allow-existing"]);
+                if let Some(py) = o.get("python").filter(|p| *p != "system") {
+                    create.extend(v(&["--python", py]));
+                }
+                create.push(dir_s.clone());
+                let Some(reqs) = reqs else {
+                    return Ok(vec![act(vec![op.clone()], create)]);
+                };
+                let python = dir.join("bin/python").to_string_lossy().into_owned();
+                let mut pip = v(&[bin, "pip", "install", "--python", &python]);
+                if op.kind == OpKind::Upgrade {
+                    pip.push("--upgrade".into());
+                }
+                pip.extend(v(&["-r", &reqs]));
+                Ok(vec![act(Vec::new(), create), act(vec![op.clone()], pip)])
+            }
+        }
+    }
+}
+
+impl UvProvider {
+    /// PEP 668 guard: `kind=lib, python=system` on an externally-managed python fails with a
+    /// clear error unless the package opted in with `break_system_packages = true`.
+    fn refuse_externally_managed(&self, ctx: &Ctx, action: &Action) -> Result<()> {
+        for op in &action.ops {
+            if !is_system_lib(&op.spec) || break_system(&op.spec) {
+                continue;
+            }
+            if let Some((stdlib, _)) = system_python_dirs(ctx)
+                && externally_managed(&stdlib)
+            {
+                return Err(ProviderError::Other(format!(
+                    "uv: the system python is externally managed (PEP 668: {}/EXTERNALLY-MANAGED), \
+                     so `{}` cannot be installed into it. Use `kind = \"venv\"` (an isolated venv \
+                     under ~/.local/share/dots/venvs), or opt in with \
+                     `break_system_packages = true` in [providers.uv] to pass \
+                     --break-system-packages (uses sudo when the target is not writable)",
+                    stdlib.display(),
+                    op.spec.name
+                )));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -133,6 +289,31 @@ impl Provider for UvProvider {
             });
         }
         let mut map = parse_tool_list(&out.stdout);
+        // Path sources report the version they had when dots installed them.
+        // Only for tools that are still path installs: a tool later reinstalled from a
+        // registry keeps a stale sidecar entry, which must not override its real version.
+        for (name, version) in pathsrc::read_revs(&revs_file(ctx)) {
+            if let Some(i) = map.get_mut(&name)
+                && is_path_tool(ctx, &name, i.source.as_deref())
+            {
+                i.version = version;
+            }
+        }
+        // `kind=venv` packages: one per directory with a `pyvenv.cfg`. Their version is not
+        // tracked (`venv`): the package is installed or it is not.
+        if let Ok(rd) = std::fs::read_dir(&self.venv_root) {
+            for e in rd.flatten() {
+                if e.path().join("pyvenv.cfg").is_file()
+                    && let Some(name) = e.file_name().to_str()
+                {
+                    map.entry(name.to_string()).or_insert(Installed {
+                        version: "venv".into(),
+                        pinned: false,
+                        source: None,
+                    });
+                }
+            }
+        }
         let targets: std::collections::BTreeSet<&String> = self.libs.values().collect();
         for py in targets {
             let mut cmd = Cmd::new(&bin).args(["pip", "list"]);
@@ -180,24 +361,69 @@ impl Provider for UvProvider {
     fn latest(&self, ctx: &Ctx, specs: &[Spec]) -> Result<BTreeMap<String, Latest>> {
         // `uv` has no "latest version" query; a dry-run upgrade would install. PyPI's JSON API
         // is the planned source; until an HTTP client exists, report nothing.
-        let _ = (ctx, specs);
-        Ok(BTreeMap::new())
+        // Only local sources have an answer: their working tree.
+        let mut map = BTreeMap::new();
+        for s in specs {
+            if let Some(dir) = pathsrc::source_dir(s)
+                && let Some(version) = pathsrc::source_version(ctx, &dir)
+            {
+                map.insert(s.name.clone(), Latest { version });
+            }
+        }
+        Ok(map)
     }
 
     fn plan(&self, ops: &[Op]) -> Result<Vec<Action>> {
         let bin = self.bin.to_string_lossy().into_owned();
-        ops.iter()
-            .map(|op| {
+        let mut venv_actions: BTreeMap<usize, Vec<Action>> = BTreeMap::new();
+        for (i, op) in ops.iter().enumerate() {
+            if op.spec.opts.get("kind").map(String::as_str) == Some("venv") {
+                venv_actions.insert(i, self.plan_venv(&bin, op)?);
+            }
+        }
+        let planned: Vec<Result<Vec<Action>>> = ops
+            .iter()
+            .enumerate()
+            .map(|(i, op)| {
+                if let Some(a) = venv_actions.remove(&i) {
+                    return Ok(a);
+                }
                 let name = &op.spec.name;
                 let o = &op.spec.opts;
-                let req = match &op.version {
-                    Some(v) => format!("{name}{}", pep440_req(v)),
-                    None => name.clone(),
+                let local = match (pathsrc::source_dir(&op.spec), o.get("git")) {
+                    (Some(_), Some(_)) => {
+                        return Err(ProviderError::Other(format!(
+                            "uv: `{name}` sets both `git` and `path`; pick one"
+                        )));
+                    }
+                    (Some(dir), None) => Some(dir.to_string_lossy().into_owned()),
+                    (None, Some(git)) => {
+                        let git = if git.starts_with("git+") {
+                            git.clone()
+                        } else {
+                            format!("git+{git}")
+                        };
+                        Some(match o.get("rev") {
+                            Some(rev) => format!("{git}@{rev}"),
+                            None => git,
+                        })
+                    }
+                    (None, None) => None,
+                };
+                if local.is_some() && op.version.is_some() {
+                    return Err(ProviderError::Other(format!(
+                        "uv: `{name}` is installed from a path or git source; pin it with `rev`, not a version"
+                    )));
+                }
+                let req = match (&local, &op.version) {
+                    (Some(src), _) => src.clone(),
+                    (None, Some(v)) => format!("{name}{}", pep440_req(v)),
+                    (None, None) => name.clone(),
                 };
                 let argv: Vec<String> = match o.get("kind").map(String::as_str).unwrap_or("tool") {
                     "tool" => match op.kind {
                         OpKind::Install => v(&[&bin, "tool", "install", &req]),
-                        OpKind::Upgrade if op.version.is_some() => {
+                        OpKind::Upgrade if op.version.is_some() || local.is_some() => {
                             v(&[&bin, "tool", "install", "--force", &req])
                         }
                         OpKind::Upgrade => v(&[&bin, "tool", "upgrade", name]),
@@ -210,21 +436,30 @@ impl Provider for UvProvider {
                             Some(py) => v(&["--python", py]),
                         };
                         let mut a = v(&[&bin, "pip"]);
+                        let brk = break_system(&op.spec);
+                        let brk_flag = |a: &mut Vec<String>| {
+                            if brk {
+                                a.push("--break-system-packages".into());
+                            }
+                        };
                         match op.kind {
                             OpKind::Install => {
                                 a.push("install".into());
                                 a.extend(target);
+                                brk_flag(&mut a);
                                 a.push(req);
                             }
                             OpKind::Upgrade => {
                                 a.push("install".into());
                                 a.extend(target);
+                                brk_flag(&mut a);
                                 a.push("--upgrade".into());
                                 a.push(req);
                             }
                             OpKind::Remove => {
                                 a.push("uninstall".into());
                                 a.extend(target);
+                                brk_flag(&mut a);
                                 a.push(name.clone());
                             }
                             OpKind::Pin | OpKind::Unpin => return Err(no_pin()),
@@ -233,24 +468,52 @@ impl Provider for UvProvider {
                     }
                     other => {
                         return Err(ProviderError::Other(format!(
-                            "uv: kind `{other}` is not supported yet (use `tool` or `lib`)"
+                            "uv: kind `{other}` is not supported (use `tool`, `lib` or `venv`)"
                         )));
                     }
                 };
-                Ok(Action {
+                // An opted-in system-wide install writes where the user cannot: root, but only
+                // when the target is not writable (and we are not root already).
+                let needs_root = break_system(&op.spec) && self.system_needs_root();
+                Ok(vec![Action {
                     kind: op.kind,
                     ops: vec![op.clone()],
                     argv,
-                    needs_root: false,
-                })
+                    needs_root,
+                }])
             })
-            .collect()
+            .collect();
+        Ok(planned
+            .into_iter()
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .flatten()
+            .collect())
     }
 
     fn exec(&self, ctx: &Ctx, action: &Action) -> Result<Outcome> {
         let action = &resolve_bare(action, 0, "uv", resolve_bin(&ctx.home))?;
+        if !ctx.dry_run {
+            self.refuse_externally_managed(ctx, action)?;
+        }
         let bin_dir = Path::new(&action.argv[0]).parent().map(Path::to_path_buf);
-        exec_action(ctx, action, bin_dir.as_deref(), &[])
+        let out = exec_action(ctx, action, bin_dir.as_deref(), &[])?;
+        if out.success && !ctx.dry_run {
+            let revs = revs_file(ctx);
+            for op in &action.ops {
+                match op.kind {
+                    OpKind::Remove => pathsrc::forget_rev(&revs, &op.spec.name),
+                    _ => {
+                        if let Some(dir) = pathsrc::source_dir(&op.spec)
+                            && let Some(v) = pathsrc::source_version(ctx, &dir)
+                        {
+                            pathsrc::record_rev(&revs, &op.spec.name, &v);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(out)
     }
 
     fn bins(&self, ctx: &Ctx, installed: &BTreeMap<String, Installed>) -> Result<Vec<BinEntry>> {
@@ -276,6 +539,61 @@ impl Provider for UvProvider {
         out.sort_by(|a, b| (&a.package, &a.bin).cmp(&(&b.package, &b.bin)));
         Ok(out)
     }
+}
+
+/// `kind=lib, python=system` with the explicit `break_system_packages = true` opt-in.
+fn break_system(spec: &Spec) -> bool {
+    let o = &spec.opts;
+    o.get("kind").map(String::as_str) == Some("lib")
+        && matches!(o.get("python").map(String::as_str), None | Some("system"))
+        && spec.flag("break_system_packages", false)
+}
+
+fn is_system_lib(spec: &Spec) -> bool {
+    let o = &spec.opts;
+    o.get("kind").map(String::as_str) == Some("lib")
+        && matches!(o.get("python").map(String::as_str), None | Some("system"))
+}
+
+/// Ask the system python where its stdlib and site-packages are:
+/// `(stdlib, purelib)` from one `python3 -c` call.
+fn system_python_dirs(ctx: &Ctx) -> Option<(PathBuf, PathBuf)> {
+    let cmd = Cmd::new("python3")
+        .args([
+            "-c",
+            "import sysconfig; print(sysconfig.get_path('stdlib')); print(sysconfig.get_path('purelib'))",
+        ])
+        .envs(&command_env(ctx, None));
+    let out = ctx.runner.run(&cmd).ok().filter(|o| o.success())?;
+    let mut l = out.stdout.lines();
+    Some((
+        PathBuf::from(l.next()?.trim()),
+        PathBuf::from(l.next()?.trim()),
+    ))
+}
+
+/// PEP 668: the stdlib dir holds an `EXTERNALLY-MANAGED` marker.
+fn externally_managed(stdlib: &Path) -> bool {
+    stdlib.join("EXTERNALLY-MANAGED").is_file()
+}
+
+/// Can this process create files in `dir` (or its nearest existing ancestor)?
+fn dir_writable(dir: &Path) -> bool {
+    let Some(base) = dir.ancestors().find(|p| p.is_dir()) else {
+        return false;
+    };
+    let probe = base.join(format!(".dots-write-probe-{}", std::process::id()));
+    let ok = std::fs::File::create(&probe).is_ok();
+    let _ = std::fs::remove_file(&probe);
+    ok
+}
+
+fn is_root() -> bool {
+    std::process::Command::new("id")
+        .arg("-u")
+        .output()
+        .ok()
+        .is_some_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "0")
 }
 
 /// PEP 503 name normalisation.

@@ -6,7 +6,7 @@ use dots_core::report::{Diagnostic, Provenance};
 use dots_model::{FileEntry, Layer, Layers, PlatformString};
 
 use crate::merge::{Strategy, parse_strategy};
-use crate::model::{FilesCtx, LayerSrc, Mode, ResolvedFile};
+use crate::model::{Extras, FilesCtx, LayerSrc, Mode, ResolvedFile, SetPatch};
 use crate::pathvars::{expand_path, pick_platform};
 
 fn src_path(pkg_dir: &Path, s: &str, ctx: &FilesCtx) -> PathBuf {
@@ -79,6 +79,73 @@ pub fn detect_format(explicit: Option<&str>, dst: &Path) -> String {
     .to_string()
 }
 
+/// The line-comment leader for a destination, from its format, then its name and extension
+/// (ARCHITECTURE section 17.3). `comment = "..."` on the entry overrides this.
+pub fn infer_comment(format: &str, dst: &Path) -> &'static str {
+    if format == "jsonc" {
+        return "//";
+    }
+    let name = dst
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let ext = dst
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "lua" | "sql" | "hs" | "elm" | "ada" => return "--",
+        "vim" => return "\"",
+        "kbd" => return ";;",
+        "el" | "lisp" | "scm" | "clj" | "asm" | "ini" => return ";",
+        "json5" | "js" | "mjs" | "cjs" | "ts" | "jsx" | "tsx" | "c" | "cc" | "cpp" | "h"
+        | "hpp" | "go" | "rs" | "java" | "kt" | "swift" | "scala" | "glsl" => return "//",
+        "tex" | "erl" => return "%",
+        _ => {}
+    }
+    match name.as_str() {
+        "vimrc" | ".vimrc" | "gvimrc" | ".gvimrc" | "_vimrc" => "\"",
+        ".xresources" | ".xdefaults" => "!",
+        _ => "#",
+    }
+}
+
+/// The destination of an entry for this machine (platform table applied, variables expanded),
+/// without resolving its layers. `None` when it has none or it cannot be expanded.
+pub fn entry_dst(entry: &FileEntry, ctx: &FilesCtx) -> Option<PathBuf> {
+    let raw = match entry.dst.as_ref()? {
+        PlatformString::Plain(s) => s.clone(),
+        PlatformString::PerPlatform(m) => pick_platform(m, &ctx.chain)?.clone(),
+    };
+    expand_path(&raw, ctx).ok()
+}
+
+/// Where the override layer of a file lives under an `overrides/` scope: keyed by the whole
+/// destination, so two files of one package with the same name cannot collide, and never
+/// next to `override.toml`. `files/home/<path below home>` or `files/root/<absolute path>`.
+pub fn override_layer_rel(package: &str, dst: &Path, home: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut p = PathBuf::from("packages").join(package).join("files");
+    let rest = match dst.strip_prefix(home) {
+        Ok(r) => {
+            p.push("home");
+            r
+        }
+        Err(_) => {
+            p.push("root");
+            dst
+        }
+    };
+    for c in rest.components() {
+        if let Component::Normal(n) = c {
+            p.push(n);
+        }
+    }
+    p
+}
+
 /// Resolve one entry. `Ok(None)` when its `when` is false. `when` evaluates condition strings;
 /// `extra_layers` are the repo-override, machine-profile and machine-override layers, appended
 /// after the package layers.
@@ -113,12 +180,15 @@ pub fn resolve_entry(
     {
         return Ok(None);
     }
+    // A fragment renders like a `render` entry; the engine composes the fragments of one `dst`.
+    let fragment = (entry.mode.as_deref() == Some("fragment")).then(|| entry.priority.unwrap_or(0));
     let mode = match entry.mode.as_deref().unwrap_or("link") {
         "link" => Mode::Link,
         "copy" => Mode::Copy,
-        "render" => Mode::Render,
+        "render" | "fragment" => Mode::Render,
         "inject" => Mode::Inject,
         "dir" => Mode::Dir,
+        "terminfo" => Mode::Terminfo,
         other => {
             return Err(Diagnostic::from_code(
                 "not-implemented",
@@ -127,13 +197,14 @@ pub fn resolve_entry(
         }
     };
     let dst_raw = match &entry.dst {
+        None if mode == Mode::Terminfo => "~/.terminfo".to_string(),
         None => return Err(bad("dst", "missing".into())),
         Some(PlatformString::Plain(s)) => s.clone(),
         Some(PlatformString::PerPlatform(m)) => pick_platform(m, &ctx.chain)
             .cloned()
             .ok_or_else(|| bad("dst", "no entry for this platform and no `default`".into()))?,
     };
-    let dst = expand_path(&dst_raw, ctx).map_err(|name| {
+    let mut dst = expand_path(&dst_raw, ctx).map_err(|name| {
         Diagnostic::from_code(
             "unknown-name",
             &[("name", &name), ("file", &pkg_file), ("line", "1")],
@@ -202,6 +273,20 @@ pub fn resolve_entry(
         src = Some(src_path(pkg_dir, s, ctx));
     }
 
+    // A terminfo entry's `dst` is the terminfo directory; the entry itself is `<dir>/<name>`.
+    if mode == Mode::Terminfo {
+        let from_source = src
+            .as_deref()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .and_then(|t| crate::terminfo::source_name(&t));
+        let name = from_source.unwrap_or_else(|| {
+            src.as_deref()
+                .and_then(|p| p.file_stem())
+                .map_or_else(|| "terminfo".into(), |n| n.to_string_lossy().into_owned())
+        });
+        dst = dst.join(name);
+    }
+
     let mut merge = std::collections::BTreeMap::<String, Strategy>::new();
     for (k, v) in &entry.merge {
         merge.insert(
@@ -210,7 +295,20 @@ pub fn resolve_entry(
         );
     }
     let format = detect_format(entry.format.as_deref(), &dst);
-    let comment = if format == "jsonc" { "//" } else { "#" }.to_string();
+    let comment = entry
+        .comment
+        .clone()
+        .unwrap_or_else(|| infer_comment(&format, &dst).to_string());
+    let set = entry
+        .set
+        .iter()
+        .map(|s| SetPatch {
+            path: s.path.clone(),
+            value: s.value.clone(),
+            delete: s.delete,
+            when: s.when.clone(),
+        })
+        .collect();
     Ok(Some(ResolvedFile {
         package: package.to_string(),
         mode,
@@ -222,5 +320,10 @@ pub fn resolve_entry(
         template: entry.template.clone(),
         merge,
         comment,
+        extras: Extras {
+            set,
+            fragment,
+            parts: Vec::new(),
+        },
     }))
 }

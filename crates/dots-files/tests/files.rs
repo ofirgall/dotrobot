@@ -67,6 +67,7 @@ impl Env {
             template: None,
             merge: Default::default(),
             comment: "#".into(),
+            extras: Default::default(),
         }
     }
 }
@@ -468,7 +469,10 @@ fn ghostty_native_include() {
 #[test]
 fn header_names_layers_and_settings() {
     let e = env();
-    e.write("l/g", "font-size = 15\n");
+    e.write(
+        "l/g",
+        "font-size = @dots(setting.font_size)@\ntheme = @dots(setting.theme)@\ntoken = @dots(setting.token)@\n",
+    );
     let f = e.file(
         "ghostty",
         Mode::Render,
@@ -483,16 +487,27 @@ fn header_names_layers_and_settings() {
             name: "font_size".into(),
             value: json!(15),
             scope: "machine".into(),
+            secret: false,
         },
         SettingUse {
             name: "theme".into(),
             value: json!("dark"),
             scope: "default".into(),
+            secret: false,
+        },
+        SettingUse {
+            name: "token".into(),
+            value: json!("tok-9"),
+            scope: "machine".into(),
+            secret: true,
         },
     ];
     let out = render_layers(&f, &ctx).unwrap();
     assert!(out.contains("font_size=15(machine)"), "{out}");
     assert!(out.contains("theme=dark(default)") && out.contains("layers: l/g"));
+    assert!(out.contains("token=•••(machine)"), "{out}");
+    let header: String = out.lines().filter(|l| l.starts_with('#')).collect();
+    assert!(!header.contains("tok-9"), "{header}");
 }
 
 #[test]

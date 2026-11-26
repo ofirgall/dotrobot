@@ -35,6 +35,8 @@ Each provider declares `Caps`:
 
 Behavior that depends on a capability is visible to the user.
 
+A provider may also implement `stale_reason(ctx, spec)`: for an installed package the version rules leave alone, it returns why the package must be upgraded anyway (apt: its declared `repo` is not configured yet, so it still comes from the distribution archive). The plan shows the reason and upgrades the package; the default is no reason. It must read local state only.
+
 ### Conformance kit
 
 `dots-testkit` ships the conformance suite every provider must pass: batched `installed`, pure
@@ -71,7 +73,14 @@ shell     = "bash"                         # bash | sh | pwsh
 needs_root = false
 interactive = false                        # true: stdin attached, one at a time
 timeout   = "20m"
+lock      = "pi"                           # optional: same key = never run at the same time
 ```
+
+`check`, `version`, `latest`, `install`, `upgrade`, `uninstall` and package hooks are shell text, or
+a file: a value that is one token naming an existing file in the package dir (`install =
+"install.sh"`) runs that file with the script's shell (`bash ./install.sh`), cwd = the package dir.
+`lock` serializes script packages that write shared state: packages with the same key never run
+concurrently.
 
 After `install` (or `upgrade`) exits 0, `check` must pass. If it does not, the action fails with
 `check-failed-after-install` ("install succeeded but check fails") and the log is linked. A script
@@ -84,7 +93,7 @@ Every script dots runs (install, upgrade, uninstall, check, version, latest) run
 
 - the package dir as the working directory;
 - stdin set to `/dev/null`, unless `interactive` (a script that reads stdin sees end-of-file);
-- `PATH` set to the generated environment plus provider bins;
+- `PATH` set to the `[env] path` directories of every active package, then the inherited `PATH`, plus provider bins (so `check` and `version` see tools in `~/.local/bin`, `~/.bun/bin`, ...);
 - all output in `logs/<run-id>/<pkg>.<action>.log`;
 - these variables:
 
@@ -109,6 +118,13 @@ Every script dots runs (install, upgrade, uninstall, check, version, latest) run
 
 For bash, `set -euo pipefail` is prepended to each command.
 
+A script with `needs_root = true` runs through `sudo -n`, whose default `env_reset` would drop `HOME` (it becomes `/root`), the `DOTS_*` variables (settings and secrets included) and the `[env]` `PATH` directories. So `dots` writes `HOME`, `PATH` and the `DOTS_*` variables to a file in a private temporary directory (mode 0600, directory 0700), and the script starts by sourcing it (`set -a; . <file>; set +a`). Nothing but the file path appears in the command line, so no other user can read your secrets with `ps`. The file is deleted when the action ends, however it ends. This also works when `dots` is already root. Root scripts need the `bash` or `sh` shell; a `needs_root` script with `shell = "pwsh"` is refused with an error.
+
+## Provider options worth knowing
+
+- **cargo `locked`.** `cargo install` runs with `--locked` by default. Set `[providers.cargo] locked = false` for an old crate whose lockfile no longer builds with the current rustc. If a `--locked` install fails with a compile error, the failure message suggests it.
+- **uv `kind = "lib", python = "system"`.** On an externally managed python (PEP 668, e.g. Ubuntu 24.04, detected by the `EXTERNALLY-MANAGED` marker in the stdlib dir) the install fails with a message suggesting `kind = "venv"`. To install into the system python anyway, opt in with `break_system_packages = true`: `dots` passes `--break-system-packages` and uses sudo only when the target directory is not writable.
+
 ## User-defined providers
 
 Declare a provider in `dots.toml` to support a package manager dots does not know (go, gem, pipx,
@@ -126,8 +142,8 @@ batch     = false
 
 | Key | Meaning |
 |-----|---------|
-| `available` | Command that succeeds when the backend is usable. Its first output line, when an absolute path, is the provider binary. |
-| `bootstrap` | Package that provides the backend. When `available` fails, availability becomes `Bootstrap(<pkg>)`; without it, `Unsupported`. |
+| `available` | Command that succeeds when the backend is usable. Its first output line, when an absolute path, is the provider binary. It runs at plan time (once per run) with the `[env] path` directories of the active packages on `PATH`. |
+| `bootstrap` | Package that provides the backend. When `available` fails, availability becomes `Bootstrap(<pkg>)` (the packages using the provider are planned after it, and the provider's `installed` is not run until then); without it, `Unsupported`. |
 | `installed` | A command plus a parse mode (`cmd`, `parse`); a plain string means `lines`. Run once per query. |
 | `version` | Command printing one package's version, for listing entries that carry none. |
 | `install` | The install command template. |

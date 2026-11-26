@@ -92,6 +92,9 @@ pub struct BinCopy {
     pub shadowed: bool,
     /// Another provider owns the winning copy of this name.
     pub duplicate_of: Option<(String, String)>,
+    /// An unmanaged copy whose package the package manager installed only as a dependency of
+    /// another one (brew `installed_on_request` false, apt auto-installed).
+    pub dependency: bool,
 }
 
 fn walk_path(dirs: &[PathBuf], only: Option<&str>) -> Vec<(String, PathBuf)> {
@@ -157,6 +160,7 @@ pub fn inventory(l: &Loaded, dirs: &Dirs, only: Option<&str>) -> Vec<BinCopy> {
             class: Class::Unknown,
             shadowed: false,
             duplicate_of: None,
+            dependency: false,
         });
     }
 
@@ -217,6 +221,7 @@ pub fn inventory(l: &Loaded, dirs: &Dirs, only: Option<&str>) -> Vec<BinCopy> {
 
     // 4. join with dots' model.
     let owned = OwnedState::load(&dirs.state_json()).0;
+    let deps = dependencies(l);
     for c in &mut copies {
         let (Some(prov), Some(native)) = (c.provider.clone(), c.native.clone()) else {
             continue;
@@ -233,15 +238,17 @@ pub fn inventory(l: &Loaded, dirs: &Dirs, only: Option<&str>) -> Vec<BinCopy> {
         if let Some(a) = declared {
             c.package = Some(a.name.to_string());
             c.class = Class::Managed;
-        } else if let Some((name, _)) = owned
-            .packages
-            .iter()
-            .find(|(_, o)| o.provider == prov && o.name == native)
-        {
+        } else if let Some((name, _)) = owned.packages.iter().find(|(name, o)| {
+            // A package that is still declared is not an orphan, whatever copy this is.
+            o.provider == prov
+                && o.name == native
+                && !l.resolution.get(name).is_some_and(|p| p.is_active())
+        }) {
             c.package = Some(name.clone());
             c.class = Class::Orphan;
         } else {
             c.class = Class::Unmanaged;
+            c.dependency = deps.get(&prov).is_some_and(|d| d.contains(&native));
             c.same_name_as = l
                 .resolution
                 .get(&native)
@@ -276,6 +283,29 @@ pub fn inventory(l: &Loaded, dirs: &Dirs, only: Option<&str>) -> Vec<BinCopy> {
     copies
 }
 
+/// Per provider, the installed packages that were not asked for: the package manager pulled
+/// them in as dependencies (`Provider::roots`). A provider that cannot tell contributes
+/// nothing, so its installs all count as asked for. Those are never orphans (an orphan is
+/// something dots installed), and `status --all` and `bins` label them as dependencies.
+pub fn dependencies(l: &Loaded) -> BTreeMap<String, BTreeSet<String>> {
+    let ids: Vec<&str> = l.registry.ids().collect();
+    let results = par_map(&ids, |id| {
+        let roots = l.registry.get(id)?.roots(&l.pctx).ok().flatten()?;
+        let installed = l.installed.get(*id)?;
+        Some(
+            installed
+                .keys()
+                .filter(|k| !roots.contains(*k))
+                .cloned()
+                .collect::<BTreeSet<String>>(),
+        )
+    });
+    ids.iter()
+        .zip(results)
+        .filter_map(|(id, r)| Some((id.to_string(), r?)))
+        .collect()
+}
+
 fn bin_name(c: &BinCopy) -> String {
     c.bin.clone()
 }
@@ -295,6 +325,9 @@ impl BinCopy {
         match self.class {
             Class::Managed => {}
             Class::Orphan => n.push("orphan (installed by dots, no longer declared)".into()),
+            Class::Unmanaged if self.dependency => {
+                n.push("unmanaged (installed as a dependency of another package)".into());
+            }
             Class::Unmanaged => n.push("unmanaged (installed outside dots)".into()),
             Class::Unknown => n.push("unknown owner".into()),
         }
@@ -328,6 +361,7 @@ impl BinCopy {
             "provider": self.provider,
             "version": self.version,
             "class": self.class.word(),
+            "dependency": self.dependency,
             "wins": wins,
             "shadowed": self.shadowed,
             "shim": self.shim_to.as_ref().map(|t| tilde(t, home)),

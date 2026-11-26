@@ -212,6 +212,10 @@ pub struct CustomProvider {
     def: CustomDef,
     id: &'static str,
     facts: Facts,
+    /// The context `available` is probed with when the resolver asks (it has no context of its
+    /// own), and the answer, remembered for the run.
+    probe: Option<Ctx>,
+    probed: std::sync::Mutex<Option<Availability>>,
 }
 
 impl CustomProvider {
@@ -223,7 +227,32 @@ impl CustomProvider {
             def,
             id,
             facts: facts.clone(),
+            probe: None,
+            probed: std::sync::Mutex::new(None),
         }
+    }
+
+    /// Let [`Provider::availability`] run the `available` command with `ctx` (its `PATH` and
+    /// runner), so plan-time resolution sees the real answer: `Ready`, `Bootstrap` (the tool
+    /// comes from another package in the same run) or `Unsupported`. Without it, only what the
+    /// caller recorded in the facts counts.
+    pub fn with_probe(mut self, ctx: Ctx) -> Self {
+        self.probe = Some(ctx);
+        self
+    }
+
+    /// The probed availability, run once per provider.
+    fn probed_availability(&self, ctx: &Ctx) -> Availability {
+        if let Ok(g) = self.probed.lock()
+            && let Some(a) = g.as_ref()
+        {
+            return a.clone();
+        }
+        let a = self.availability_in(ctx, &self.facts);
+        if let Ok(mut g) = self.probed.lock() {
+            *g = Some(a.clone());
+        }
+        a
     }
 
     fn fact_vars(&self) -> BTreeMap<&'static str, String> {
@@ -361,6 +390,9 @@ impl Provider for CustomProvider {
 
     /// Without a context nothing can be probed: use what the caller recorded in the facts.
     fn availability(&self, facts: &Facts) -> Availability {
+        if let Some(ctx) = &self.probe {
+            return self.probed_availability(ctx);
+        }
         if facts.providers.get(self.id) == Some(&true) {
             Availability::Ready {
                 bin_path: PathBuf::from(SH),
@@ -394,6 +426,14 @@ impl Provider for CustomProvider {
     }
 
     fn installed(&self, ctx: &Ctx) -> Result<BTreeMap<String, Installed>> {
+        // A backend that is not there yet (it is installed by a package earlier in the run)
+        // has nothing installed; running its listing command would only fail.
+        if self.probe.is_some()
+            && self.def.available.is_some()
+            && !matches!(self.probed_availability(ctx), Availability::Ready { .. })
+        {
+            return Ok(BTreeMap::new());
+        }
         let out = ctx.runner.run(&self.sh(ctx, &self.def.installed_cmd))?;
         if out.timed_out {
             return Err(ProviderError::Coded {

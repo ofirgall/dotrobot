@@ -3,6 +3,69 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "properties": {
     "data": {
+      "properties": {
+        "changed": {
+          "type": "boolean"
+        },
+        "file": {
+          "type": "string"
+        },
+        "from": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "installed": {
+          "type": "boolean"
+        },
+        "lock": {
+          "type": "boolean"
+        },
+        "package": {
+          "type": "string"
+        },
+        "removed": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "steps": {
+          "items": {
+            "properties": {
+              "action": {
+                "enum": [
+                  "install",
+                  "remove"
+                ]
+              },
+              "commands": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "provider": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider",
+              "action",
+              "commands"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "to": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
       "type": "object"
     },
     "errors": {

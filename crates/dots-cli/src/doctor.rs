@@ -229,11 +229,11 @@ fn active_link(dirs: &Dirs) -> Vec<Finding> {
 }
 
 fn lock(l: &Loaded) -> Vec<Finding> {
-    let p = l.rc.m.root.join("dots.lock");
+    let p = l.rc.m.root.join(dots_lock::FILE);
     let Ok(text) = std::fs::read_to_string(&p) else {
         return Vec::new();
     };
-    if text.lines().any(|t| t.starts_with("<<<<<<<")) {
+    if dots_lock::has_conflict_markers(&text) {
         return vec![finding(
             "dots.lock",
             Sev::Error,
@@ -241,7 +241,61 @@ fn lock(l: &Loaded) -> Vec<Finding> {
             "resolve the conflict in dots.lock, then run `dots lock --fix`",
         )];
     }
-    Vec::new()
+    let lock = match dots_lock::Lock::parse(&text) {
+        Ok(k) => k,
+        Err(e) => {
+            return vec![finding(
+                "dots.lock",
+                Sev::Error,
+                format!("the lock cannot be read: {e}"),
+                "dots lock --fix",
+            )];
+        }
+    };
+    let mut out = Vec::new();
+    // Rows for packages the repo no longer has.
+    let mut gone: Vec<&str> = lock
+        .pkgs
+        .iter()
+        .filter(|r| !l.rc.repo.packages.contains_key(&r.name))
+        .map(|r| r.name.as_str())
+        .collect();
+    gone.sort_unstable();
+    gone.dedup();
+    if !gone.is_empty() {
+        out.push(finding(
+            "dots.lock",
+            Sev::Warn,
+            format!(
+                "stale rows for packages the repo no longer has: {}",
+                gone.join(", ")
+            ),
+            "dots lock --fix   # drops them",
+        ));
+    }
+    // Rows this machine's spec has moved away from: apply re-resolves them.
+    let key = crate::lock_cmd::machine_key(&l.rc);
+    for res in l.resolution.active() {
+        let Some(c) = res.chosen_provider() else {
+            continue;
+        };
+        let Some(row) = lock.pkg(&res.name, &dots_lock::platform_for(&c.id, &key)) else {
+            continue;
+        };
+        if !dots_lock::rules::lock_satisfies(&res.wanted, &dots_lock::rules::Locked::from(row)) {
+            out.push(finding(
+                &res.name,
+                Sev::Warn,
+                format!(
+                    "stale lock row: locked {}, but the spec now wants {}",
+                    row.shown(),
+                    res.wanted
+                ),
+                format!("dots apply {}   # re-resolves the row", res.name),
+            ));
+        }
+    }
+    out
 }
 
 fn sudo(l: &Loaded) -> Vec<Finding> {

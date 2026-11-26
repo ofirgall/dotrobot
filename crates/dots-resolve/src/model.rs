@@ -329,6 +329,9 @@ pub struct PackageResolution {
     /// Present for active packages.
     pub provider: Option<ProviderSelection>,
     pub constraints: ConstraintSet,
+    /// The intersection of `constraints`: what the package may be (`latest` when
+    /// unconstrained or when the constraints conflict, which is reported as an error).
+    pub wanted: dots_model::vspec::Spec,
 }
 
 impl PackageResolution {

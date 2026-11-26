@@ -303,3 +303,235 @@ fn real_installed_smoke() {
         assert!(!name.is_empty() && !i.version.is_empty());
     }
 }
+
+// ------------------------------------------------------- path and git sources
+
+#[test]
+fn path_source_installs_from_the_package_dir() {
+    let p = CargoProvider::with_bin("/c/cargo");
+    let o = op(
+        OpKind::Install,
+        "herdr-last-tab",
+        Some("path=herdr-last-tab;pkg_dir=/repo/packages/herdr"),
+        None,
+    );
+    assert_eq!(
+        argv(&p, o.clone()),
+        [
+            "/c/cargo",
+            "install",
+            "--locked",
+            "--path",
+            "/repo/packages/herdr/herdr-last-tab"
+        ]
+    );
+    let up = Op {
+        kind: OpKind::Upgrade,
+        ..o.clone()
+    };
+    assert!(argv(&p, up).contains(&"--force".to_string()));
+    let mut with_version = o.clone();
+    with_version.version = Some("1.0.0".into());
+    assert!(p.plan(&[with_version]).is_err());
+    let both = op(OpKind::Install, "x", Some("path=a;git=https://x/y"), None);
+    assert!(p.plan(&[both]).is_err());
+}
+
+#[test]
+fn private_git_crate_sets_fetch_with_cli() {
+    let p = CargoProvider::with_bin("/c/cargo");
+    let o = op(
+        OpKind::Install,
+        "herdr",
+        Some("git=ssh://git@github.com/x/y;git_fetch_with_cli=true"),
+        None,
+    );
+    assert_eq!(
+        argv(&p, o.clone()),
+        [
+            "/usr/bin/env",
+            "CARGO_NET_GIT_FETCH_WITH_CLI=true",
+            "/c/cargo",
+            "install",
+            "--locked",
+            "--git",
+            "ssh://git@github.com/x/y",
+            "herdr"
+        ]
+    );
+    // Without the flag nothing is added.
+    let plain = op(
+        OpKind::Install,
+        "herdr",
+        Some("git=ssh://git@github.com/x/y"),
+        None,
+    );
+    assert_eq!(argv(&p, plain)[0], "/c/cargo");
+
+    // A bare `cargo` behind the `env` prefix still resolves to the real binary.
+    let tmp = tempfile::tempdir().unwrap();
+    let bin = tmp.path().join(".cargo/bin/cargo");
+    std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+    std::fs::write(&bin, "").unwrap();
+    let rec = Arc::new(RecordingRunner::new());
+    let ctx = Ctx {
+        runner: rec.clone(),
+        home: tmp.path().into(),
+        log_dir: tmp.path().join("logs"),
+        ..Ctx::default()
+    };
+    let a = CargoProvider::new().plan(&[o]).unwrap().remove(0);
+    assert!(CargoProvider::new().exec(&ctx, &a).unwrap().success);
+    let line = rec.lines().remove(0);
+    assert!(
+        line.starts_with(&format!(
+            "/usr/bin/env CARGO_NET_GIT_FETCH_WITH_CLI=true {} install",
+            bin.display()
+        )),
+        "{line}"
+    );
+}
+
+/// `git rev-list --count` / `git log -1` answers for the crate dir, changeable between calls.
+#[derive(Debug)]
+struct FakeGit(Mutex<(u32, String)>);
+impl Runner for FakeGit {
+    fn run(&self, cmd: &Cmd) -> Result<Output> {
+        let (n, rev) = self.0.lock().unwrap().clone();
+        let args: Vec<&str> = cmd.args.iter().map(String::as_str).collect();
+        Ok(if args.contains(&"rev-list") {
+            Output::ok(&format!("{n}\n"))
+        } else if args.contains(&"log") {
+            Output::ok(&format!("{rev}\n"))
+        } else {
+            Output::ok("")
+        })
+    }
+}
+
+#[test]
+fn local_crate_goes_outdated_when_its_repo_changes() {
+    if !std::path::Path::new("/usr/bin/git").is_file() {
+        eprintln!("skipped: no git at a known location");
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let pkg = tmp.path().join("repo/herdr");
+    let krate = pkg.join("herdr-last-tab");
+    std::fs::create_dir_all(&krate).unwrap();
+    std::fs::write(
+        krate.join("Cargo.toml"),
+        "[package]\nname = \"herdr-last-tab\"\nversion = \"0.2.0\"\n\n[dependencies]\nversion = \"9\"\n",
+    )
+    .unwrap();
+    let home = tmp.path().join("home");
+    let ch = home.join(".cargo");
+    std::fs::create_dir_all(ch.join("bin")).unwrap();
+    std::fs::write(ch.join("bin/cargo"), "").unwrap();
+    let git = Arc::new(FakeGit(Mutex::new((3, "abc1234".into()))));
+    let ctx = Ctx {
+        runner: git.clone(),
+        home: home.clone(),
+        log_dir: tmp.path().join("logs"),
+        ..Ctx::default()
+    };
+    let spec = Spec::new("herdr-last-tab")
+        .opt("path", "herdr-last-tab")
+        .opt("pkg_dir", &pkg.to_string_lossy());
+    let p = CargoProvider::for_ctx(&ctx);
+
+    // The install, as cargo records it in .crates2.json (no repo rev in there).
+    let installed_json = format!(
+        "{{\"installs\":{{\"herdr-last-tab 0.2.0 (path+file://{})\":{{\"bins\":[\"herdr-last-tab\"]}}}}}}",
+        krate.display()
+    );
+    let a = p
+        .plan(&[Op {
+            kind: OpKind::Install,
+            spec: spec.clone(),
+            version: None,
+        }])
+        .unwrap()
+        .remove(0);
+    assert!(p.exec(&ctx, &a).unwrap().success);
+    std::fs::write(ch.join(".crates2.json"), installed_json).unwrap();
+
+    let have = p.installed(&ctx).unwrap()["herdr-last-tab"].version.clone();
+    assert_eq!(have, "0.2.0.3+abc1234");
+    let latest = p.latest(&ctx, std::slice::from_ref(&spec)).unwrap();
+    assert_eq!(
+        latest["herdr-last-tab"].version, have,
+        "up to date right after install"
+    );
+
+    // A commit changes that directory.
+    *git.0.lock().unwrap() = (4, "def5678".into());
+    let latest = p.latest(&ctx, &[spec]).unwrap()["herdr-last-tab"]
+        .version
+        .clone();
+    assert_eq!(latest, "0.2.0.4+def5678");
+    assert_ne!(latest, have, "status shows outdated");
+}
+
+#[test]
+fn path_source_without_git_still_reports_the_crate_version() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("Cargo.toml"),
+        "[package]\nname = \"x\"\nversion = \"1.4.0\"\n",
+    )
+    .unwrap();
+    let ctx = Ctx {
+        runner: Arc::new(RecordingRunner::new()),
+        home: tmp.path().join("home"),
+        ..Ctx::default()
+    };
+    let spec = Spec::new("x").opt("path", &tmp.path().to_string_lossy());
+    let v = CargoProvider::new().latest(&ctx, &[spec]).unwrap()["x"]
+        .version
+        .clone();
+    assert!(v.starts_with("1.4.0"), "{v}");
+}
+
+/// A `--locked` install that fails to compile hints at `locked = false`; a plain failure
+/// (network) does not; without `--locked` there is no hint to give.
+#[test]
+fn locked_compile_failure_hints_locked_false() {
+    let tmp = tempfile::tempdir().unwrap();
+    let bin = tmp.path().join(".cargo/bin/cargo");
+    std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+    std::fs::write(&bin, "").unwrap();
+    let run = |opts: &str, stderr: &str| {
+        let rec = Arc::new(RecordingRunner::new());
+        rec.on(&[], Output::fail(101, stderr));
+        let ctx = Ctx {
+            runner: rec,
+            home: tmp.path().into(),
+            log_dir: tmp.path().join("logs"),
+            ..Ctx::default()
+        };
+        let mut s = Spec::new("igrep");
+        for pair in opts.split(';') {
+            if let Some((k, v)) = pair.split_once('=') {
+                s = s.opt(k, v);
+            }
+        }
+        let p = CargoProvider::new();
+        let a = p
+            .plan(&[Op {
+                kind: OpKind::Install,
+                spec: s,
+                version: None,
+            }])
+            .unwrap()
+            .remove(0);
+        p.exec(&ctx, &a)
+    };
+    let compile =
+        "error[E0658]: use of unstable library feature\nerror: could not compile `igrep`\n";
+    let err = run("", compile).unwrap_err().to_string();
+    assert!(err.contains("locked = false"), "{err}");
+    assert!(!run("", "error: failed to fetch index\n").unwrap().success);
+    let out = run("locked=false", compile).unwrap();
+    assert!(!out.success, "no hint and no error without --locked");
+}

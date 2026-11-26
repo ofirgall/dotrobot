@@ -46,10 +46,12 @@ pub enum State {
     // transient
     Failed,
     Running,
+    /// Could not be read (needs sudo, tool missing): neither healthy nor known to be broken.
+    Unknown,
 }
 
 impl State {
-    pub const ALL: [State; 22] = [
+    pub const ALL: [State; 23] = [
         State::Ok,
         State::Outdated,
         State::Missing,
@@ -72,6 +74,7 @@ impl State {
         State::Auto,
         State::Failed,
         State::Running,
+        State::Unknown,
     ];
 
     /// The state word, identical to the JSON value.
@@ -99,6 +102,7 @@ impl State {
             State::Auto => "auto",
             State::Failed => "failed",
             State::Running => "running",
+            State::Unknown => "unknown",
         }
     }
 
@@ -127,6 +131,7 @@ impl State {
             | State::Excluded
             | State::NotApplicable
             | State::Skipped
+            | State::Unknown
             | State::Auto => Tone::Muted,
             State::Running => Tone::Info,
         }

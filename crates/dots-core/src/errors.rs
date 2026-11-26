@@ -69,7 +69,7 @@ pub static REGISTRY: &[ErrorDef] = &[
     def!(
         "version-conflict",
         "`{package}` has conflicting version requirements: {left} vs {right}",
-        "Relax one requirement, or add an override for `{package}`.",
+        "No version satisfies both. Fix one of them, or override the dependent's `requires`.",
         ["left", "right"]
     ),
     def!(
@@ -81,7 +81,7 @@ pub static REGISTRY: &[ErrorDef] = &[
     def!(
         "version-spec-invalid",
         "`{spec}` is not a valid version spec",
-        "Use one of: exact (`1.2.3`), caret (`^1.2`), tilde (`~1.2`), range (`>=1.2,<2`), or `latest`.",
+        "Use one of: `latest`, an exact version (`1.2.3`), a prefix (`1` or `1.2`), a floor (`>=1.2`), or `git:<ref>`.",
         ["file", "line"]
     ),
     def!(
@@ -149,6 +149,48 @@ pub static REGISTRY: &[ErrorDef] = &[
         "`{reference}` does not refer to a declared setting",
         "Declare the setting in package.toml, or fix the reference.",
         ["file", "line"]
+    ),
+    def!(
+        "setting-invalid",
+        "`{setting}` set in {origin} is invalid: {detail}",
+        "Fix the value in {origin}, or run `dots config set {setting} <value>`.",
+        ["origin"]
+    ),
+    def!(
+        "setting-required",
+        "`{setting}` is required and has no value",
+        "dots config set {setting} <value>",
+        []
+    ),
+    def!(
+        "setting-unknown",
+        "no declared setting `{setting}`.{suggestion}",
+        "Run `dots config list` to see the settings.",
+        []
+    ),
+    def!(
+        "setting-key-invalid",
+        "`{key}` is not a setting key",
+        "Name a setting as <package>.<setting>, like `ghostty.font_size`.",
+        []
+    ),
+    def!(
+        "setting-stale",
+        "`{setting}` is set in {origin} but no package declares it",
+        "Remove it, or run `dots config unset {setting}` for the machine scope.",
+        ["origin"]
+    ),
+    def!(
+        "setting-inapplicable",
+        "setting `{setting}` does not exist on this machine (its `when` is false)",
+        "Settings with a `when` condition can only be set where it holds.",
+        []
+    ),
+    def!(
+        "setting-secret-scope",
+        "`{setting}` is secret and can only be set in machine.toml, not in {origin}",
+        "Use `dots config set {setting} <value>` (machine scope) and remove it from {origin}.",
+        ["origin"]
     ),
     def!(
         "override-identity-field",
@@ -229,6 +271,42 @@ pub static REGISTRY: &[ErrorDef] = &[
         ["file"]
     ),
     def!(
+        "lock-invalid",
+        "dots.lock cannot be read: {detail}",
+        "Run `dots lock --fix` to regenerate it, keeping every valid row.",
+        ["file"]
+    ),
+    def!(
+        "upgrade-blocked",
+        "`{package}` cannot move to {version}: it would violate `{dependent}`'s requirement `{spec}`",
+        "Relax the requirement in `{dependent}`, or upgrade `{dependent}` first.",
+        ["file"]
+    ),
+    def!(
+        "lock-write-failed",
+        "could not write dots.lock: {detail}",
+        "Check that the repo directory is writable.",
+        ["file"]
+    ),
+    def!(
+        "commit-failed",
+        "could not commit: {detail}",
+        "The files were changed but not committed. Commit them yourself, or fix the git problem and re-run with `--commit`.",
+        []
+    ),
+    def!(
+        "native-pin-failed",
+        "`{provider}` could not {action} `{package}`: {detail}",
+        "The version is set in the package file; apply the provider's own pin by hand if you need it.",
+        ["file"]
+    ),
+    def!(
+        "pin-unsupported",
+        "`{package}` cannot be pinned: {detail}",
+        "Pin a package that has a version to hold, or edit `version` in its package file.",
+        ["file"]
+    ),
+    def!(
         "patch-does-not-apply",
         "patch layer for `{dst}` no longer applies cleanly",
         "Re-create the patch with `dots adopt {dst} --as-patch`.",
@@ -275,6 +353,12 @@ pub static REGISTRY: &[ErrorDef] = &[
         "path `{path}` in {file}:{line} uses the `//` repo-root escape hatch",
         "Move the file into the package directory; a package with a `//` path cannot be copied with `dots add --copy`.",
         ["file", "line"]
+    ),
+    def!(
+        "package-missing-manifest",
+        "{file} has no package.toml; the directory is skipped",
+        "Add a package.toml (`schema = 1` and `name`), or delete the directory.",
+        ["file"]
     ),
     def!(
         "machine-profile-missing",
@@ -331,6 +415,12 @@ pub static REGISTRY: &[ErrorDef] = &[
         ["file"]
     ),
     def!(
+        "script-unpinned-fetch",
+        "a script of `{package}` pipes a download into a shell: `{snippet}`",
+        "Declare `fetch = { url, sha256 }` in [providers.script] in {file} and run it with `install = \"sh {fetched}\"` so the installer is pinned.",
+        ["file"]
+    ),
+    def!(
         "merge-type-mismatch",
         "`{path}` is {left_type} in {left} but {right_type} in {right}",
         "Make both layers use the same type, or delete the key in the later layer with \"__dots_delete__\".",
@@ -347,6 +437,18 @@ pub static REGISTRY: &[ErrorDef] = &[
         "`{path}` crosses `{at}`, which is {found}, not a table",
         "Fix the key path in `[[files.set]]`, or change the value it crosses.",
         ["file"]
+    ),
+    def!(
+        "directive-error",
+        "{file}:{line}: {detail}",
+        "Fix the directive at the reported position; directives are `dots:if`, `dots:elif`, `dots:else`, `dots:end`, `dots:if!`, `dots:include` and `@dots(expr)@`.",
+        ["file", "line"]
+    ),
+    def!(
+        "fragment-collision",
+        "fragments from `{left}` and `{right}` both set `{key}` at priority {priority} in {dst}",
+        "Give one of the fragments a different `priority`, or drop the key from one of them.",
+        ["left", "right"]
     ),
     def!(
         "include-unsupported",
@@ -370,6 +472,36 @@ pub static REGISTRY: &[ErrorDef] = &[
         "restore-skipped",
         "`{path}` was changed after dots wrote it, so it was left as is",
         "Move or delete it, then run `dots restore {run_id}` again.",
+        []
+    ),
+    def!(
+        "setting-failed",
+        "cannot change {setting}: {detail}",
+        "Run the command shown in `dots plan` by hand to see why. Nothing else of this run was undone.",
+        []
+    ),
+    def!(
+        "restart-failed",
+        "could not restart {app}: {detail}",
+        "Quit and reopen {app} yourself; the setting is already written.",
+        []
+    ),
+    def!(
+        "service-failed",
+        "cannot {action} the service `{service}`: {detail}",
+        "Run `dots status` for its state, and the manager's own logs (`journalctl --user -u <unit>`, `brew services info`) for why.",
+        []
+    ),
+    def!(
+        "hook-failed",
+        "the {event} hook of `{package}` failed: {detail} (log: {log})",
+        "Fix the command in the package's `[hooks]` and run `dots apply {package}` again; a failed hook runs again until it passes.",
+        []
+    ),
+    def!(
+        "service-name-invalid",
+        "the service name `{name}` of package `{package}` is not allowed",
+        "A service name, and the unit or label it uses, may only contain letters, digits, `.`, `_`, `@` and `-`, and cannot start with `-`. It ends up in commands, so nothing else is accepted.",
         []
     ),
     def!(
@@ -412,6 +544,72 @@ pub static REGISTRY: &[ErrorDef] = &[
         "latest-lookup-failed",
         "could not look up the latest versions from {provider}: {detail}",
         "Run `dots outdated --refresh` again later, or `dots doctor` to check the provider.",
+        []
+    ),
+    def!(
+        "address-invalid",
+        "`{address}` is not a valid address: {detail}",
+        "Addresses look like `pkg:<name>`, `pkg:<name>/file:<dst>` or `bundle:<name>`.",
+        []
+    ),
+    def!(
+        "address-not-found",
+        "nothing exists at `{address}`",
+        "Check the address with `dots status` or `dots override list`.{suggestion}",
+        []
+    ),
+    def!(
+        "redundant-override",
+        "override `{address}` sets `{path}` to the value it already has",
+        "Remove the key from {file}; it changes nothing.",
+        ["file", "line"]
+    ),
+    def!(
+        "editor-failed",
+        "the editor `{editor}` did not finish cleanly",
+        "Set $EDITOR to a command that exits 0 once the file is saved.",
+        []
+    ),
+    def!(
+        "adopt-not-managed",
+        "`{dst}` is not a file that dots manages",
+        "Run `dots status --all` to list managed files, or pass the destination as it appears there.",
+        []
+    ),
+    def!(
+        "adopt-not-modified",
+        "`{dst}` is `{state}`, not `modified`: there is nothing to adopt",
+        "`dots adopt` takes a managed copy, render or inject file that was edited after apply. See `dots status`.",
+        []
+    ),
+    def!(
+        "adopt-unsupported",
+        "cannot adopt `{dst}`: {detail}",
+        "Edit the source in the repo directly, or pick another layer with `--layer`.",
+        []
+    ),
+    def!(
+        "adopt-base-unknown",
+        "cannot adopt `{dst}`: the last rendered version is unavailable ({detail})",
+        "Run `dots apply` (your version is backed up first), then make the edit in the repo.",
+        []
+    ),
+    def!(
+        "adopt-conflict",
+        "your edit to `{dst}` conflicts with {file}: {detail}",
+        "Nothing was written. Change {file} by hand, or adopt into another layer with `--layer` or `--machine`.",
+        ["file"]
+    ),
+    def!(
+        "adopt-ineffective",
+        "adopting into {file} would not reproduce your version of `{dst}`: {detail}",
+        "A later layer, a directive or a `[[files.set]]` overrides it. Nothing was written. Try `--machine` or a later `--layer`.",
+        ["file"]
+    ),
+    def!(
+        "adopt-unknown-layer",
+        "`{layer}` is not a layer of `{dst}` (layers: {layers})",
+        "Pass one of the listed layers, a platform name such as `macos`, or use `--machine`.",
         []
     ),
 ];

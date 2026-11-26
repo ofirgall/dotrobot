@@ -15,8 +15,7 @@ use dots_core::blocks::{Block, Tone};
 use dots_core::report::Diagnostic;
 use dots_core::{ExitCode, Report};
 use dots_facts::{Chain, FactOverrides, RealSources, detect};
-use dots_model::{Bundle, MachineConfig, Repo};
-use dots_model::{BundleMember, Recommended, TagDecl, TagRecommended};
+use dots_model::{MachineConfig, Recommended, Repo, TagDecl, TagRecommended};
 use serde_json::{Value, json};
 
 use crate::app::Context;
@@ -172,6 +171,35 @@ pub fn run_with(ctx: &Context, args: &Args, prompter: Option<&mut dyn Prompter>)
             return r;
         }
     };
+    // The effective model: platform tables and overrides applied, like every other command.
+    let repo = {
+        let m = crate::context::MachineCtx {
+            root: root.clone(),
+            machine: profile.clone(),
+            facts: facts.clone(),
+            warnings: Vec::new(),
+        };
+        let chain_of = |man: &dots_model::RepoManifest| {
+            let parents: BTreeMap<String, String> = man
+                .platforms
+                .iter()
+                .filter_map(|(k, d)| Some((k.clone(), d.parent.clone()?)))
+                .collect();
+            Chain::build(&m.facts, &parents, &m.machine.platform_extra).ordered()
+        };
+        let locations = crate::context::override_locations(&m, ctx);
+        match repo.effective(&chain_of, &locations) {
+            Ok(e) => {
+                warnings.extend(e.warnings);
+                e.value
+            }
+            Err(e) => {
+                let mut r = fail(e.errors);
+                r.warnings = e.warnings;
+                return r;
+            }
+        }
+    };
     let chain = Chain::build(&facts, &platform_parents(&repo), &[]);
 
     // 3. Answers.
@@ -192,8 +220,10 @@ pub fn run_with(ctx: &Context, args: &Args, prompter: Option<&mut dyn Prompter>)
     {
         return write_failed(parent, &e);
     }
-    if let Err(e) = std::fs::write(&machine_path, text) {
-        return write_failed(&machine_path, &e);
+    if let Err(e) =
+        dots_config::write_atomic(&machine_path, &text, is_secret(&repo, &answers.settings))
+    {
+        return write_failed(&machine_path, &std::io::Error::other(e));
     }
 
     Report::ok(
@@ -207,7 +237,7 @@ pub fn run_with(ctx: &Context, args: &Args, prompter: Option<&mut dyn Prompter>)
             "profile": profile.profile,
             "bundles": answers.bundles,
             "tags": answers.tags,
-            "settings": answers.settings,
+            "settings": redact_answers(&repo, &answers.settings),
         }),
     )
     .with_report(
@@ -218,6 +248,43 @@ pub fn run_with(ctx: &Context, args: &Args, prompter: Option<&mut dyn Prompter>)
         cloned_from.is_some(),
         warnings,
     )
+}
+
+fn secret_decl(repo: &Repo, pkg: &str, key: &str) -> bool {
+    repo.packages
+        .get(pkg)
+        .and_then(|p| p.settings.get(key))
+        .is_some_and(|d| d.secret)
+}
+
+fn is_secret(repo: &Repo, answers: &BTreeMap<String, BTreeMap<String, Value>>) -> bool {
+    answers
+        .iter()
+        .any(|(p, kv)| kv.keys().any(|k| secret_decl(repo, p, k)))
+}
+
+/// The answers for the JSON report: a secret's value is never printed (`null`).
+fn redact_answers(
+    repo: &Repo,
+    answers: &BTreeMap<String, BTreeMap<String, Value>>,
+) -> BTreeMap<String, BTreeMap<String, Value>> {
+    answers
+        .iter()
+        .map(|(p, kv)| {
+            let kv = kv
+                .iter()
+                .map(|(k, v)| {
+                    let v = if secret_decl(repo, p, k) {
+                        Value::Null
+                    } else {
+                        v.clone()
+                    };
+                    (k.clone(), v)
+                })
+                .collect();
+            (p.clone(), kv)
+        })
+        .collect()
 }
 
 fn write_failed(path: &Path, e: &std::io::Error) -> Report {
@@ -428,68 +495,6 @@ pub fn recommendations(repo: &Repo, chain: &Chain) -> Recommendations {
     }
 }
 
-/// Packages reachable from `bundles` through `include` (conditions are not evaluated: a
-/// conditional package may still need its answers).
-fn packages_of(repo: &Repo, bundles: &[String]) -> BTreeSet<String> {
-    fn walk(repo: &Repo, b: &Bundle, seen: &mut BTreeSet<String>, pkgs: &mut BTreeSet<String>) {
-        if !seen.insert(b.name.clone()) {
-            return;
-        }
-        for m in &b.packages {
-            match m {
-                BundleMember::Name(n) | BundleMember::Conditional { name: n, .. } => {
-                    pkgs.insert(n.clone());
-                }
-            }
-        }
-        for i in &b.include {
-            if let Some(inc) = repo.bundles.get(i) {
-                walk(repo, inc, seen, pkgs);
-            }
-        }
-    }
-    let (mut seen, mut pkgs) = (BTreeSet::new(), BTreeSet::new());
-    for b in bundles {
-        if let Some(b) = repo.bundles.get(b) {
-            walk(repo, b, &mut seen, &mut pkgs);
-        }
-    }
-    pkgs
-}
-
-fn answered(
-    repo: &Repo,
-    profile: &MachineConfig,
-    bundles: &[String],
-    pkg: &str,
-    key: &str,
-) -> bool {
-    let has = |s: &BTreeMap<String, BTreeMap<String, Value>>| {
-        s.get(pkg).is_some_and(|t| t.contains_key(key))
-    };
-    has(&profile.settings)
-        || has(&repo.manifest.settings)
-        || bundles
-            .iter()
-            .filter_map(|b| repo.bundles.get(b))
-            .any(|b| has(&b.settings))
-}
-
-fn parse_value(ty: Option<&str>, text: &str) -> Value {
-    match ty {
-        Some("bool") => text
-            .parse::<bool>()
-            .map_or_else(|_| json!(text), Value::from),
-        Some("int") => text
-            .parse::<i64>()
-            .map_or_else(|_| json!(text), Value::from),
-        Some("float") => text
-            .parse::<f64>()
-            .map_or_else(|_| json!(text), Value::from),
-        _ => json!(text),
-    }
-}
-
 /// Decide bundles, tags and settings. `prompter` is `None` for non-interactive runs.
 pub fn answer(
     repo: &Repo,
@@ -533,43 +538,68 @@ pub fn answer(
         a.bundles.clone()
     };
     let mut missing: Vec<String> = Vec::new();
-    for pkg in packages_of(repo, &effective) {
-        let Some(package) = repo.packages.get(&pkg) else {
-            continue;
-        };
-        for (key, decl) in &package.settings {
-            if answered(repo, profile, &effective, &pkg, key) {
+    // The same resolver `dots config` uses. Conditions are not evaluated here: a conditional
+    // package may still need its answers.
+    let when = |_: &str| Ok(true);
+    let mut inputs = dots_config::Inputs::new(repo, profile, &when);
+    inputs.bundles = &effective;
+    let resolved = dots_config::resolve(&inputs);
+    for pkg in dots_config::packages_of(repo, &effective) {
+        for s in resolved.of_package(&pkg) {
+            // Anything a scope above the default already answers is not asked or repeated.
+            if s.answered() {
                 continue;
             }
-            let default = decl.default.as_ref().map(|v| match v {
-                Value::String(s) => s.clone(),
-                other => other.to_string(),
-            });
             // `ask` settings are only asked when the user chose to choose.
-            let wanted = decl.required && default.is_none() || (decl.ask && choose);
-            if !wanted {
+            if !(s.missing() || (s.decl.ask && choose)) {
                 continue;
             }
+            let id = s.id();
+            let default = s.default().map(crate::config_cmd::plain);
             let Some(p) = prompter.as_deref_mut() else {
-                if decl.required && default.is_none() {
-                    missing.push(format!("{pkg}.{key}"));
+                if s.missing() {
+                    missing.push(id);
                 }
                 continue;
             };
-            let question = decl
-                .question
-                .clone()
-                .unwrap_or_else(|| format!("{pkg}.{key}"));
-            let text = p.input(&question, default.as_deref());
+            let question = s.decl.question.clone().unwrap_or_else(|| id.clone());
+            let mut text = p.input(&question, default.as_deref());
             if text.is_empty() {
-                if decl.required && default.is_none() {
-                    missing.push(format!("{pkg}.{key}"));
+                if s.missing() {
+                    missing.push(id);
                 }
-            } else if default.as_deref() != Some(text.as_str()) {
-                a.settings
-                    .entry(pkg.clone())
-                    .or_default()
-                    .insert(key.clone(), parse_value(decl.ty.as_deref(), &text));
+                continue;
+            }
+            // A bad answer is asked again, with the reason, a few times.
+            let mut parsed = s.decl.parse_text(&text);
+            for _ in 0..2 {
+                let Err(why) = &parsed else { break };
+                text = p.input(&format!("{question} ({why})"), default.as_deref());
+                parsed = s.decl.parse_text(&text);
+            }
+            match parsed {
+                Ok(v) if s.default() == Some(&v) => {}
+                Ok(v) => {
+                    a.settings
+                        .entry(pkg.clone())
+                        .or_default()
+                        .insert(s.key.clone(), v);
+                }
+                Err(detail) => {
+                    let detail = if s.secret() {
+                        "not a valid value".into()
+                    } else {
+                        detail
+                    };
+                    return Err(vec![Diagnostic::from_code(
+                        "setting-invalid",
+                        &[
+                            ("setting", &id),
+                            ("origin", "your answer"),
+                            ("detail", &detail),
+                        ],
+                    )]);
+                }
             }
         }
     }

@@ -329,20 +329,22 @@ fn override_and_machine_layers_render_on_top_of_package_layers() {
         "base = 1\nwho = \"package\"\n[s]\nkeep = true\n",
     );
     write(
-        &b.root.join("overrides/packages/app/conf.toml"),
+        &b.root
+            .join("overrides/packages/app/files/home/.config/app/conf.toml"),
         "who = \"repo\"\nrepo_only = 1\n",
     );
     write(&b.root.join("machines/work.toml"), "schema = 1\n");
     write(
         &b.root
-            .join("machines/work/overrides/packages/app/conf.toml"),
+            .join("machines/work/overrides/packages/app/files/home/.config/app/conf.toml"),
         "who = \"profile\"\nprofile_only = 2\n",
     );
     let mut m = std::fs::read_to_string(&b.machine).unwrap();
     m.push_str("profile = \"work\"\n");
     write(&b.machine, &m);
     write(
-        &b.home.join(".config/dots/overrides/packages/app/conf.toml"),
+        &b.home
+            .join(".config/dots/overrides/packages/app/files/home/.config/app/conf.toml"),
         "[s]\nlocal = \"yes\"\n",
     );
 
@@ -397,7 +399,8 @@ fn removing_the_last_env_contribution_removes_the_rc_block_and_empties_env_files
 fn status_right_after_apply_shows_every_file_ok() {
     let b = files_sandbox();
     write(
-        &b.root.join("overrides/packages/shellcfg/conf.toml"),
+        &b.root
+            .join("overrides/packages/shellcfg/files/home/.config/app/conf.toml"),
         "c = 3\n",
     );
     let o = run(&b, &["apply", "--yes", "--json"]);

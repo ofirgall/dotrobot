@@ -11,9 +11,11 @@ workspace = true
 [dependencies]
 dots-core.workspace = true
 dots-env.workspace = true
+dots-lock.workspace = true
 dots-model.workspace = true
 dots-providers.workspace = true
 dots-resolve.workspace = true
+dots-settings.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 

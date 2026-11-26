@@ -15,10 +15,15 @@ use std::path::{Path, PathBuf};
 
 use dots_facts::Facts;
 
+use crate::pathsrc;
 use crate::{
     Action, Availability, BinEntry, Caps, Cmd, Ctx, Installed, Latest, Op, OpKind, Outcome,
     Provider, ProviderError, Result, Spec, Support,
 };
+
+const ENV: &str = "/usr/bin/env";
+const FETCH_WITH_CLI: &str = "CARGO_NET_GIT_FETCH_WITH_CLI";
+const REVS_FILE: &str = ".dots-path-revs.json";
 
 pub(crate) const SYSTEM_PATH: &str =
     "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
@@ -176,7 +181,7 @@ impl Provider for CargoProvider {
             std::fs::read_to_string(cargo_home(&ctx.home, &ctx.env).join(".crates2.json"))
             && let Some(map) = parse_crates2(&text)
         {
-            return Ok(map);
+            return Ok(with_path_revs(ctx, map));
         }
         let bin = resolve_bin(&ctx.home, &ctx.env).ok_or_else(|| ProviderError::Unavailable {
             provider: "cargo".into(),
@@ -198,11 +203,19 @@ impl Provider for CargoProvider {
                 status: out.status,
             });
         }
-        Ok(parse_install_list(&out.stdout))
+        Ok(with_path_revs(ctx, parse_install_list(&out.stdout)))
     }
 
     fn latest(&self, ctx: &Ctx, specs: &[Spec]) -> Result<BTreeMap<String, Latest>> {
         let mut map = BTreeMap::new();
+        // A local crate's "latest" is its working tree: no network, no cargo.
+        for s in specs {
+            if let Some(dir) = pathsrc::source_dir(s)
+                && let Some(version) = pathsrc::source_version(ctx, &dir)
+            {
+                map.insert(s.name.clone(), Latest { version });
+            }
+        }
         let Some(bin) = resolve_bin(&ctx.home, &ctx.env) else {
             return Ok(map);
         };
@@ -210,7 +223,7 @@ impl Provider for CargoProvider {
             return Ok(map);
         }
         for s in specs {
-            if s.opts.contains_key("git") {
+            if s.opts.contains_key("git") || s.opts.contains_key("path") {
                 continue;
             }
             let cmd = Cmd::new(&bin)
@@ -245,11 +258,31 @@ impl Provider for CargoProvider {
                 let argv = match op.kind {
                     OpKind::Install | OpKind::Upgrade => {
                         let o = &op.spec.opts;
-                        let mut a = vec![bin.clone(), "install".to_string()];
+                        let mut a = Vec::new();
+                        if op.spec.flag("git_fetch_with_cli", false) {
+                            a.extend([ENV.to_string(), format!("{FETCH_WITH_CLI}=true")]);
+                        }
+                        a.extend([bin.clone(), "install".to_string()]);
+                        if o.contains_key("git") && o.contains_key("path") {
+                            return Err(ProviderError::Other(format!(
+                                "cargo: `{name}` sets both `git` and `path`; pick one"
+                            )));
+                        }
                         if o.get("locked").map(String::as_str) != Some("false") {
                             a.push("--locked".into());
                         }
-                        let target = if let Some(git) = o.get("git") {
+                        let target = if let Some(dir) = pathsrc::source_dir(&op.spec) {
+                            if op.version.is_some() {
+                                return Err(ProviderError::Other(format!(
+                                    "cargo: `{name}` is installed from a local path; its version comes from the crate"
+                                )));
+                            }
+                            if op.kind == OpKind::Upgrade {
+                                a.push("--force".into());
+                            }
+                            a.extend(["--path".into(), dir.to_string_lossy().into_owned()]);
+                            String::new()
+                        } else if let Some(git) = o.get("git") {
                             if op.version.is_some() {
                                 return Err(ProviderError::Other(format!(
                                     "cargo: `{name}` is installed from git; pin it with rev=, not a version"
@@ -269,7 +302,9 @@ impl Provider for CargoProvider {
                         if let Some(f) = o.get("features").filter(|f| !f.is_empty()) {
                             a.extend(["--features".into(), f.clone()]);
                         }
-                        a.push(target);
+                        if !target.is_empty() {
+                            a.push(target);
+                        }
                         a
                     }
                     OpKind::Remove => vec![bin.clone(), "uninstall".into(), name.clone()],
@@ -291,14 +326,59 @@ impl Provider for CargoProvider {
 
     fn exec(&self, ctx: &Ctx, action: &Action) -> Result<Outcome> {
         let home = cargo_home(&ctx.home, &ctx.env);
-        let action = &resolve_bare(action, 0, "cargo", resolve_bin(&ctx.home, &ctx.env))?;
-        let bin_dir = Path::new(&action.argv[0]).parent().map(Path::to_path_buf);
-        exec_action(
+        // `env VAR=1 cargo ...` carries the program at index 2.
+        let idx = if action.argv.first().map(String::as_str) == Some(ENV) {
+            action
+                .argv
+                .iter()
+                .skip(1)
+                .position(|a| !a.contains('='))
+                .map_or(0, |i| i + 1)
+        } else {
+            0
+        };
+        let action = &resolve_bare(action, idx, "cargo", resolve_bin(&ctx.home, &ctx.env))?;
+        let bin_dir = Path::new(&action.argv[idx]).parent().map(Path::to_path_buf);
+        let out = exec_action(
             ctx,
             action,
             bin_dir.as_deref(),
             &[("CARGO_HOME", &home.to_string_lossy())],
-        )
+        )?;
+        if !out.success && !ctx.dry_run && action.argv.iter().any(|a| a == "--locked") {
+            let text = out
+                .log
+                .as_ref()
+                .and_then(|l| std::fs::read_to_string(l).ok())
+                .unwrap_or_default();
+            if is_compile_error(&text) {
+                return Err(ProviderError::Other(format!(
+                    "`{}` failed to compile with the crate's locked dependencies; an old \
+                     lockfile may not build with the current rustc. Try `locked = false` in \
+                     [providers.cargo]{}",
+                    action.argv.join(" "),
+                    out.log
+                        .map(|l| format!(" (log: {})", l.display()))
+                        .unwrap_or_default()
+                )));
+            }
+        }
+        if out.success && !ctx.dry_run {
+            let revs = home.join(REVS_FILE);
+            for op in &action.ops {
+                match op.kind {
+                    OpKind::Remove => pathsrc::forget_rev(&revs, &op.spec.name),
+                    _ => {
+                        if let Some(dir) = pathsrc::source_dir(&op.spec)
+                            && let Some(v) = pathsrc::source_version(ctx, &dir)
+                        {
+                            pathsrc::record_rev(&revs, &op.spec.name, &v);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(out)
     }
 
     fn bins(&self, ctx: &Ctx, installed: &BTreeMap<String, Installed>) -> Result<Vec<BinEntry>> {
@@ -335,6 +415,24 @@ impl Provider for CargoProvider {
         out.sort_by(|a, b| (&a.package, &a.bin).cmp(&(&b.package, &b.bin)));
         Ok(out)
     }
+}
+
+/// Does cargo output show a rustc compile failure (as opposed to a network or resolve error)?
+fn is_compile_error(text: &str) -> bool {
+    text.contains("could not compile") || text.lines().any(|l| l.starts_with("error[E"))
+}
+
+/// Path-installed crates report `<crate version>.<n>+<rev>` as of their last install.
+fn with_path_revs(ctx: &Ctx, mut map: BTreeMap<String, Installed>) -> BTreeMap<String, Installed> {
+    let revs = pathsrc::read_revs(&cargo_home(&ctx.home, &ctx.env).join(REVS_FILE));
+    for (name, i) in map.iter_mut() {
+        if i.source.as_deref().is_some_and(|s| s.starts_with('/'))
+            && let Some(v) = revs.get(name)
+        {
+            i.version = v.clone();
+        }
+    }
+    map
 }
 
 fn availability(home: &Path, env: &BTreeMap<String, String>) -> Availability {

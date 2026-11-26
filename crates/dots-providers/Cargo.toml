@@ -13,6 +13,7 @@ dots-facts.workspace = true
 thiserror.workspace = true
 serde_json.workspace = true
 regex = "1"
+sha2 = "0.11.2"
 
 [dev-dependencies]
 dots-testkit.workspace = true

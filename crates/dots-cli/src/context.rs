@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use dots_core::Diagnostic;
 use dots_facts::{Chain, FactOverrides, Facts, RealSources, detect};
-use dots_model::{LoadErrors, MachineConfig, Repo};
+use dots_model::{LoadErrors, MachineConfig, OverrideLocation, Repo, RepoManifest};
 use serde_json::Value;
 
 use crate::app::Context;
@@ -99,11 +99,27 @@ pub fn load_machine(
 
 /// `[platforms.<key>] parent` declarations.
 pub fn platform_parents(repo: &Repo) -> BTreeMap<String, String> {
-    repo.manifest
+    manifest_parents(&repo.manifest)
+}
+
+fn manifest_parents(manifest: &RepoManifest) -> BTreeMap<String, String> {
+    manifest
         .platforms
         .iter()
         .filter_map(|(k, d)| Some((k.clone(), d.parent.clone()?)))
         .collect()
+}
+
+/// Where overrides are read from, lowest precedence first: `<root>/overrides`,
+/// `<root>/machines/<profile>/overrides` (when a profile applies) and the machine-local
+/// `<config>/overrides`, which is shown as `~/.config/dots/overrides`.
+pub fn override_locations(m: &MachineCtx, ctx: &Context) -> Vec<OverrideLocation> {
+    let dir = ctx.dirs.config.join("overrides");
+    let display = match dir.strip_prefix(&ctx.dirs.home) {
+        Ok(rest) => format!("~/{}", rest.display()),
+        Err(_) => dir.display().to_string(),
+    };
+    OverrideLocation::standard(&m.root, m.machine.profile.as_deref(), dir, display)
 }
 
 pub fn build_chain(m: &MachineCtx, repo: Option<&Repo>) -> Chain {
@@ -123,15 +139,31 @@ pub fn load_repo(
         let d = Diagnostic::from_code("not-initialized", &[("root", &root)]);
         return Err((vec![d], m.warnings));
     }
+    // A lock with merge-conflict markers (or no valid TOML) stops everything but `lock --fix`.
+    if let Err(d) = dots_lock::Lock::load(&m.root.join(dots_lock::FILE)) {
+        return Err((vec![d], m.warnings));
+    }
     match Repo::load(&m.root) {
         Ok(l) => {
             m.warnings.extend(l.warnings);
-            let chain = build_chain(&m, Some(&l.value));
-            Ok(RepoCtx {
-                m,
-                repo: l.value,
-                chain,
-            })
+            // Platform tables and overrides, merged into the repo everything else reads.
+            let (facts, extra) = (&m.facts, &m.machine.platform_extra);
+            let chain_of =
+                |man: &RepoManifest| Chain::build(facts, &manifest_parents(man), extra).ordered();
+            let locations = override_locations(&m, ctx);
+            let repo = match l.value.effective(&chain_of, &locations) {
+                Ok(e) => {
+                    m.warnings.extend(e.warnings);
+                    e.value
+                }
+                Err(LoadErrors { errors, warnings }) => {
+                    let mut w = m.warnings;
+                    w.extend(warnings);
+                    return Err((errors, w));
+                }
+            };
+            let chain = build_chain(&m, Some(&repo));
+            Ok(RepoCtx { m, repo, chain })
         }
         Err(LoadErrors { errors, warnings }) => {
             let mut w = m.warnings;

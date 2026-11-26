@@ -11,10 +11,16 @@ use dots_core::Diagnostic;
 use dots_providers::{Action, Cmd, Ctx, Installed, Provider, ProviderError, Stdin};
 
 use crate::files::{FileStep, FileStepResult, FilesRequest};
+use crate::hooks::{HookStep, HookStepResult, HooksPhase, run_hook};
 use crate::journal::{Entry, Journal, JournalMeta, rfc3339};
 use crate::lock::RunLock;
+use crate::phases::{
+    RestartResult, ServiceStep, ServiceStepResult, ServicesRequest, SettingStep, SettingStepResult,
+    SettingsRequest,
+};
 use crate::plan::{Batch, Inputs, PkgStep, Plan, plan, relative};
 use crate::render::plan_text;
+use crate::shims::{self, ShimStep, ShimStepResult};
 use crate::state::{OwnedFile, OwnedPackage, State, Todo};
 
 const SUDO: &str = "/usr/bin/sudo";
@@ -56,6 +62,18 @@ pub trait Observer: Send + Sync {
     fn files_started(&self, _total: usize) {}
     /// One file step was applied.
     fn file_done(&self, _result: &FileStepResult) {}
+    /// The settings phase is about to start with this many steps.
+    fn settings_started(&self, _total: usize) {}
+    /// One setting was changed (or failed).
+    fn setting_done(&self, _result: &SettingStepResult) {}
+    /// The services phase is about to start with this many steps.
+    fn services_started(&self, _total: usize) {}
+    /// One service action was applied (or failed).
+    fn service_done(&self, _result: &ServiceStepResult) {}
+    /// One package hook ran (or failed).
+    fn hook_done(&self, _result: &HookStepResult) {}
+    /// One provider shim was created, repaired or removed (or failed).
+    fn shim_done(&self, _result: &ShimStepResult) {}
 }
 
 /// Observes nothing.
@@ -158,9 +176,29 @@ pub struct ApplyReport {
     pub files: Vec<FileStepResult>,
     /// File steps not applied because their package's step did not succeed.
     pub files_skipped: Vec<(FileStep, String)>,
+    pub settings: Vec<SettingStepResult>,
+    /// Setting steps not applied because their package's install failed.
+    pub settings_skipped: Vec<(SettingStep, String)>,
+    /// Apps restarted at the end of the run, each once.
+    pub restarts: Vec<RestartResult>,
+    pub services: Vec<ServiceStepResult>,
+    /// Service steps not applied because their package's install or config failed.
+    pub services_skipped: Vec<(ServiceStep, String)>,
+    /// Provider shims created, repaired or removed.
+    pub shims: Vec<ShimStepResult>,
+    /// Shim steps not applied because their package did not install.
+    pub shims_skipped: Vec<(ShimStep, String)>,
+    /// Package hooks that ran, in the order they ran.
+    pub hooks: Vec<HookStepResult>,
+    /// Hooks not run, with the reason (their package did not install, files did not apply, an
+    /// earlier hook of the package failed).
+    pub hooks_skipped: Vec<(HookStep, String)>,
     pub todos: Vec<Todo>,
     pub errors: Vec<Diagnostic>,
     pub warnings: Vec<Diagnostic>,
+    /// Lock rows for the caller to write into `dots.lock`: every successful install, upgrade
+    /// or downgrade whose row changes, and every adoption or first record.
+    pub lock_updates: Vec<crate::locks::LockUpdate>,
 }
 
 impl ApplyReport {
@@ -172,9 +210,19 @@ impl ApplyReport {
             steps: Vec::new(),
             files: Vec::new(),
             files_skipped: Vec::new(),
+            settings: Vec::new(),
+            settings_skipped: Vec::new(),
+            restarts: Vec::new(),
+            services: Vec::new(),
+            services_skipped: Vec::new(),
+            shims: Vec::new(),
+            shims_skipped: Vec::new(),
+            hooks: Vec::new(),
+            hooks_skipped: Vec::new(),
             todos: Vec::new(),
             errors: Vec::new(),
             warnings: Vec::new(),
+            lock_updates: Vec::new(),
         }
     }
 }
@@ -196,6 +244,8 @@ struct BatchOutcome {
     id: usize,
     actions: Vec<ActionOutcome>,
     installed_after: Option<BTreeMap<String, Installed>>,
+    /// The `pre_install` hooks that ran before the batch.
+    hooks: Vec<HookStepResult>,
 }
 
 fn log_tail(log: &Option<PathBuf>) -> String {
@@ -208,6 +258,85 @@ fn log_tail(log: &Option<PathBuf>) -> String {
     lines[from..].join("\n")
 }
 
+/// Run one action (with `sudo -n` in front when it needs root). The flag is true when the
+/// command ran and simply exited non-zero (not a timeout, a coded error or a missing root).
+fn exec_action(
+    provider: &dyn Provider,
+    ctx: &Ctx,
+    action: &Action,
+    use_sudo: bool,
+    sudo_ok: bool,
+) -> (ActionOutcome, bool) {
+    let natives: Vec<String> = action.ops.iter().map(|o| o.spec.name.clone()).collect();
+    let started = Instant::now();
+    let mut act: Action = action.clone();
+    if act.needs_root && use_sudo {
+        if !sudo_ok {
+            return (
+                ActionOutcome {
+                    natives,
+                    ran: true,
+                    ok: false,
+                    log: None,
+                    error: Some("could not get root access".into()),
+                    code: Some("sudo-failed"),
+                    dur_ms: 0,
+                },
+                false,
+            );
+        }
+        let mut argv = vec![SUDO.to_string(), "-n".to_string()];
+        argv.append(&mut act.argv);
+        act.argv = argv;
+    }
+    let res = provider.exec(ctx, &act);
+    let dur_ms = started.elapsed().as_millis() as u64;
+    match res {
+        Ok(o) if o.success => (
+            ActionOutcome {
+                natives,
+                ran: true,
+                ok: true,
+                log: o.log,
+                error: None,
+                code: None,
+                dur_ms,
+            },
+            false,
+        ),
+        Ok(o) => (
+            ActionOutcome {
+                natives,
+                ran: true,
+                ok: false,
+                error: Some(format!("`{}` failed", action.argv.join(" "))),
+                log: o.log,
+                code: None,
+                dur_ms,
+            },
+            true,
+        ),
+        Err(e) => {
+            let (code, log) = match &e {
+                ProviderError::Coded { code, log, .. } => (Some(*code), log.clone()),
+                _ => (None, None),
+            };
+            (
+                ActionOutcome {
+                    natives,
+                    ran: true,
+                    ok: false,
+                    error: Some(e.to_string()),
+                    log,
+                    code,
+                    dur_ms,
+                },
+                false,
+            )
+        }
+    }
+}
+
 fn run_batch(
     provider: &dyn Provider,
     ctx: &Ctx,
@@ -215,7 +344,45 @@ fn run_batch(
     stop: &AtomicBool,
     use_sudo: bool,
     sudo_ok: bool,
+    pre: (&dyn HooksPhase, &[HookStep]),
 ) -> BatchOutcome {
+    // `pre_install` hooks of the batch's packages, before anything is installed. The batch is
+    // one provider call, so a failing hook fails every package of the batch.
+    let mut hooks = Vec::new();
+    for h in pre.1 {
+        let r = run_hook(pre.0, ctx, h);
+        let failed = (!r.ok).then(|| {
+            format!(
+                "the {} hook of `{}` failed: {}",
+                h.event,
+                h.package,
+                r.detail.clone().unwrap_or_default()
+            )
+        });
+        let log = r.log.clone();
+        hooks.push(r);
+        if let Some(msg) = failed {
+            let actions = batch
+                .actions
+                .iter()
+                .map(|a| ActionOutcome {
+                    natives: a.ops.iter().map(|o| o.spec.name.clone()).collect(),
+                    ran: true,
+                    ok: false,
+                    log: log.clone(),
+                    error: Some(msg.clone()),
+                    code: None,
+                    dur_ms: 0,
+                })
+                .collect();
+            return BatchOutcome {
+                id: batch.id,
+                actions,
+                installed_after: None,
+                hooks,
+            };
+        }
+    }
     let mut actions = Vec::new();
     let mut prep_failed = false;
     for action in &batch.actions {
@@ -244,66 +411,34 @@ fn run_batch(
             });
             continue;
         }
-        let started = Instant::now();
-        let mut act: Action = action.clone();
-        if act.needs_root && use_sudo {
-            if !sudo_ok {
-                actions.push(ActionOutcome {
-                    natives,
-                    ran: true,
-                    ok: false,
-                    log: None,
-                    error: Some("could not get root access".into()),
-                    code: Some("sudo-failed"),
-                    dur_ms: 0,
-                });
-                if act.ops.is_empty() {
-                    prep_failed = true;
+        let (out, plain_failure) = exec_action(provider, ctx, action, use_sudo, sudo_ok);
+        // A batch of packages that failed as a whole may be down to one bad member: the
+        // provider can name per-package actions to run instead, so only that one fails.
+        if plain_failure
+            && matches!(
+                action.kind,
+                dots_providers::OpKind::Install | dots_providers::OpKind::Upgrade
+            )
+            && let Some(each) = provider.retry_each(action)
+        {
+            for one in &each {
+                if stop.load(Ordering::SeqCst) {
+                    actions.push(ActionOutcome {
+                        natives: one.ops.iter().map(|o| o.spec.name.clone()).collect(),
+                        ran: false,
+                        ok: false,
+                        log: None,
+                        error: None,
+                        code: None,
+                        dur_ms: 0,
+                    });
+                    continue;
                 }
-                continue;
+                actions.push(exec_action(provider, ctx, one, use_sudo, sudo_ok).0);
             }
-            let mut argv = vec![SUDO.to_string(), "-n".to_string()];
-            argv.append(&mut act.argv);
-            act.argv = argv;
+            continue;
         }
-        let res = provider.exec(ctx, &act);
-        let dur_ms = started.elapsed().as_millis() as u64;
-        let out = match res {
-            Ok(o) if o.success => ActionOutcome {
-                natives,
-                ran: true,
-                ok: true,
-                log: o.log,
-                error: None,
-                code: None,
-                dur_ms,
-            },
-            Ok(o) => ActionOutcome {
-                natives,
-                ran: true,
-                ok: false,
-                error: Some(format!("`{}` failed", action.argv.join(" "))),
-                log: o.log,
-                code: None,
-                dur_ms,
-            },
-            Err(e) => {
-                let (code, log) = match &e {
-                    ProviderError::Coded { code, log, .. } => (Some(*code), log.clone()),
-                    _ => (None, None),
-                };
-                ActionOutcome {
-                    natives,
-                    ran: true,
-                    ok: false,
-                    error: Some(e.to_string()),
-                    log,
-                    code,
-                    dur_ms,
-                }
-            }
-        };
-        if !out.ok && act.ops.is_empty() {
+        if !out.ok && action.ops.is_empty() {
             prep_failed = true;
         }
         actions.push(out);
@@ -317,10 +452,49 @@ fn run_batch(
         id: batch.id,
         actions,
         installed_after,
+        hooks,
     }
 }
 
 // ------------------------------------------------------------------------------ the run
+
+/// How a batch relates to the system package manager lock (`/var/lib/dpkg/lock-frontend`).
+///
+/// A root package manager batch (apt: `needs_root` and `exclusive_lock`) holds that lock for
+/// the whole of its run. A `script` or user-defined (`custom`) batch runs arbitrary commands,
+/// and those very often call the package manager themselves (`apt-get install` inside an
+/// install script), so overlapping the two made the script fail with `Could not get lock`.
+/// The engine therefore never runs the two kinds at the same time. Everything else (brew,
+/// cargo, uv, git) is independent of the lock and still runs in parallel with either.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SysLock {
+    None,
+    /// A root package manager batch.
+    Holder,
+    /// A script or custom provider batch.
+    Arbitrary,
+}
+
+fn sys_lock(provider_id: &str, p: &dyn Provider) -> SysLock {
+    let caps = p.caps();
+    if provider_id == "script" || !dots_model::BUILTIN_PROVIDERS.contains(&provider_id) {
+        SysLock::Arbitrary
+    } else if caps.needs_root && caps.exclusive_lock {
+        SysLock::Holder
+    } else {
+        SysLock::None
+    }
+}
+
+/// May a batch of kind `k` start while `holders` root package manager batches and `arbitrary`
+/// script batches are running?
+fn lock_allows(k: SysLock, holders: usize, arbitrary: usize) -> bool {
+    match k {
+        SysLock::None => true,
+        SysLock::Holder => arbitrary == 0,
+        SysLock::Arbitrary => holders == 0,
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum B {
@@ -342,9 +516,54 @@ struct Run<'a> {
     errors: Vec<Diagnostic>,
     warnings: Vec<Diagnostic>,
     todos: Vec<Todo>,
+    lock_updates: Vec<crate::locks::LockUpdate>,
+    hook_results: Vec<HookStepResult>,
+    hooks_skipped: Vec<(HookStep, String)>,
+    /// Packages one of whose hooks failed in this run.
+    hook_failed: BTreeSet<String>,
 }
 
 impl Run<'_> {
+    /// Journal a hook, record its outcome in `state.json` and turn a failure into an error.
+    fn record_hook(&mut self, r: HookStepResult) {
+        self.journal(Entry {
+            op: format!("hook-{}", r.step.event),
+            pkg: r.step.package.clone(),
+            provider: None,
+            from: None,
+            to: Some(r.step.short()),
+            exit: i32::from(!r.ok),
+            dur_ms: r.dur_ms,
+            log: r.log.as_ref().map(|p| relative(&self.state_dir, p)),
+        });
+        if r.ok {
+            self.state.hooks_failed.remove(&r.step.key());
+        } else {
+            self.state.hooks_failed.insert(r.step.key());
+            self.hook_failed.insert(r.step.package.clone());
+            let log = r
+                .log
+                .as_ref()
+                .map_or("(no log)".to_string(), |p| p.display().to_string());
+            let mut d = Diagnostic::from_code(
+                "hook-failed",
+                &[
+                    ("package", &r.step.package),
+                    ("event", &r.step.event),
+                    ("detail", r.detail.as_deref().unwrap_or("the hook failed")),
+                    ("log", &log),
+                ],
+            );
+            let tail = log_tail(&r.log);
+            if !tail.is_empty() {
+                d.hint = format!("{}\n{tail}", d.hint);
+            }
+            self.errors.push(d);
+        }
+        self.save();
+        self.hook_results.push(r);
+    }
+
     fn save(&mut self) {
         if let Err(e) = self.state.save(&self.state_path) {
             self.warnings.push(Diagnostic::from_code(
@@ -383,7 +602,10 @@ impl Run<'_> {
         );
     }
 
-    fn finish_batch(&mut self, batch: &Batch, out: BatchOutcome) -> bool {
+    fn finish_batch(&mut self, batch: &Batch, mut out: BatchOutcome) -> bool {
+        for h in std::mem::take(&mut out.hooks) {
+            self.record_hook(h);
+        }
         let mut all_ok = true;
         for pkg in &batch.packages {
             let Some(step) = self.plan.step(pkg) else {
@@ -462,6 +684,47 @@ impl Run<'_> {
             );
             match status {
                 StepStatus::Ok => {
+                    if let Some(ls) = self
+                        .plan
+                        .lock
+                        .iter()
+                        .find(|l| l.package == *pkg && l.rewrite)
+                    {
+                        let spec = batch
+                            .actions
+                            .iter()
+                            .flat_map(|a| &a.ops)
+                            .find(|o| o.spec.name == step.native)
+                            .map(|o| o.spec.clone());
+                        let inst = out
+                            .installed_after
+                            .as_ref()
+                            .and_then(|m| m.get(&step.native))
+                            .cloned()
+                            .or_else(|| {
+                                step.to.clone().map(|v| Installed {
+                                    version: v,
+                                    pinned: false,
+                                    source: None,
+                                })
+                            });
+                        if let Some(inst) = inst {
+                            let spec =
+                                spec.unwrap_or_else(|| dots_providers::Spec::new(&step.native));
+                            let (version, rev) =
+                                crate::locks::version_and_rev(&step.provider, &spec, &inst);
+                            self.lock_updates.push(crate::locks::LockUpdate {
+                                package: pkg.clone(),
+                                provider: step.provider.clone(),
+                                platform: ls.platform.clone(),
+                                version,
+                                rev,
+                                git_ref: ls.git_ref.clone(),
+                                source: crate::locks::source_of(&spec),
+                                adopt: false,
+                            });
+                        }
+                    }
                     self.state.packages.insert(
                         pkg.clone(),
                         OwnedPackage {
@@ -546,7 +809,34 @@ pub fn apply_observed(
         return ApplyReport::bare(Status::DryRun, &cfg.run_id, plan_v);
     }
     if plan_v.is_empty() {
-        return ApplyReport::bare(Status::Done, &cfg.run_id, plan_v);
+        // Nothing to run; adopted and first-recorded versions still go into the lock.
+        let updates = crate::locks::recorded_without_step(&plan_v.lock);
+        // Nothing to apply, but a logout/reboot todo may have been done by the user since.
+        if !inp.scope.packages_only && !inp.scope.files_only {
+            let state_path = inp.dirs.state_json();
+            let (mut state, _) = State::load(&state_path);
+            let req = SettingsRequest {
+                run_id: &cfg.run_id,
+                packages: &plan_v.packages,
+                home: &inp.dirs.home,
+                state_dir: &inp.dirs.state,
+                dry_run: false,
+                full: inp.scope.targets.is_empty(),
+                sudo: false,
+            };
+            if close_settled_todos(inp, &req, &mut state) {
+                let _ = state.save(&state_path);
+            }
+        }
+        let mut report = ApplyReport::bare(Status::Done, &cfg.run_id, plan_v);
+        if !updates.is_empty() {
+            let journal = Journal::new(&inp.dirs.journal(), &cfg.run_id, cfg.journal.clone());
+            for u in updates.iter().filter(|u| u.adopt) {
+                let _ = journal.append(&adopt_entry(u));
+            }
+            report.lock_updates = updates;
+        }
+        return report;
     }
 
     // Confirmation policy.
@@ -590,7 +880,17 @@ fn execute(
         errors: Vec::new(),
         warnings: Vec::new(),
         todos: Vec::new(),
+        lock_updates: Vec::new(),
+        hook_results: Vec::new(),
+        hooks_skipped: Vec::new(),
+        hook_failed: BTreeSet::new(),
     };
+    for u in crate::locks::recorded_without_step(&plan_v.lock) {
+        if u.adopt {
+            run.journal(adopt_entry(&u));
+        }
+        run.lock_updates.push(u);
+    }
     if let Some(w) = state_warn {
         run.warnings.push(Diagnostic::from_code(
             "write-failed",
@@ -641,6 +941,10 @@ fn execute(
         let (tx, rx) = mpsc::channel::<BatchOutcome>();
         let mut running = 0usize;
         let mut running_providers: BTreeSet<String> = BTreeSet::new();
+        // Serialization keys (`[providers.script] lock`) of the batches running now.
+        let mut running_locks: BTreeSet<String> = BTreeSet::new();
+        // Running batches by their relation to the system package manager lock.
+        let (mut running_holders, mut running_arbitrary) = (0usize, 0usize);
 
         loop {
             // Dependents of a dead batch are skipped (to a fixpoint).
@@ -699,6 +1003,10 @@ fn execute(
                     }
                     let provider = inp.registry.get_for(&b.provider, &b.packages[0]);
                     let Some(provider) = provider else { continue };
+                    let kind = sys_lock(&b.provider, provider);
+                    if !lock_allows(kind, running_holders, running_arbitrary) {
+                        continue;
+                    }
                     if b.interactive {
                         if running > 0 || plain_startable {
                             continue;
@@ -732,11 +1040,23 @@ fn execute(
                     {
                         continue;
                     }
+                    let lock_key = provider.lock_key();
+                    if lock_key.as_ref().is_some_and(|k| running_locks.contains(k)) {
+                        continue;
+                    }
                     status[b.id] = B::Running;
                     running += 1;
+                    match kind {
+                        SysLock::Holder => running_holders += 1,
+                        SysLock::Arbitrary => running_arbitrary += 1,
+                        SysLock::None => {}
+                    }
                     obs.batch_started(b);
                     if provider.caps().exclusive_lock {
                         running_providers.insert(b.provider.clone());
+                    }
+                    if let Some(k) = lock_key {
+                        running_locks.insert(k);
                     }
                     let tx = tx.clone();
                     // Only what packages finished so far contributed: dependencies are done
@@ -751,8 +1071,23 @@ fn execute(
                         bctx.env.extend(o.runner_env(base.as_deref()));
                     }
                     let use_sudo = cfg.sudo;
+                    let pre_hooks: Vec<HookStep> = plan_v
+                        .hooks
+                        .iter()
+                        .filter(|h| h.event == "pre_install" && b.packages.contains(&h.package))
+                        .cloned()
+                        .collect();
+                    let hooks_phase = inp.hooks;
                     scope.spawn(move || {
-                        let out = run_batch(provider, &bctx, b, stop, use_sudo, sudo_ok);
+                        let out = run_batch(
+                            provider,
+                            &bctx,
+                            b,
+                            stop,
+                            use_sudo,
+                            sudo_ok,
+                            (hooks_phase, &pre_hooks),
+                        );
                         let _ = tx.send(out);
                     });
                     if b.interactive {
@@ -777,14 +1112,24 @@ fn execute(
             let Ok(out) = rx.recv() else { break };
             running -= 1;
             let b = &plan_v.batches[out.id];
-            if inp
-                .registry
-                .get_for(&b.provider, &b.packages[0])
-                .is_some_and(|p| p.caps().exclusive_lock)
-            {
-                running_providers.remove(&b.provider);
+            if let Some(p) = inp.registry.get_for(&b.provider, &b.packages[0]) {
+                if p.caps().exclusive_lock {
+                    running_providers.remove(&b.provider);
+                }
+                if let Some(k) = p.lock_key() {
+                    running_locks.remove(&k);
+                }
+                match sys_lock(&b.provider, p) {
+                    SysLock::Holder => running_holders -= 1,
+                    SysLock::Arbitrary => running_arbitrary -= 1,
+                    SysLock::None => {}
+                }
             }
+            let hooks_before = run.hook_results.len();
             let ok = run.finish_batch(b, out);
+            for r in &run.hook_results[hooks_before..] {
+                obs.hook_done(r);
+            }
             let done: Vec<StepResult> = b
                 .packages
                 .iter()
@@ -812,27 +1157,160 @@ fn execute(
 
     // Files phase: only for packages whose install went through.
     let interrupted = stop.load(Ordering::SeqCst);
+    // Packages whose install did not go through: their files, settings and services are left
+    // alone.
+    let blocked: BTreeMap<&str, &str> = plan_v
+        .steps
+        .iter()
+        .filter_map(|s| {
+            let r = run.results.get(&s.package)?;
+            (r.status != StepStatus::Ok).then_some((s.package.as_str(), s.package.as_str()))
+        })
+        .collect();
+    let eligible: Vec<String> = plan_v
+        .packages
+        .iter()
+        .filter(|p| !blocked.contains_key(p.as_str()))
+        .cloned()
+        .collect();
+
+    // Service teardown (the services of dropped packages) runs BEFORE the files phase. A
+    // dropped package's unit file is removed by the files phase; disabling afterwards would
+    // make `systemctl disable --now` fail on a missing unit. Running the teardown first, while
+    // the unit is still linked, is the whole fix: the later services call (below) handles
+    // everything else, after config and settings are in place.
+    let mut services_done: Vec<ServiceStepResult> = Vec::new();
+    if !interrupted {
+        let teardown: Vec<ServiceStep> = plan_v
+            .services
+            .iter()
+            .filter(|s| s.teardown && !blocked.contains_key(s.package.as_str()))
+            .cloned()
+            .collect();
+        if !teardown.is_empty() {
+            let req = ServicesRequest {
+                run_id: &cfg.run_id,
+                packages: &eligible,
+                home: &inp.dirs.home,
+                state_dir: &inp.dirs.state,
+                dry_run: false,
+                changed: &[],
+                teardown: true,
+            };
+            obs.services_started(teardown.len());
+            apply_services(inp, obs, &mut run, &req, &teardown, &mut services_done);
+        }
+    }
+
+    // The hooks phase runs commands with what this run installed on PATH.
+    let hook_ctx = {
+        let mut c = ctx.clone();
+        if let Some(o) = &overlay {
+            let base = c
+                .env
+                .get("PATH")
+                .map(std::ffi::OsString::from)
+                .or_else(|| std::env::var_os("PATH"));
+            c.env.extend(o.runner_env(base.as_deref()));
+        }
+        c
+    };
+    let run_hooks = |run: &mut Run<'_>,
+                     events: &[&str],
+                     skip: &dyn Fn(&HookStep, &Run<'_>) -> Option<String>| {
+        for h in plan_v
+            .hooks
+            .iter()
+            .filter(|h| events.contains(&h.event.as_str()))
+        {
+            if stop.load(Ordering::SeqCst) {
+                return;
+            }
+            if let Some(why) = skip(h, run) {
+                run.hooks_skipped.push((h.clone(), why));
+                continue;
+            }
+            let before = run.hook_results.len();
+            let r = run_hook(inp.hooks, &hook_ctx, h);
+            run.record_hook(r);
+            for r in &run.hook_results[before..] {
+                obs.hook_done(r);
+            }
+        }
+    };
+    // Shims, right after the installs: the shim points at what the install just put on disk.
+    let mut shims_done: Vec<ShimStepResult> = Vec::new();
+    let mut shims_skipped: Vec<(ShimStep, String)> = Vec::new();
+    if !interrupted {
+        let path_var = hook_ctx
+            .env
+            .get("PATH")
+            .cloned()
+            .or_else(|| std::env::var("PATH").ok())
+            .unwrap_or_default();
+        for st in &plan_v.shims {
+            if let Some(dep) = blocked.get(st.package.as_str()) {
+                shims_skipped.push((st.clone(), (*dep).to_string()));
+                continue;
+            }
+            let started = Instant::now();
+            let outcome = apply_shim(inp, &mut run, st, &path_var);
+            let r = ShimStepResult {
+                step: st.clone(),
+                ok: outcome.is_ok(),
+                detail: outcome.err(),
+                dur_ms: started.elapsed().as_millis() as u64,
+            };
+            run.journal(Entry {
+                op: format!("shim-{}", st.action),
+                pkg: st.package.clone(),
+                provider: None,
+                from: None,
+                to: Some(st.dst.clone()),
+                exit: i32::from(!r.ok),
+                dur_ms: r.dur_ms,
+                log: None,
+            });
+            if !r.ok {
+                run.errors.push(Diagnostic::from_code(
+                    "write-failed",
+                    &[
+                        ("path", &st.dst),
+                        ("detail", r.detail.as_deref().unwrap_or("the shim failed")),
+                    ],
+                ));
+            }
+            obs.shim_done(&r);
+            shims_done.push(r);
+        }
+    }
+    let pre_skip = |h: &HookStep, run: &Run<'_>| -> Option<String> {
+        if blocked.contains_key(h.package.as_str()) {
+            Some("its package did not install".into())
+        } else if run.hook_failed.contains(&h.package) {
+            Some("an earlier hook of the package failed".into())
+        } else {
+            None
+        }
+    };
+    if !interrupted {
+        run_hooks(&mut run, &["pre_files"], &pre_skip);
+    }
+
     let mut files_done: Vec<FileStepResult> = Vec::new();
     let mut files_skipped: Vec<(FileStep, String)> = Vec::new();
     if !plan_v.files.is_empty() && !interrupted {
-        let blocked: BTreeMap<&str, &str> = plan_v
-            .steps
-            .iter()
-            .filter_map(|s| {
-                let r = run.results.get(&s.package)?;
-                (r.status != StepStatus::Ok).then_some((s.package.as_str(), s.package.as_str()))
-            })
-            .collect();
-        let eligible: Vec<String> = plan_v
-            .packages
-            .iter()
-            .filter(|p| !blocked.contains_key(p.as_str()))
-            .cloned()
-            .collect();
         let mut steps: Vec<FileStep> = Vec::new();
         for f in &plan_v.files {
             match blocked.get(f.package.as_str()) {
                 Some(dep) => files_skipped.push((f.clone(), (*dep).to_string())),
+                // A failed `pre_files` hook leaves the package's files alone.
+                None if run.hook_results.iter().any(|r| {
+                    !r.ok && r.step.package == f.package && r.step.event == "pre_files"
+                }) =>
+                {
+                    files_skipped.push((f.clone(), f.package.clone()))
+                }
                 None => steps.push(f.clone()),
             }
         }
@@ -893,8 +1371,209 @@ fn execute(
         }
     }
 
+    // Settings, after files and before services: only for packages whose install went through.
+    // The run's one prompt primed sudo when anything needs root; when it failed `sudo` is
+    // false, so the phase fails root entries instead of running them as the user.
+    let settings_sudo = cfg.sudo && sudo_ok;
+    if !interrupted && !inp.scope.packages_only && !inp.scope.files_only {
+        let req = SettingsRequest {
+            run_id: &cfg.run_id,
+            packages: &eligible,
+            home: &inp.dirs.home,
+            state_dir: &inp.dirs.state,
+            dry_run: false,
+            full: inp.scope.targets.is_empty(),
+            sudo: settings_sudo,
+        };
+        if close_settled_todos(inp, &req, &mut run.state) {
+            run.save();
+        }
+    }
+    let mut settings_done: Vec<SettingStepResult> = Vec::new();
+    let mut settings_skipped: Vec<(SettingStep, String)> = Vec::new();
+    let mut restarts_done: Vec<RestartResult> = Vec::new();
+    if !plan_v.settings.is_empty() && !interrupted {
+        let mut steps: Vec<SettingStep> = Vec::new();
+        for s in &plan_v.settings {
+            match blocked.get(s.package.as_str()) {
+                Some(dep) => settings_skipped.push((s.clone(), (*dep).to_string())),
+                None => steps.push(s.clone()),
+            }
+        }
+        let req = SettingsRequest {
+            run_id: &cfg.run_id,
+            packages: &eligible,
+            home: &inp.dirs.home,
+            state_dir: &inp.dirs.state,
+            dry_run: false,
+            full: inp.scope.targets.is_empty(),
+            sudo: settings_sudo,
+        };
+        obs.settings_started(steps.len());
+        let res = inp
+            .settings
+            .apply(&req, &steps, &mut |r: SettingStepResult| {
+                obs.setting_done(&r);
+                run.journal(Entry {
+                    op: format!("setting-{}", r.step.action),
+                    pkg: r.step.package.clone(),
+                    provider: Some(r.step.kind.clone()),
+                    from: None,
+                    to: Some(r.step.id.clone()),
+                    exit: i32::from(!r.ok),
+                    dur_ms: r.dur_ms,
+                    log: None,
+                });
+                if !r.ok {
+                    run.errors.push(Diagnostic::from_code(
+                        "setting-failed",
+                        &[
+                            ("setting", &r.step.label),
+                            ("detail", r.detail.as_deref().unwrap_or("the change failed")),
+                        ],
+                    ));
+                }
+                settings_done.push(r);
+            });
+        if let Err(e) = res {
+            run.errors.push(Diagnostic::from_code(
+                "plan-failed",
+                &[("package", "settings"), ("detail", &e)],
+            ));
+        }
+        // Restarts are aggregated over the whole run and happen once, after the last change;
+        // so does the "log out to apply" item.
+        let mut apps: Vec<String> = Vec::new();
+        for r in settings_done.iter().filter(|r| r.ok) {
+            let named = r.step.restart.iter().map(String::as_str);
+            let required = r
+                .step
+                .requires
+                .iter()
+                .filter_map(|q| q.strip_prefix("restart-app:"));
+            for app in named.chain(required) {
+                if !apps.iter().any(|a| a == app) {
+                    apps.push(app.to_string());
+                }
+            }
+            for need in r
+                .step
+                .requires
+                .iter()
+                .filter(|q| matches!(q.as_str(), "logout" | "reboot"))
+            {
+                let reason = dots_settings::todo_reason(need, &r.step.label);
+                if !run
+                    .state
+                    .todos
+                    .iter()
+                    .any(|t| t.package == r.step.package && t.reason == reason)
+                {
+                    let t = Todo {
+                        package: r.step.package.clone(),
+                        reason,
+                        run: cfg.run_id.clone(),
+                    };
+                    run.state.todos.push(t.clone());
+                    run.todos.push(t);
+                }
+            }
+        }
+        run.save();
+        if !apps.is_empty() {
+            restarts_done = inp.settings.restart(&req, &apps);
+            for r in restarts_done.iter().filter(|r| !r.ok) {
+                run.warnings.push(Diagnostic::from_code(
+                    "restart-failed",
+                    &[
+                        ("app", &r.app),
+                        (
+                            "detail",
+                            r.detail.as_deref().unwrap_or("it did not restart"),
+                        ),
+                    ],
+                ));
+            }
+        }
+    }
+
+    // Services: after config and settings are in place. A service whose config did not land
+    // is left alone.
+    let mut services_skipped: Vec<(ServiceStep, String)> = Vec::new();
+    if !plan_v.services.is_empty() && !interrupted {
+        let bad_cfg: BTreeSet<&str> = files_done
+            .iter()
+            .filter(|f| !f.ok)
+            .map(|f| f.step.package.as_str())
+            .chain(files_skipped.iter().map(|(f, _)| f.package.as_str()))
+            .collect();
+        let bad_settings: BTreeSet<&str> = settings_done
+            .iter()
+            .filter(|s| !s.ok)
+            .map(|s| s.step.package.as_str())
+            .collect();
+        let mut steps: Vec<ServiceStep> = Vec::new();
+        for s in &plan_v.services {
+            if s.teardown && !blocked.contains_key(s.package.as_str()) {
+                continue; // already ran, before the files phase
+            }
+            if let Some(dep) = blocked.get(s.package.as_str()) {
+                services_skipped.push((s.clone(), (*dep).to_string()));
+            } else if bad_cfg.contains(s.package.as_str())
+                || bad_settings.contains(s.package.as_str())
+            {
+                services_skipped.push((s.clone(), s.package.clone()));
+            } else {
+                steps.push(s.clone());
+            }
+        }
+        let changed: Vec<String> = files_done
+            .iter()
+            .filter(|f| f.ok)
+            .map(|f| f.step.package.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let req = ServicesRequest {
+            run_id: &cfg.run_id,
+            packages: &eligible,
+            home: &inp.dirs.home,
+            state_dir: &inp.dirs.state,
+            dry_run: false,
+            changed: &changed,
+            teardown: false,
+        };
+        obs.services_started(steps.len());
+        apply_services(inp, obs, &mut run, &req, &steps, &mut services_done);
+    }
+
+    // Hooks, last: `post_install` then `post_files` of each package (plan order), once its
+    // package, its files and its earlier hooks went through.
+    if !interrupted {
+        let bad_files: BTreeSet<&str> = files_done
+            .iter()
+            .filter(|f| !f.ok)
+            .map(|f| f.step.package.as_str())
+            .chain(files_skipped.iter().map(|(f, _)| f.package.as_str()))
+            .collect();
+        let post_skip = |h: &HookStep, run: &Run<'_>| -> Option<String> {
+            if let Some(why) = pre_skip(h, run) {
+                Some(why)
+            } else if h.event == "post_files" && bad_files.contains(h.package.as_str()) {
+                Some("its files did not apply".into())
+            } else {
+                None
+            }
+        };
+        run_hooks(&mut run, &["post_install", "post_files"], &post_skip);
+    }
+
     let failed = run.results.values().any(|r| r.status == StepStatus::Failed)
+        || shims_done.iter().any(|s| !s.ok)
         || files_done.iter().any(|f| !f.ok)
+        || run.hook_results.iter().any(|h| !h.ok)
+        || settings_done.iter().any(|s| !s.ok)
+        || services_done.iter().any(|s| !s.ok)
         || !run.errors.is_empty();
     let status = if interrupted {
         Status::Interrupted
@@ -912,6 +1591,9 @@ fn execute(
         errors,
         warnings,
         todos,
+        lock_updates,
+        hook_results,
+        hooks_skipped,
         ..
     } = run;
     ApplyReport {
@@ -921,8 +1603,133 @@ fn execute(
         steps,
         files: files_done,
         files_skipped,
+        settings: settings_done,
+        settings_skipped,
+        restarts: restarts_done,
+        services: services_done,
+        services_skipped,
+        shims: shims_done,
+        shims_skipped,
+        hooks: hook_results,
+        hooks_skipped,
         todos,
         errors,
         warnings,
+        lock_updates,
+    }
+}
+
+/// Create, repair or remove one shim and update the ledger. `Err` is the reason it failed.
+fn apply_shim(
+    inp: &Inputs<'_>,
+    run: &mut Run<'_>,
+    st: &ShimStep,
+    path_var: &str,
+) -> Result<(), String> {
+    let key = st.path.to_string_lossy().into_owned();
+    if st.action == "remove" {
+        if matches!(
+            shims::state_of(&st.path),
+            shims::ShimState::Ok | shims::ShimState::Dangling
+        ) {
+            std::fs::remove_file(&st.path)
+                .map_err(|e| format!("cannot remove {}: {e}", st.path.display()))?;
+        }
+        run.state.shims.remove(&key);
+        run.save();
+        return Ok(());
+    }
+    // The install may just have put the target on disk: resolve it now.
+    let target = shims::find_bin(
+        &st.bin,
+        path_var,
+        &inp.dirs.home,
+        &shims::bin_dir(&inp.dirs.home),
+    )
+    .ok_or_else(|| {
+        format!(
+            "`{}` (the target of shim `{}`) was not found on PATH",
+            st.bin, st.name
+        )
+    })?;
+    shims::make_link(&st.path, &target)?;
+    run.state.shims.insert(
+        key,
+        shims::OwnedShim {
+            package: st.package.clone(),
+            target: target.to_string_lossy().into_owned(),
+            run: run.run_id.clone(),
+            ts: rfc3339(SystemTime::now()),
+        },
+    );
+    run.save();
+    Ok(())
+}
+
+/// Run `steps` through the services phase, journaling each and turning failures into errors.
+fn apply_services(
+    inp: &Inputs<'_>,
+    obs: &dyn Observer,
+    run: &mut Run<'_>,
+    req: &ServicesRequest<'_>,
+    steps: &[ServiceStep],
+    done_out: &mut Vec<ServiceStepResult>,
+) {
+    let res = inp.services.apply(req, steps, &mut |r: ServiceStepResult| {
+        obs.service_done(&r);
+        run.journal(Entry {
+            op: format!("service-{}", r.step.action),
+            pkg: r.step.package.clone(),
+            provider: Some(r.step.manager.clone()),
+            from: None,
+            to: Some(r.step.name.clone()),
+            exit: i32::from(!r.ok),
+            dur_ms: r.dur_ms,
+            log: None,
+        });
+        if !r.ok {
+            run.errors.push(Diagnostic::from_code(
+                "service-failed",
+                &[
+                    ("service", &r.step.name),
+                    ("action", &r.step.action),
+                    ("detail", r.detail.as_deref().unwrap_or("the action failed")),
+                ],
+            ));
+        }
+        done_out.push(r);
+    });
+    if let Err(e) = res {
+        run.errors.push(Diagnostic::from_code(
+            "plan-failed",
+            &[("package", "services"), ("detail", &e)],
+        ));
+    }
+}
+
+/// Close the manual actions (`logout` / `reboot`) whose setting now reads as declared. `true`
+/// when `state` changed.
+fn close_settled_todos(inp: &Inputs<'_>, req: &SettingsRequest<'_>, state: &mut State) -> bool {
+    if state.todos.is_empty() {
+        return false;
+    }
+    let done = inp.settings.settled(req);
+    let before = state.todos.len();
+    state
+        .todos
+        .retain(|t| !done.iter().any(|(p, r)| *p == t.package && *r == t.reason));
+    state.todos.len() != before
+}
+
+fn adopt_entry(u: &crate::locks::LockUpdate) -> Entry {
+    Entry {
+        op: "adopt".into(),
+        pkg: u.package.clone(),
+        provider: Some(u.provider.clone()),
+        from: None,
+        to: u.version.clone().or_else(|| u.rev.clone()),
+        exit: 0,
+        dur_ms: 0,
+        log: None,
     }
 }

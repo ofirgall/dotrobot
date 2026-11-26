@@ -1,7 +1,7 @@
 //! `dots lint` for the v0.1 checks (task 2.9): conditions (syntax, unknown facts, tags and
 //! platform keys), unresolved references, dependency cycles and script packages without
-//! `check`. Schema errors and `//` escape warnings come from `Repo::load`; directive,
-//! fragment and override lint is a later task.
+//! `check`. Schema errors and `//` escape warnings come from `Repo::load`; directive
+//! and override lint is a later task; fragment collisions are checked here.
 
 use std::collections::BTreeSet;
 
@@ -101,6 +101,7 @@ pub fn lint(inp: &LintInputs) -> LintReport {
     l.conditions();
     l.platforms();
     l.packages();
+    l.fragments();
     l.machine();
     l.out
 }
@@ -374,7 +375,7 @@ impl Linter<'_> {
         }
     }
 
-    /// Platform keys used as `[priority]` keys and `[platforms]` parents.
+    /// Platform keys used as `[priority]` keys, `[platforms]` parents and `[platform.<key>]` tables.
     fn platforms(&mut self) {
         let repo = self.inp.repo;
         let spans = &repo.manifest.spans;
@@ -382,6 +383,13 @@ impl Linter<'_> {
             if !self.platform_known(k) {
                 let at = spans.get(&format!("priority.{k}")).copied();
                 self.unknown_platform(k, "dots.toml", "dots.toml", at);
+            }
+        }
+        // `[platform."<key>"]` tables in definitions and overrides.
+        for r in &repo.platform_keys {
+            if !self.platform_known(&r.key) {
+                let at = r.line.map(|l| (l, r.col.unwrap_or(1)));
+                self.unknown_platform(&r.key, &r.file, &r.source, at);
             }
         }
         for (k, d) in &repo.manifest.platforms {
@@ -407,6 +415,88 @@ impl Linter<'_> {
                         .with_provenance(prov(&format!("package:{pn}"), &file, at));
                 self.warn(d);
             }
+            if let Some(ProviderConfig::Script(s)) = p.providers.get("script") {
+                let file = format!("packages/{pn}/package.toml");
+                if let Some(f) = &s.fetch
+                    && f.url.is_none()
+                {
+                    let at = p
+                        .spans
+                        .get("providers.script.fetch")
+                        .or_else(|| p.spans.get("providers.script"))
+                        .copied();
+                    let line = at.map_or_else(String::new, |a| a.0.to_string());
+                    let d = Diagnostic::from_code(
+                        "schema-invalid-value",
+                        &[
+                            ("key", "providers.script.fetch"),
+                            ("detail", "`fetch` needs a `url`"),
+                            ("file", &file),
+                            ("line", &line),
+                        ],
+                    )
+                    .with_provenance(prov(&format!("package:{pn}"), &file, at));
+                    self.error(d);
+                }
+                for text in script_texts(s, &p.dir) {
+                    if let Some(snippet) = dots_providers::script::unpinned_curl_pipe(&text) {
+                        let at = p.spans.get("providers.script").copied();
+                        let d = Diagnostic::from_code(
+                            "script-unpinned-fetch",
+                            &[("package", pn), ("snippet", &snippet), ("file", &file)],
+                        )
+                        .with_provenance(prov(
+                            &format!("package:{pn}"),
+                            &file,
+                            at,
+                        ));
+                        self.warn(d);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Two fragments for one `dst` that set the same key at the same priority.
+    fn fragments(&mut self) {
+        let mut by_dst: std::collections::BTreeMap<String, Vec<dots_files::FragmentSource>> =
+            Default::default();
+        for (pn, p) in &self.inp.repo.packages {
+            for f in p
+                .files
+                .iter()
+                .filter(|f| f.mode.as_deref() == Some("fragment"))
+            {
+                let (Some(src), Some(dst)) = (&f.src, &f.dst) else {
+                    continue;
+                };
+                let Ok(text) = std::fs::read_to_string(p.dir.join(src)) else {
+                    continue;
+                };
+                let dsts = match dst {
+                    dots_model::PlatformString::Plain(d) => vec![d.clone()],
+                    dots_model::PlatformString::PerPlatform(m) => m.values().cloned().collect(),
+                };
+                for d in dsts {
+                    let format = dots_files::detect_format(f.format.as_deref(), d.as_ref());
+                    by_dst
+                        .entry(d)
+                        .or_default()
+                        .push(dots_files::FragmentSource {
+                            package: pn.clone(),
+                            priority: f.priority.unwrap_or(0),
+                            format,
+                            path: format!("packages/{pn}/{src}"),
+                            text: text.clone(),
+                        });
+                }
+            }
+        }
+        for (dst, srcs) in by_dst {
+            for d in dots_files::lint_collisions(&dst, &srcs) {
+                self.error(d);
+            }
         }
     }
 
@@ -422,4 +512,31 @@ impl Linter<'_> {
             }
         }
     }
+}
+
+/// The text of every script command of a package: the inline commands and, when a command
+/// starts with a file of the package, that file's content.
+fn script_texts(s: &dots_model::Script, dir: &std::path::Path) -> Vec<String> {
+    let mut out = Vec::new();
+    for cmd in [
+        &s.install,
+        &s.upgrade,
+        &s.uninstall,
+        &s.check,
+        &s.version,
+        &s.latest,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        out.push(cmd.clone());
+        if let Some(first) = cmd.split_whitespace().next()
+            && !first.starts_with('/')
+            && !first.contains("..")
+            && let Ok(text) = std::fs::read_to_string(dir.join(first))
+        {
+            out.push(text);
+        }
+    }
+    out
 }

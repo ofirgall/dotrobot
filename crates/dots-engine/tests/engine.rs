@@ -14,7 +14,7 @@ use dots_providers::{
     Action, Availability, BinEntry, Caps, Ctx, Installed, Latest, Op, Outcome, Provider, Registry,
     Result as PResult, Spec,
 };
-use dots_resolve::{InstalledMap, resolve};
+use dots_resolve::InstalledMap;
 use dots_testkit::{FakeProvider, RecordingRunner};
 
 // ------------------------------------------------------------------ harness
@@ -91,8 +91,32 @@ struct Case<'a> {
     reg: &'a Registry,
     ctx: Ctx,
     files: &'a dyn FilesPhase,
+    settings: &'a dyn SettingsPhase,
+    services: &'a dyn ServicesPhase,
+    hooks: &'a dyn HooksPhase,
     scope: Scope,
     unreviewed: BTreeSet<String>,
+    lock: dots_lock::Lock,
+    offers: MapOffers,
+    upgrade: BTreeMap<String, dots_engine::UpgradeTarget>,
+}
+
+/// What a fake registry "offers", by `(provider, native)`.
+#[derive(Default)]
+struct MapOffers(BTreeMap<(String, String), String>);
+
+impl dots_resolve::OfferSource for MapOffers {
+    fn offered(
+        &self,
+        provider: &str,
+        _pkg: &str,
+        native: &str,
+        _spec: &dots_providers::Spec,
+    ) -> Option<String> {
+        self.0
+            .get(&(provider.to_string(), native.to_string()))
+            .cloned()
+    }
 }
 
 impl<'a> Case<'a> {
@@ -107,8 +131,14 @@ impl<'a> Case<'a> {
             reg,
             ctx: run_ctx,
             files,
+            settings: &NoSettingsPhase,
+            services: &NoServicesPhase,
+            hooks: &NoHooksPhase,
             scope: Scope::default(),
             unreviewed: BTreeSet::new(),
+            lock: dots_lock::Lock::default(),
+            offers: MapOffers::default(),
+            upgrade: BTreeMap::new(),
         }
     }
 
@@ -123,25 +153,38 @@ impl<'a> Case<'a> {
         let facts = facts();
         let chain = Chain::build(&facts, &BTreeMap::new(), &machine.platform_extra);
         let installed = installed_map(self.reg, &self.ctx);
-        let res = resolve(&dots_resolve::Inputs {
-            repo: &repo,
-            machine: &machine,
-            facts: &facts,
-            chain: &chain,
-            providers: self.reg,
-            installed: &installed,
-        });
+        let res = dots_resolve::resolve_with(
+            &dots_resolve::Inputs {
+                repo: &repo,
+                machine: &machine,
+                facts: &facts,
+                chain: &chain,
+                providers: self.reg,
+                installed: &installed,
+            },
+            &self.offers,
+        );
         assert!(res.is_ok(), "{:#?}", res.errors);
+        let locks = dots_engine::LockInputs {
+            lock: &self.lock,
+            machine_key: "debian/x86_64",
+            offers: &self.offers,
+            upgrade: &self.upgrade,
+        };
         f(&Inputs {
             repo: &repo,
             resolution: &res,
             registry: self.reg,
             installed: &installed,
             files: self.files,
+            settings: self.settings,
+            services: self.services,
+            hooks: self.hooks,
             ctx: &self.ctx,
             dirs: &self.sb.dirs,
             scope: &self.scope,
             unreviewed: &self.unreviewed,
+            locks: Some(&locks),
         })
     }
 
@@ -312,6 +355,30 @@ fn second_apply_is_a_no_op() {
     assert_eq!(brew.executed().len() + cargo.executed().len(), before);
 }
 
+/// An installed package the provider calls stale (an apt repository not configured yet) gets an
+/// upgrade step with the reason; once the upgrade ran, the next plan is empty.
+#[test]
+fn stale_installed_package_is_upgraded_once() {
+    let sb = sandbox(&[("fd", "[providers.brew]")], &[]);
+    let brew = FakeProvider::new("brew")
+        .with_installed("fd", "9.0.0")
+        .with_stale("fd", "repo x/y not configured");
+    let reg = registry(&[&brew]);
+    let case = Case::new(&sb, &reg, &NoFiles);
+    let p = case.plan();
+    let step = p.step("fd").expect("an upgrade step");
+    assert_eq!(step.kind, StepKind::Upgrade);
+    assert_eq!(step.note.as_deref(), Some("repo x/y not configured"));
+    assert_eq!(case.apply(true).status, Status::Done);
+    assert!(case.plan().is_empty());
+    // Not installed at all: an install, not an upgrade, and no note.
+    let brew = FakeProvider::new("brew").with_stale("fd", "repo x/y not configured");
+    let reg = registry(&[&brew]);
+    let p = Case::new(&sb, &reg, &NoFiles).plan();
+    assert_eq!(p.step("fd").unwrap().kind, StepKind::Install);
+    assert_eq!(p.step("fd").unwrap().note, None);
+}
+
 #[test]
 fn dry_run_executes_nothing_and_needs_no_lock() {
     let sb = sandbox(PKGS, &[]);
@@ -448,6 +515,236 @@ fn independent_providers_run_in_parallel() {
         met.load(Ordering::SeqCst),
         "brew and cargo never ran at the same time"
     );
+}
+
+/// A script (or custom) batch never overlaps a root package manager batch: scripts call
+/// `apt-get` themselves and hit the dpkg lock (`Could not get lock /var/lib/dpkg/lock-frontend`).
+#[test]
+fn script_batches_never_overlap_an_apt_batch() {
+    struct Probe {
+        inner: FakeProvider,
+        /// `(apt or script batches in flight now, the most seen at once)`
+        flight: Arc<Mutex<(usize, usize)>>,
+    }
+    impl Provider for Probe {
+        fn id(&self) -> &'static str {
+            self.inner.id()
+        }
+        fn caps(&self) -> Caps {
+            self.inner.caps()
+        }
+        fn availability(&self, f: &Facts) -> Availability {
+            self.inner.availability(f)
+        }
+        fn installed(&self, c: &Ctx) -> PResult<BTreeMap<String, Installed>> {
+            self.inner.installed(c)
+        }
+        fn latest(&self, c: &Ctx, s: &[Spec]) -> PResult<BTreeMap<String, Latest>> {
+            self.inner.latest(c, s)
+        }
+        fn plan(&self, o: &[Op]) -> PResult<Vec<Action>> {
+            self.inner.plan(o)
+        }
+        fn exec(&self, c: &Ctx, a: &Action) -> PResult<Outcome> {
+            let id = self.inner.id();
+            let counted = id != "cargo";
+            if counted {
+                let mut f = self.flight.lock().unwrap();
+                f.0 += 1;
+                f.1 = f.1.max(f.0);
+            }
+            std::thread::sleep(Duration::from_millis(300));
+            let r = self.inner.exec(c, a);
+            if counted {
+                self.flight.lock().unwrap().0 -= 1;
+            }
+            r
+        }
+        fn bins(&self, c: &Ctx, i: &BTreeMap<String, Installed>) -> PResult<Vec<BinEntry>> {
+            self.inner.bins(c, i)
+        }
+    }
+    let sb = sandbox(
+        &[
+            ("libfoo", "[providers.apt]"),
+            (
+                "tool",
+                "[providers.script]\ncheck = \"true\"\ninstall = \"true\"\nversionless = true",
+            ),
+            ("rg", "[providers.cargo]"),
+        ],
+        &[],
+    );
+    let flight = Arc::new(Mutex::new((0usize, 0usize)));
+    let mut reg = Registry::new();
+    let apt = Caps {
+        needs_root: true,
+        exclusive_lock: true,
+        ..FakeProvider::new("x").caps()
+    };
+    for (id, caps) in [("apt", Some(apt)), ("script", None), ("cargo", None)] {
+        let mut inner = FakeProvider::new(id);
+        if let Some(c) = caps {
+            inner = inner.with_caps(c);
+        }
+        reg.register(Box::new(Probe {
+            inner,
+            flight: flight.clone(),
+        }));
+    }
+    let case = Case::new(&sb, &reg, &NoFiles);
+    let r = case.apply(true);
+    assert_eq!(r.status, Status::Done, "{:?}", r.errors);
+    assert_eq!(r.steps.len(), 3);
+    let (_, max) = *flight.lock().unwrap();
+    assert_eq!(max, 1, "an apt batch and a script batch overlapped");
+}
+
+/// Script packages that name the same `lock` never run at the same time (three `pi install`
+/// calls rewriting one `settings.json`); packages without the key still run in parallel.
+#[test]
+fn script_packages_with_the_same_lock_key_never_overlap() {
+    struct Locked {
+        inner: FakeProvider,
+        key: Option<&'static str>,
+        /// `(batches in flight now, the most seen at once)`
+        flight: Arc<Mutex<(usize, usize)>>,
+    }
+    impl Provider for Locked {
+        fn id(&self) -> &'static str {
+            self.inner.id()
+        }
+        fn caps(&self) -> Caps {
+            self.inner.caps()
+        }
+        fn lock_key(&self) -> Option<String> {
+            self.key.map(String::from)
+        }
+        fn availability(&self, f: &Facts) -> Availability {
+            self.inner.availability(f)
+        }
+        fn installed(&self, c: &Ctx) -> PResult<BTreeMap<String, Installed>> {
+            self.inner.installed(c)
+        }
+        fn latest(&self, c: &Ctx, s: &[Spec]) -> PResult<BTreeMap<String, Latest>> {
+            self.inner.latest(c, s)
+        }
+        fn plan(&self, o: &[Op]) -> PResult<Vec<Action>> {
+            self.inner.plan(o)
+        }
+        fn exec(&self, c: &Ctx, a: &Action) -> PResult<Outcome> {
+            {
+                let mut f = self.flight.lock().unwrap();
+                f.0 += 1;
+                f.1 = f.1.max(f.0);
+            }
+            std::thread::sleep(Duration::from_millis(200));
+            let r = self.inner.exec(c, a);
+            self.flight.lock().unwrap().0 -= 1;
+            r
+        }
+        fn bins(&self, c: &Ctx, i: &BTreeMap<String, Installed>) -> PResult<Vec<BinEntry>> {
+            self.inner.bins(c, i)
+        }
+    }
+    let body = "[providers.script]\ncheck = \"true\"\ninstall = \"true\"\nversionless = true";
+    let run = |key: Option<&'static str>| {
+        let sb = sandbox(&[("p1", body), ("p2", body), ("p3", body)], &[]);
+        let flight = Arc::new(Mutex::new((0usize, 0usize)));
+        let mut reg = Registry::new();
+        for p in ["p1", "p2", "p3"] {
+            reg.register_for(
+                p,
+                Box::new(Locked {
+                    inner: FakeProvider::new("script"),
+                    key,
+                    flight: flight.clone(),
+                }),
+            );
+        }
+        let case = Case::new(&sb, &reg, &NoFiles);
+        let r = case.apply(true);
+        assert_eq!(r.status, Status::Done, "{:?}", r.errors);
+        flight.lock().map(|f| f.1).unwrap()
+    };
+    assert_eq!(run(Some("pi")), 1, "same key: serialized");
+    assert!(run(None) > 1, "no key: the script batches run in parallel");
+}
+
+/// One bad package name fails its own install, not the batch's other packages: the provider
+/// names per-package actions to retry with.
+#[test]
+fn a_failed_batch_is_retried_per_package_when_the_provider_offers_it() {
+    struct Each(FakeProvider);
+    impl Provider for Each {
+        fn id(&self) -> &'static str {
+            self.0.id()
+        }
+        fn caps(&self) -> Caps {
+            self.0.caps()
+        }
+        fn availability(&self, f: &Facts) -> Availability {
+            self.0.availability(f)
+        }
+        fn installed(&self, c: &Ctx) -> PResult<BTreeMap<String, Installed>> {
+            self.0.installed(c)
+        }
+        fn latest(&self, c: &Ctx, s: &[Spec]) -> PResult<BTreeMap<String, Latest>> {
+            self.0.latest(c, s)
+        }
+        fn plan(&self, o: &[Op]) -> PResult<Vec<Action>> {
+            self.0.plan(o)
+        }
+        fn exec(&self, c: &Ctx, a: &Action) -> PResult<Outcome> {
+            self.0.exec(c, a)
+        }
+        fn retry_each(&self, a: &Action) -> Option<Vec<Action>> {
+            let mut out = Vec::new();
+            for op in &a.ops {
+                out.extend(self.0.plan(std::slice::from_ref(op)).ok()?);
+            }
+            Some(out)
+        }
+        fn bins(&self, c: &Ctx, i: &BTreeMap<String, Installed>) -> PResult<Vec<BinEntry>> {
+            self.0.bins(c, i)
+        }
+    }
+    let pkgs: &[(&str, &str)] = &[
+        ("good1", "[providers.brew]"),
+        ("bad", "[providers.brew]"),
+        ("good2", "[providers.brew]"),
+    ];
+    // Without the retry the whole batch fails together (the default).
+    let sb = sandbox(pkgs, &[]);
+    let plain = FakeProvider::new("brew").failing_on("bad");
+    let reg = registry(&[&plain]);
+    let r = Case::new(&sb, &reg, &NoFiles).apply(true);
+    assert_eq!(status_of(&r, "good1"), &StepStatus::Failed);
+
+    let sb = sandbox(pkgs, &[]);
+    let brew = FakeProvider::new("brew").failing_on("bad");
+    let mut reg = Registry::new();
+    reg.register(Box::new(Each(brew.clone())));
+    let r = Case::new(&sb, &reg, &NoFiles).apply(true);
+    assert_eq!(status_of(&r, "good1"), &StepStatus::Ok, "{:?}", r.errors);
+    assert_eq!(status_of(&r, "good2"), &StepStatus::Ok);
+    assert_eq!(status_of(&r, "bad"), &StepStatus::Failed);
+    // One batch, then one install per package.
+    assert_eq!(brew.executed().len(), 4);
+    assert_eq!(r.status, Status::Failed);
+    let after = brew.snapshot_installed();
+    assert!(
+        after.contains_key("good1") && after.contains_key("good2") && !after.contains_key("bad")
+    );
+
+    // A batch that succeeds is one call: no retry, no extra cost.
+    let sb = sandbox(pkgs, &[]);
+    let brew = FakeProvider::new("brew");
+    let mut reg = Registry::new();
+    reg.register(Box::new(Each(brew.clone())));
+    let r = Case::new(&sb, &reg, &NoFiles).apply(true);
+    assert_eq!(r.status, Status::Done);
+    assert_eq!(brew.executed().len(), 1);
 }
 
 // ------------------------------------------------------------------ 4.2
@@ -973,4 +1270,1366 @@ fn journal_has_one_line_per_action_with_the_same_run() {
     );
     let st = read_state(&sb);
     assert!(st["files"]["~/.fdrc"].is_object());
+}
+
+// ------------------------------------------------------------------ 5.14 / 5.15: phases
+
+const BREW: &str = "[providers.brew]";
+
+fn installed_brew(names: &[&str]) -> FakeProvider {
+    let mut p = FakeProvider::new("brew");
+    for n in names {
+        p = p.with_installed(n, "1.0.0");
+    }
+    p
+}
+
+fn sstep(pkg: &str, id: &str, restart: &[&str], requires: &[&str], root: bool) -> SettingStep {
+    SettingStep {
+        package: pkg.into(),
+        id: id.into(),
+        label: id.into(),
+        kind: "defaults".into(),
+        action: "set".into(),
+        detail: "6 -> 2".into(),
+        root,
+        restart: restart.iter().map(|s| s.to_string()).collect(),
+        requires: requires.iter().map(|s| s.to_string()).collect(),
+        ..Default::default()
+    }
+}
+
+fn vstep(pkg: &str, name: &str, action: &str) -> ServiceStep {
+    ServiceStep {
+        package: pkg.into(),
+        name: name.into(),
+        manager: "systemd-user".into(),
+        action: action.into(),
+        detail: "not running".into(),
+        commands: vec![format!("systemctl --user {action} {name}")],
+        ..Default::default()
+    }
+}
+
+/// Settings phase that logs into a shared journal of the whole run.
+struct FakeSettings {
+    steps: Vec<SettingStep>,
+    log: Arc<Mutex<Vec<String>>>,
+    fail: Vec<String>,
+    sudo_seen: Mutex<Vec<bool>>,
+    /// What `settled` reports: `(package, reason)` of the todos to close.
+    settled: Mutex<Vec<(String, String)>>,
+}
+
+impl FakeSettings {
+    fn new(steps: Vec<SettingStep>, log: Arc<Mutex<Vec<String>>>) -> Self {
+        FakeSettings {
+            steps,
+            log,
+            fail: vec![],
+            sudo_seen: Mutex::default(),
+            settled: Mutex::default(),
+        }
+    }
+}
+
+impl SettingsPhase for FakeSettings {
+    fn plan(&self, req: &SettingsRequest<'_>) -> Result<Vec<SettingStep>, PlanError> {
+        assert!(req.dry_run);
+        Ok(self
+            .steps
+            .iter()
+            .filter(|s| req.packages.contains(&s.package))
+            .cloned()
+            .collect())
+    }
+
+    fn apply(
+        &self,
+        req: &SettingsRequest<'_>,
+        steps: &[SettingStep],
+        done: &mut dyn FnMut(SettingStepResult),
+    ) -> Result<(), String> {
+        assert!(!req.dry_run);
+        self.sudo_seen.lock().unwrap().push(req.sudo);
+        for s in steps {
+            self.log.lock().unwrap().push(format!("setting {}", s.id));
+            let ok = !self.fail.contains(&s.id);
+            done(SettingStepResult {
+                step: s.clone(),
+                ok,
+                detail: (!ok).then(|| "boom".to_string()),
+                dur_ms: 1,
+            });
+        }
+        Ok(())
+    }
+
+    fn settled(&self, _req: &SettingsRequest<'_>) -> Vec<(String, String)> {
+        self.settled.lock().unwrap().clone()
+    }
+
+    fn restart(&self, _req: &SettingsRequest<'_>, apps: &[String]) -> Vec<RestartResult> {
+        self.log
+            .lock()
+            .unwrap()
+            .push(format!("restart {}", apps.join(",")));
+        apps.iter()
+            .map(|a| RestartResult {
+                app: a.clone(),
+                ok: true,
+                detail: None,
+            })
+            .collect()
+    }
+}
+
+struct FakeServices {
+    steps: Vec<ServiceStep>,
+    log: Arc<Mutex<Vec<String>>>,
+    changed_seen: Mutex<Vec<Vec<String>>>,
+}
+
+impl FakeServices {
+    fn new(steps: Vec<ServiceStep>, log: Arc<Mutex<Vec<String>>>) -> Self {
+        FakeServices {
+            steps,
+            log,
+            changed_seen: Mutex::default(),
+        }
+    }
+}
+
+impl ServicesPhase for FakeServices {
+    fn plan(&self, req: &ServicesRequest<'_>) -> Result<Vec<ServiceStep>, PlanError> {
+        self.changed_seen.lock().unwrap().push(req.changed.to_vec());
+        Ok(self
+            .steps
+            .iter()
+            .filter(|s| req.packages.contains(&s.package))
+            .cloned()
+            .collect())
+    }
+
+    fn apply(
+        &self,
+        req: &ServicesRequest<'_>,
+        steps: &[ServiceStep],
+        done: &mut dyn FnMut(ServiceStepResult),
+    ) -> Result<(), String> {
+        for s in steps {
+            assert_eq!(
+                s.teardown, req.teardown,
+                "teardown steps run in their own call"
+            );
+            self.log
+                .lock()
+                .unwrap()
+                .push(format!("service {} {}", s.name, s.action));
+            done(ServiceStepResult {
+                step: s.clone(),
+                ok: true,
+                detail: None,
+                dur_ms: 1,
+            });
+        }
+        Ok(())
+    }
+}
+
+/// A files phase logging into the shared journal.
+struct LogFiles {
+    steps: Vec<FileStep>,
+    log: Arc<Mutex<Vec<String>>>,
+    fail: Vec<String>,
+}
+
+impl FilesPhase for LogFiles {
+    fn plan(&self, req: &FilesRequest<'_>) -> Result<Vec<FileStep>, String> {
+        Ok(self
+            .steps
+            .iter()
+            .filter(|s| req.packages.contains(&s.package))
+            .cloned()
+            .collect())
+    }
+
+    fn apply(
+        &self,
+        _req: &FilesRequest<'_>,
+        steps: &[FileStep],
+        done: &mut dyn FnMut(FileStepResult),
+    ) -> Result<(), String> {
+        for s in steps {
+            self.log.lock().unwrap().push(format!("file {}", s.dst));
+            let ok = !self.fail.contains(&s.dst);
+            done(FileStepResult {
+                step: s.clone(),
+                ok,
+                detail: (!ok).then(|| "denied".to_string()),
+                dur_ms: 1,
+            });
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn settings_and_services_run_after_files_and_before_nothing_else() {
+    let sb = sandbox(&[("fd", BREW)], &[]);
+    let brew = FakeProvider::new("brew");
+    let reg = registry(&[&brew]);
+    let log: Arc<Mutex<Vec<String>>> = Arc::default();
+    let files = LogFiles {
+        steps: vec![fstep("fd", "~/.fdrc", false)],
+        log: log.clone(),
+        fail: vec![],
+    };
+    let settings = FakeSettings::new(
+        vec![sstep("fd", "defaults:d:k", &[], &[], false)],
+        log.clone(),
+    );
+    let services = FakeServices::new(vec![vstep("fd", "fd", "start")], log.clone());
+    let mut case = Case::new(&sb, &reg, &files);
+    case.settings = &settings;
+    case.services = &services;
+
+    let plan = case.plan();
+    assert_eq!(plan.settings.len(), 1);
+    assert_eq!(plan.services.len(), 1);
+    // the service is told which packages' config changes
+    assert_eq!(services.changed_seen.lock().unwrap()[0], ["fd"]);
+    assert!(!plan.is_empty() && plan.touches_more_than_owned_files());
+
+    let r = case.apply(true);
+    assert_eq!(r.status, Status::Done, "{:#?}", r.errors);
+    // the service starts after its config is placed, and after settings
+    assert_eq!(
+        *log.lock().unwrap(),
+        ["file ~/.fdrc", "setting defaults:d:k", "service fd start"]
+    );
+    assert_eq!(brew.executed().len(), 1);
+    assert_eq!((r.settings.len(), r.services.len()), (1, 1));
+    // journaled
+    let ops: Vec<String> = read_journal(&sb)
+        .iter()
+        .map(|e| e["op"].as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        ops.iter().any(|o| o == "setting-set") && ops.iter().any(|o| o == "service-start"),
+        "{ops:?}"
+    );
+    // json and text views carry both
+    let j = plan_json(&plan);
+    assert_eq!(j["settings"][0]["id"], "defaults:d:k");
+    assert_eq!(j["services"][0]["commands"][0], "systemctl --user start fd");
+    assert_eq!(j["summary"]["settings"], 1);
+    let t = plan_text(&plan);
+    assert!(
+        t.contains("Settings (1)") && t.contains("Services (1)"),
+        "{t}"
+    );
+    let aj = r.to_json();
+    assert_eq!(aj["summary"]["settings_ok"], 1);
+    assert_eq!(aj["summary"]["services_ok"], 1);
+}
+
+#[test]
+fn restarts_are_collected_across_packages_and_run_once_at_the_end() {
+    let sb = sandbox(&[("a", BREW), ("b", BREW), ("c", BREW)], &[]);
+    let brew = installed_brew(&["a", "b", "c"]);
+    let reg = registry(&[&brew]);
+    let log: Arc<Mutex<Vec<String>>> = Arc::default();
+    let settings = FakeSettings::new(
+        vec![
+            sstep("a", "defaults:x:1", &["Dock"], &[], false),
+            sstep(
+                "b",
+                "defaults:x:2",
+                &["Dock"],
+                &["restart-app:Finder"],
+                false,
+            ),
+            sstep("c", "defaults:x:3", &["Dock"], &[], false),
+        ],
+        log.clone(),
+    );
+    let mut case = Case::new(&sb, &reg, &NoFiles);
+    case.settings = &settings;
+    let r = case.apply(true);
+    assert_eq!(r.status, Status::Done, "{:#?}", r.errors);
+    let log = log.lock().unwrap().clone();
+    assert_eq!(
+        log.iter().filter(|l| l.starts_with("restart")).count(),
+        1,
+        "{log:?}"
+    );
+    // after the last change
+    assert_eq!(log.last().unwrap(), "restart Dock,Finder");
+    assert_eq!(r.restarts.len(), 2);
+}
+
+#[test]
+fn a_logout_requirement_becomes_a_todo_in_the_summary_and_the_state() {
+    let sb = sandbox(&[("a", BREW)], &[]);
+    let brew = installed_brew(&["a"]);
+    let reg = registry(&[&brew]);
+    let log: Arc<Mutex<Vec<String>>> = Arc::default();
+    let settings = FakeSettings::new(
+        vec![sstep("a", "defaults:x:1", &[], &["logout"], false)],
+        log,
+    );
+    let mut case = Case::new(&sb, &reg, &NoFiles);
+    case.settings = &settings;
+    let r = case.apply(true);
+    assert_eq!(r.todos.len(), 1);
+    assert!(r.todos[0].reason.starts_with("logout:"), "{:?}", r.todos);
+    assert_eq!(read_state(&sb)["todos"][0]["package"], "a");
+    assert!(
+        r.summary_text().contains("todo     a: logout:"),
+        "{}",
+        r.summary_text()
+    );
+    // not raised again by the same item
+    let r2 = case.apply(true);
+    assert_eq!(read_state(&sb)["todos"].as_array().unwrap().len(), 1);
+    let _ = r2;
+}
+
+#[test]
+fn root_settings_share_the_one_sudo_prompt_with_an_apt_install() {
+    let sb = sandbox(&[("a", "[providers.apt]")], &[]);
+    let apt = FakeProvider::new("apt").with_caps(apt_caps());
+    let reg = registry(&[&apt]);
+    let rec = Arc::new(RecordingRunner::new());
+    let log: Arc<Mutex<Vec<String>>> = Arc::default();
+    let settings = FakeSettings::new(vec![sstep("a", "defaults:x:1", &[], &[], true)], log);
+    let mut case = Case::new(&sb, &reg, &NoFiles);
+    case.ctx.runner = rec.clone();
+    case.settings = &settings;
+    assert!(case.plan().needs_root());
+    assert!(
+        plan_json(&case.plan())["summary"]["root_actions"]
+            .as_u64()
+            .unwrap()
+            >= 1
+    );
+    let mut c = cfg(true);
+    c.sudo = true;
+    let r = case.apply_with(&c, &NoPrompt);
+    assert_eq!(r.status, Status::Done, "{:#?}", r.errors);
+    let primes = rec
+        .lines()
+        .iter()
+        .filter(|l| *l == "/usr/bin/sudo -v")
+        .count();
+    assert_eq!(primes, 1);
+    assert_eq!(*settings.sudo_seen.lock().unwrap(), [true]);
+
+    // a plan that only needs root for a setting still primes sudo
+    let sb2 = sandbox(&[("b", BREW)], &[]);
+    let brew2 = installed_brew(&["b"]);
+    let reg2 = registry(&[&brew2]);
+    let rec2 = Arc::new(RecordingRunner::new());
+    let s2 = FakeSettings::new(
+        vec![sstep("b", "defaults:x:1", &[], &[], true)],
+        Arc::default(),
+    );
+    let mut case2 = Case::new(&sb2, &reg2, &NoFiles);
+    case2.ctx.runner = rec2.clone();
+    case2.settings = &s2;
+    let mut c2 = cfg(true);
+    c2.sudo = true;
+    case2.apply_with(&c2, &NoPrompt);
+    assert_eq!(
+        rec2.lines()
+            .iter()
+            .filter(|l| *l == "/usr/bin/sudo -v")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn settings_and_services_of_a_failed_install_are_left_alone() {
+    let sb = sandbox(&[("fd", BREW), ("ok", BREW)], &[]);
+    let brew = installed_brew(&["ok"]).failing_on("fd");
+    let reg = registry(&[&brew]);
+    let log: Arc<Mutex<Vec<String>>> = Arc::default();
+    let settings = FakeSettings::new(
+        vec![
+            sstep("fd", "defaults:x:fd", &[], &[], false),
+            sstep("ok", "defaults:x:ok", &[], &[], false),
+        ],
+        log.clone(),
+    );
+    let services = FakeServices::new(
+        vec![vstep("fd", "fd", "start"), vstep("ok", "ok", "start")],
+        log.clone(),
+    );
+    let mut case = Case::new(&sb, &reg, &NoFiles);
+    case.settings = &settings;
+    case.services = &services;
+    let r = case.apply(true);
+    assert_eq!(r.status, Status::Failed);
+    assert_eq!(r.settings_skipped.len(), 1);
+    assert_eq!(r.services_skipped.len(), 1);
+    assert_eq!(
+        *log.lock().unwrap(),
+        ["setting defaults:x:ok", "service ok start"]
+    );
+}
+
+#[test]
+fn a_service_whose_config_failed_does_not_start() {
+    let sb = sandbox(&[("a", BREW)], &[]);
+    let brew = installed_brew(&["a"]);
+    let reg = registry(&[&brew]);
+    let log: Arc<Mutex<Vec<String>>> = Arc::default();
+    let files = LogFiles {
+        steps: vec![fstep("a", "~/.arc", false)],
+        log: log.clone(),
+        fail: vec!["~/.arc".into()],
+    };
+    let services = FakeServices::new(vec![vstep("a", "a", "start")], log.clone());
+    let mut case = Case::new(&sb, &reg, &files);
+    case.services = &services;
+    let r = case.apply(true);
+    assert_eq!(r.status, Status::Failed);
+    assert_eq!(*log.lock().unwrap(), ["file ~/.arc"]);
+    assert_eq!(r.services_skipped.len(), 1);
+}
+
+#[test]
+fn a_failed_setting_fails_the_run_with_a_setting_error() {
+    let sb = sandbox(&[("a", BREW)], &[]);
+    let brew = installed_brew(&["a"]);
+    let reg = registry(&[&brew]);
+    let mut settings = FakeSettings::new(
+        vec![sstep("a", "defaults:x:1", &["Dock"], &["logout"], false)],
+        Arc::default(),
+    );
+    settings.fail = vec!["defaults:x:1".into()];
+    let mut case = Case::new(&sb, &reg, &NoFiles);
+    case.settings = &settings;
+    let r = case.apply(true);
+    assert_eq!(r.status, Status::Failed);
+    assert!(r.errors.iter().any(|e| e.code == "setting-failed"));
+    // nothing changed, so nothing restarts and nothing is asked of the user
+    assert!(r.restarts.is_empty() && r.todos.is_empty());
+}
+
+#[test]
+fn scoped_runs_skip_settings_and_services() {
+    let sb = sandbox(&[("a", BREW)], &[]);
+    let brew = installed_brew(&["a"]);
+    let reg = registry(&[&brew]);
+    let settings = FakeSettings::new(
+        vec![sstep("a", "defaults:x:1", &[], &[], false)],
+        Arc::default(),
+    );
+    let mut case = Case::new(&sb, &reg, &NoFiles);
+    case.settings = &settings;
+    case.scope.files_only = true;
+    assert!(case.plan().settings.is_empty());
+    case.scope.files_only = false;
+    case.scope.packages_only = true;
+    assert!(case.plan().settings.is_empty());
+}
+
+// ------------------------------------------------------------------ task 5.9: lock vs spec
+
+fn limited_caps() -> Caps {
+    use dots_providers::Support;
+    Caps {
+        exact_version: Support::Limited,
+        ..FakeProvider::new("x").caps()
+    }
+}
+
+fn lock_row(name: &str, provider: &str, version: &str) -> dots_lock::PkgRow {
+    let key = "debian/x86_64";
+    let mut r = dots_lock::PkgRow::new(name, &dots_lock::platform_for(provider, key), provider);
+    r.version = Some(version.into());
+    r.locked_at = "2026-11-25T20:11:03Z".into();
+    r
+}
+
+fn own(sb: &Sandbox, name: &str, provider: &str, version: &str) {
+    let mut st = State::default();
+    st.packages.insert(
+        name.into(),
+        OwnedPackage {
+            provider: provider.into(),
+            name: name.into(),
+            version: Some(version.into()),
+            run: "r-0".into(),
+            ts: "t".into(),
+        },
+    );
+    st.save(&sb.dirs.state_json()).unwrap();
+}
+
+#[test]
+fn the_locked_version_wins_under_latest() {
+    let sb = sandbox(&[("fd", "[providers.brew]")], &[]);
+    let brew = FakeProvider::new("brew").with_latest("fd", "2.0.0");
+    let reg = registry(&[&brew]);
+    let mut case = Case::new(&sb, &reg, &NoFiles);
+    case.lock.upsert(lock_row("fd", "brew", "1.0.0"));
+    let r = case.apply(true);
+    assert_eq!(r.status, Status::Done, "{:#?}", r.errors);
+    let op = &brew.executed()[0].ops[0];
+    assert_eq!(
+        op.version.as_deref(),
+        Some("1.0.0"),
+        "machines stay reproducible"
+    );
+    // The row already says so: nothing to write.
+    assert!(r.lock_updates.is_empty(), "{:?}", r.lock_updates);
+}
+
+#[test]
+fn a_first_install_is_recorded_for_the_lock() {
+    let sb = sandbox(&[("fd", "[providers.brew]")], &[]);
+    let brew = FakeProvider::new("brew");
+    let reg = registry(&[&brew]);
+    let case = Case::new(&sb, &reg, &NoFiles);
+    let r = case.apply(true);
+    assert_eq!(r.lock_updates.len(), 1);
+    let u = &r.lock_updates[0];
+    assert_eq!((u.package.as_str(), u.provider.as_str()), ("fd", "brew"));
+    assert_eq!(u.platform, "debian/x86_64", "brew rows are per platform");
+}
+
+#[test]
+fn a_tightened_spec_moves_the_lock_row_to_the_newest_match() {
+    let sb = sandbox(
+        &[("bottom", "version = \">=0.10\"\n[providers.cargo]")],
+        &[],
+    );
+    let cargo = FakeProvider::new("cargo")
+        .with_installed("bottom", "0.9.6")
+        .with_latest("bottom", "0.10.2");
+    let reg = registry(&[&cargo]);
+    let mut case = Case::new(&sb, &reg, &NoFiles);
+    case.lock.upsert(lock_row("bottom", "cargo", "0.9.6"));
+    case.offers
+        .0
+        .insert(("cargo".into(), "bottom".into()), "0.10.2".into());
+    let p = case.plan();
+    assert_eq!(p.steps[0].kind, StepKind::Upgrade);
+    assert_eq!(p.steps[0].to.as_deref(), Some("0.10.2"));
+    let l = &p.lock[0];
+    assert_eq!(l.from.as_deref(), Some("0.9.6"));
+    assert_eq!(l.to.as_deref(), Some("0.10.2"));
+    assert!(l.rewrite);
+    let text = plan_text(&p);
+    assert!(
+        text.contains("Lock") && text.contains("0.9.6 -> 0.10.2"),
+        "{text}"
+    );
+    assert_eq!(plan_json(&p)["lock"][0]["to"], "0.10.2");
+}
+
+#[test]
+fn a_limited_provider_installs_what_it_offers_and_reports_drift() {
+    let sb = sandbox(&[("less", "[providers.apt]")], &[]);
+    let apt = FakeProvider::new("apt")
+        .with_caps(limited_caps())
+        .with_latest("less", "8.7.1");
+    let reg = registry(&[&apt]);
+    let mut case = Case::new(&sb, &reg, &NoFiles);
+    case.lock.upsert(lock_row("less", "apt", "8.7.0"));
+    case.offers
+        .0
+        .insert(("apt".into(), "less".into()), "8.7.1".into());
+    let p = case.plan();
+    assert_eq!(p.steps[0].kind, StepKind::Install);
+    assert_eq!(p.steps[0].to, None, "no exact version is asked of apt");
+    assert_eq!(
+        p.lock[0].drift.as_deref(),
+        Some("locked 8.7.0, provider offers 8.7.1")
+    );
+    assert!(!p.lock[0].rewrite);
+    let r = case.apply(true);
+    assert_eq!(r.status, Status::Done, "{:#?}", r.errors);
+    assert!(apt.executed()[0].ops[0].version.is_none());
+    assert!(r.lock_updates.is_empty(), "the lock keeps saying 8.7.0");
+}
+
+#[test]
+fn a_lock_older_than_what_is_installed_downgrades_only_with_permission() {
+    let sb = sandbox(&[("fd", "[providers.brew]")], &[]);
+    own(&sb, "fd", "brew", "2.0.0");
+    let brew = FakeProvider::new("brew").with_installed("fd", "2.0.0");
+    let reg = registry(&[&brew]);
+    let mut case = Case::new(&sb, &reg, &NoFiles);
+    case.lock.upsert(lock_row("fd", "brew", "1.0.0"));
+    let p = case.plan();
+    assert_eq!(p.steps[0].kind, StepKind::Downgrade);
+    assert!(
+        plan_text(&p).contains("\u{26a0} downgrade fd"),
+        "{}",
+        plan_text(&p)
+    );
+    // `--yes --no-input` is refused and says what to pass.
+    let r = case.apply(true);
+    assert_eq!(r.status, Status::ConfirmationRequired);
+    assert!(r.errors[0].hint.contains("--allow-downgrade"));
+    assert!(brew.executed().is_empty());
+    let mut c = cfg(true);
+    c.allow_downgrade = true;
+    assert_eq!(case.apply_with(&c, &NoPrompt).status, Status::Done);
+    assert_eq!(brew.executed()[0].ops[0].version.as_deref(), Some("1.0.0"));
+}
+
+#[test]
+fn a_newer_install_under_a_limited_provider_is_left_alone() {
+    let sb = sandbox(&[("less", "[providers.apt]")], &[]);
+    own(&sb, "less", "apt", "8.7.1");
+    let apt = FakeProvider::new("apt")
+        .with_caps(limited_caps())
+        .with_installed("less", "8.7.1");
+    let reg = registry(&[&apt]);
+    let mut case = Case::new(&sb, &reg, &NoFiles);
+    case.lock.upsert(lock_row("less", "apt", "8.7.0"));
+    assert!(
+        case.plan().steps.is_empty(),
+        "apt cannot go down; status reports drift"
+    );
+}
+
+#[test]
+fn a_version_installed_outside_dots_is_adopted_not_reinstalled() {
+    let sb = sandbox(&[("fd", "version = \"1.2\"\n[providers.brew]")], &[]);
+    let brew = FakeProvider::new("brew").with_installed("fd", "1.2.9");
+    let reg = registry(&[&brew]);
+    let case = Case::new(&sb, &reg, &NoFiles);
+    let p = case.plan();
+    assert!(p.steps.is_empty());
+    assert!(p.lock[0].adopt);
+    let r = case.apply(true);
+    assert_eq!(r.status, Status::Done, "{:#?}", r.errors);
+    assert!(brew.executed().is_empty());
+    assert_eq!(r.lock_updates[0].version.as_deref(), Some("1.2.9"));
+    assert!(r.lock_updates[0].adopt);
+    assert_eq!(read_journal(&sb)[0]["op"], "adopt");
+}
+
+#[test]
+fn upgrade_targets_override_the_lock() {
+    let sb = sandbox(&[("fd", "version = \"0.11\"\n[providers.cargo]")], &[]);
+    own(&sb, "fd", "cargo", "0.11.2");
+    let cargo = FakeProvider::new("cargo").with_installed("fd", "0.11.2");
+    let reg = registry(&[&cargo]);
+    let mut case = Case::new(&sb, &reg, &NoFiles);
+    case.lock.upsert(lock_row("fd", "cargo", "0.11.2"));
+    case.upgrade.insert(
+        "fd".into(),
+        UpgradeTarget {
+            version: Some("0.11.9".into()),
+            to: Some("0.11.9".into()),
+        },
+    );
+    let r = case.apply(true);
+    assert_eq!(r.status, Status::Done, "{:#?}", r.errors);
+    assert_eq!(r.steps[0].action, "upgrade");
+    assert_eq!(
+        cargo.executed()[0].ops[0].version.as_deref(),
+        Some("0.11.9")
+    );
+    assert_eq!(read_journal(&sb)[0]["op"], "upgrade");
+    assert_eq!(r.lock_updates.len(), 1);
+}
+
+// ------------------------------------------------------------------ review follow-ups
+
+/// A provider recording the `wanted` set `plan_with_wanted` is given.
+struct WantedProbe {
+    inner: FakeProvider,
+    wanted: Arc<Mutex<Vec<Vec<String>>>>,
+    plain_plan_calls: Arc<Mutex<usize>>,
+}
+
+impl Provider for WantedProbe {
+    fn id(&self) -> &'static str {
+        self.inner.id()
+    }
+    fn caps(&self) -> Caps {
+        self.inner.caps()
+    }
+    fn availability(&self, f: &Facts) -> Availability {
+        self.inner.availability(f)
+    }
+    fn installed(&self, c: &Ctx) -> PResult<BTreeMap<String, Installed>> {
+        self.inner.installed(c)
+    }
+    fn latest(&self, c: &Ctx, s: &[Spec]) -> PResult<BTreeMap<String, Latest>> {
+        self.inner.latest(c, s)
+    }
+    fn plan(&self, o: &[Op]) -> PResult<Vec<Action>> {
+        *self.plain_plan_calls.lock().unwrap() += 1;
+        self.inner.plan(o)
+    }
+    fn plan_with_wanted(&self, o: &[Op], wanted: &[Spec]) -> PResult<Vec<Action>> {
+        let mut names: Vec<String> = wanted.iter().map(|s| s.name.clone()).collect();
+        names.sort();
+        self.wanted.lock().unwrap().push(names);
+        self.inner.plan(o)
+    }
+    fn exec(&self, c: &Ctx, a: &Action) -> PResult<Outcome> {
+        self.inner.exec(c, a)
+    }
+    fn bins(&self, c: &Ctx, i: &BTreeMap<String, Installed>) -> PResult<Vec<BinEntry>> {
+        self.inner.bins(c, i)
+    }
+}
+
+#[test]
+fn batch_planning_passes_the_whole_desired_set_to_the_provider() {
+    // `a` needs an install; `b` and `c` are installed already (no step), but all three stay
+    // wanted, so a shared resource of theirs (an apt repository) must be kept.
+    let sb = sandbox(&[("a", BREW), ("b", BREW), ("c", BREW)], &[]);
+    let wanted = Arc::new(Mutex::new(Vec::new()));
+    let plain = Arc::new(Mutex::new(0usize));
+    let mut reg = Registry::new();
+    reg.register(Box::new(WantedProbe {
+        inner: installed_brew(&["b", "c"]),
+        wanted: wanted.clone(),
+        plain_plan_calls: plain.clone(),
+    }));
+    let case = Case::new(&sb, &reg, &NoFiles);
+    let p = case.plan();
+    assert_eq!(p.steps.len(), 1);
+    assert_eq!(*wanted.lock().unwrap(), [["a", "b", "c"]]);
+    assert_eq!(
+        *plain.lock().unwrap(),
+        0,
+        "the engine must not call plain `plan`"
+    );
+}
+
+#[test]
+fn closing_settled_todos_happens_before_settings_apply_and_in_empty_plans() {
+    let sb = sandbox(&[("a", BREW)], &[]);
+    let brew = installed_brew(&["a"]);
+    let reg = registry(&[&brew]);
+    let reason = dots_settings::todo_reason("logout", "defaults:x:1");
+    let settings = FakeSettings::new(
+        vec![sstep("a", "defaults:x:1", &[], &["logout"], false)],
+        Arc::default(),
+    );
+    let mut case = Case::new(&sb, &reg, &NoFiles);
+    case.settings = &settings;
+    // the run raises the todo
+    case.apply(true);
+    assert_eq!(read_state(&sb)["todos"][0]["reason"], reason.as_str());
+    // the user logged out: the setting reads as declared, so the todo closes
+    *settings.settled.lock().unwrap() = vec![("a".into(), reason.clone())];
+    let none = FakeSettings::new(vec![], Arc::default());
+    *none.settled.lock().unwrap() = vec![("a".into(), reason.clone())];
+    case.settings = &none;
+    let r = case.apply(true); // nothing to apply at all: the empty-plan path
+    assert_eq!(r.status, Status::Done);
+    assert!(
+        read_state(&sb)["todos"].as_array().unwrap().is_empty(),
+        "{}",
+        read_state(&sb)
+    );
+
+    // and in a run that applies settings: closed first, raised again only if still needed
+    let sb2 = sandbox(&[("a", BREW)], &[]);
+    let mut case2 = Case::new(&sb2, &reg, &NoFiles);
+    let s2 = FakeSettings::new(
+        vec![sstep("a", "defaults:x:2", &[], &[], false)],
+        Arc::default(),
+    );
+    let mut st = State::default();
+    st.todos.push(Todo {
+        package: "a".into(),
+        reason: reason.clone(),
+        run: "r-old".into(),
+    });
+    st.todos.push(Todo {
+        package: "a".into(),
+        reason: "other".into(),
+        run: "r-old".into(),
+    });
+    st.save(&sb2.dirs.state_json()).unwrap();
+    *s2.settled.lock().unwrap() = vec![("a".into(), reason)];
+    case2.settings = &s2;
+    case2.apply(true);
+    let todos = read_state(&sb2)["todos"].clone();
+    assert_eq!(todos.as_array().unwrap().len(), 1, "{todos}");
+    assert_eq!(todos[0]["reason"], "other");
+}
+
+#[test]
+fn service_teardown_runs_before_files_are_removed() {
+    let sb = sandbox(&[("a", BREW)], &[]);
+    let brew = installed_brew(&["a"]);
+    let reg = registry(&[&brew]);
+    let log: Arc<Mutex<Vec<String>>> = Arc::default();
+    let files = LogFiles {
+        steps: vec![fstep("a", "~/.config/systemd/user/gone.service", true)],
+        log: log.clone(),
+        fail: vec![],
+    };
+    let mut gone = vstep("a", "gone", "disable");
+    gone.teardown = true;
+    let services = FakeServices::new(vec![gone, vstep("a", "kept", "restart")], log.clone());
+    let mut case = Case::new(&sb, &reg, &files);
+    case.services = &services;
+    let r = case.apply(true);
+    assert_eq!(r.status, Status::Done, "{:#?}", r.errors);
+    let log = log.lock().unwrap().clone();
+    assert_eq!(
+        log,
+        [
+            "service gone disable",
+            "file ~/.config/systemd/user/gone.service",
+            "service kept restart"
+        ]
+    );
+    assert_eq!(r.services.len(), 2);
+}
+
+#[test]
+fn a_phase_plan_error_keeps_its_own_code() {
+    struct BadNames;
+    impl ServicesPhase for BadNames {
+        fn plan(&self, _: &ServicesRequest<'_>) -> Result<Vec<ServiceStep>, PlanError> {
+            Err(dots_core::Diagnostic::from_code(
+                "service-name-invalid",
+                &[("name", "-x"), ("package", "a")],
+            )
+            .into())
+        }
+    }
+    struct PlainBad;
+    impl SettingsPhase for PlainBad {
+        fn plan(&self, _: &SettingsRequest<'_>) -> Result<Vec<SettingStep>, PlanError> {
+            Err("could not read".to_string().into())
+        }
+    }
+    let sb = sandbox(&[("a", BREW)], &[]);
+    let brew = installed_brew(&["a"]);
+    let reg = registry(&[&brew]);
+    let mut case = Case::new(&sb, &reg, &NoFiles);
+    case.services = &BadNames;
+    let r = case.apply(true);
+    assert_eq!(r.status, Status::PlanFailed);
+    assert_eq!(r.errors.len(), 1);
+    assert_eq!(r.errors[0].code, "service-name-invalid");
+    // a plain message is still wrapped
+    let mut case = Case::new(&sb, &reg, &NoFiles);
+    case.settings = &PlainBad;
+    let r = case.apply(true);
+    assert_eq!(r.errors[0].code, "plan-failed");
+    assert!(r.errors[0].message.contains("could not read"));
+}
+
+#[test]
+fn a_failed_sudo_prime_tells_the_settings_phase_there_is_no_sudo() {
+    // The phase still runs (it fails root entries itself, with a clear error); what matters is
+    // that it is told `sudo: false`, so it never runs a root write as the user.
+    let sb = sandbox(&[("b", BREW)], &[]);
+    let brew = installed_brew(&["b"]);
+    let reg = registry(&[&brew]);
+    let rec = Arc::new(RecordingRunner::new());
+    rec.on(
+        &["/usr/bin/sudo", "-v"],
+        dots_providers::Output::fail(1, "no tty"),
+    );
+    let settings = FakeSettings::new(
+        vec![sstep("b", "defaults:x:1", &[], &[], true)],
+        Arc::default(),
+    );
+    let mut case = Case::new(&sb, &reg, &NoFiles);
+    case.ctx.runner = rec.clone();
+    case.settings = &settings;
+    let mut c = cfg(true);
+    c.sudo = true;
+    case.apply_with(&c, &NoPrompt);
+    assert_eq!(*settings.sudo_seen.lock().unwrap(), [false]);
+    // --no-sudo likewise
+    let settings2 = FakeSettings::new(
+        vec![sstep("b", "defaults:x:1", &[], &[], true)],
+        Arc::default(),
+    );
+    let mut case2 = Case::new(&sb, &reg, &NoFiles);
+    case2.settings = &settings2;
+    case2.apply(true);
+    assert_eq!(*settings2.sudo_seen.lock().unwrap(), [false]);
+}
+
+/// Mimics apt: a package from a repository gets `add` + `install` actions; when the repo
+/// cannot be prepared both report failure (the install is skipped, `success: false`).
+struct RepoFails {
+    inner: FakeProvider,
+}
+
+impl Provider for RepoFails {
+    fn id(&self) -> &'static str {
+        self.inner.id()
+    }
+    fn caps(&self) -> Caps {
+        self.inner.caps()
+    }
+    fn availability(&self, f: &Facts) -> Availability {
+        self.inner.availability(f)
+    }
+    fn installed(&self, c: &Ctx) -> PResult<BTreeMap<String, Installed>> {
+        self.inner.installed(c)
+    }
+    fn latest(&self, c: &Ctx, s: &[Spec]) -> PResult<BTreeMap<String, Latest>> {
+        self.inner.latest(c, s)
+    }
+    fn plan(&self, ops: &[Op]) -> PResult<Vec<Action>> {
+        let (repo, plain): (Vec<Op>, Vec<Op>) = ops
+            .iter()
+            .cloned()
+            .partition(|o| o.spec.name.starts_with("ppa-"));
+        let mut actions = self.inner.plan(&plain)?;
+        for op in repo {
+            for verb in ["repo-add", "install-skipped"] {
+                actions.push(Action {
+                    kind: op.kind,
+                    ops: vec![op.clone()],
+                    argv: vec![verb.into(), op.spec.name.clone()],
+                    needs_root: false,
+                });
+            }
+        }
+        Ok(actions)
+    }
+    fn exec(&self, c: &Ctx, a: &Action) -> PResult<Outcome> {
+        if a.argv
+            .first()
+            .is_some_and(|v| v == "repo-add" || v == "install-skipped")
+        {
+            return Ok(Outcome {
+                success: false,
+                log: None,
+            });
+        }
+        self.inner.exec(c, a)
+    }
+    fn bins(&self, c: &Ctx, i: &BTreeMap<String, Installed>) -> PResult<Vec<BinEntry>> {
+        self.inner.bins(c, i)
+    }
+}
+
+#[test]
+fn packages_behind_a_failed_repo_are_failed_not_installed() {
+    let sb = sandbox(
+        &[
+            ("ppa-tool", BREW),
+            ("plain", BREW),
+            ("after", "requires = [\"ppa-tool\"]\n[providers.brew]"),
+        ],
+        &[],
+    );
+    let mut reg = Registry::new();
+    reg.register(Box::new(RepoFails {
+        inner: FakeProvider::new("brew"),
+    }));
+    let case = Case::new(&sb, &reg, &NoFiles);
+    let r = case.apply(true);
+    assert_eq!(r.status, Status::Failed);
+    assert_eq!(status_of(&r, "ppa-tool"), &StepStatus::Failed);
+    assert_eq!(status_of(&r, "plain"), &StepStatus::Ok);
+    // its dependent is skipped, not failed
+    assert!(
+        matches!(status_of(&r, "after"), StepStatus::SkippedDueToDep { .. }),
+        "{:?}",
+        status_of(&r, "after")
+    );
+    let st = read_state(&sb);
+    assert!(st["packages"].get("ppa-tool").is_none(), "{st}");
+    assert!(st["packages"].get("after").is_none(), "{st}");
+    assert!(st["packages"].get("plain").is_some(), "{st}");
+}
+
+// ------------------------------------------------------------------ hooks
+
+mod hooks {
+    use super::*;
+
+    /// A package `x` on brew with the given `[hooks]` lines; each hook appends its name to
+    /// `<tmp>/order.txt`.
+    fn hooked(hooks: &[(&str, &str)]) -> (Sandbox, PathBuf) {
+        let sb = sandbox(&[("x", "[providers.brew]")], &[]);
+        let order = sb.root.parent().unwrap().join("order.txt");
+        let mut body = String::from("[providers.brew]\n[hooks]\n");
+        for (event, cmd) in hooks {
+            body.push_str(&format!(
+                "{event} = \"{}\"\n",
+                cmd.replace("{order}", &order.display().to_string())
+            ));
+        }
+        write(
+            &sb.root.join("packages/x/package.toml"),
+            &format!("schema = 1\nname = \"x\"\n{body}"),
+        );
+        (sb, order)
+    }
+
+    fn files_for_x() -> FakeFiles {
+        FakeFiles::new(vec![fstep("x", "~/.xrc", false)])
+    }
+
+    fn lines(p: &Path) -> Vec<String> {
+        std::fs::read_to_string(p)
+            .unwrap_or_default()
+            .lines()
+            .map(String::from)
+            .collect()
+    }
+
+    const ALL: &[(&str, &str)] = &[
+        ("pre_install", "echo pre_install >> {order}"),
+        ("post_install", "echo post_install >> {order}"),
+        ("pre_files", "echo pre_files >> {order}"),
+        ("post_files", "echo post_files >> {order}"),
+    ];
+
+    #[test]
+    fn all_four_hooks_run_in_pipeline_order_and_are_logged_and_journalled() {
+        let (sb, order) = hooked(ALL);
+        let reg = registry(&[&FakeProvider::new("brew")]);
+        let files = files_for_x();
+        let case = Case::new(&sb, &reg, &files);
+        let r = case.apply(true);
+        assert_eq!(r.status, Status::Done, "{:?}", r.errors);
+        assert_eq!(
+            lines(&order),
+            ["pre_install", "pre_files", "post_install", "post_files"]
+        );
+        assert_eq!(r.hooks.len(), 4);
+        assert!(r.hooks.iter().all(|h| h.ok));
+        let log = std::fs::read_to_string(sb.dirs.logs("r-test").join("x.hook-post_files.log"))
+            .expect("hook log");
+        assert!(
+            log.contains("echo post_files") && log.contains("exit status 0"),
+            "{log}"
+        );
+        let ops: Vec<String> = read_journal(&sb)
+            .iter()
+            .filter_map(|e| e["op"].as_str().map(String::from))
+            .filter(|o| o.starts_with("hook-"))
+            .collect();
+        assert_eq!(
+            ops,
+            [
+                "hook-pre_install",
+                "hook-pre_files",
+                "hook-post_install",
+                "hook-post_files"
+            ]
+        );
+    }
+
+    #[test]
+    fn plan_lists_the_hooks_and_dry_run_runs_none() {
+        let (sb, order) = hooked(ALL);
+        let reg = registry(&[&FakeProvider::new("brew")]);
+        let files = files_for_x();
+        let case = Case::new(&sb, &reg, &files);
+        let plan = case.plan();
+        let events: Vec<&str> = plan.hooks.iter().map(|h| h.event.as_str()).collect();
+        assert_eq!(
+            events,
+            ["pre_install", "post_install", "pre_files", "post_files"]
+        );
+        assert!(
+            plan_text(&plan).contains("Hooks (4)"),
+            "{}",
+            plan_text(&plan)
+        );
+        assert_eq!(plan_json(&plan)["hooks"].as_array().unwrap().len(), 4);
+        let lock = RunLock::acquire(&sb.dirs.run_lock()).unwrap();
+        drop(lock);
+        let r = case.with(|i| apply(i, &cfg(true), &NoPrompt, Mode::DryRun));
+        assert_eq!(r.status, Status::DryRun);
+        assert_eq!(r.plan.hooks.len(), 4);
+        assert!(r.hooks.is_empty());
+        assert!(!order.exists(), "a dry run must not run hooks");
+    }
+
+    #[test]
+    fn hooks_fire_only_when_their_trigger_changed() {
+        let (sb, order) = hooked(ALL);
+        // Already installed, no file changes: nothing fires.
+        let brew = FakeProvider::new("brew").with_installed("x", "1.0.0");
+        let reg = registry(&[&brew]);
+        let case = Case::new(&sb, &reg, &NoFiles);
+        assert!(case.plan().hooks.is_empty());
+        assert_eq!(case.apply(true).status, Status::Done);
+        assert!(!order.exists());
+        // Installed, files change: only the files hooks.
+        let files = files_for_x();
+        let case = Case::new(&sb, &reg, &files);
+        let events: Vec<String> = case.plan().hooks.into_iter().map(|h| h.event).collect();
+        assert_eq!(events, ["pre_files", "post_files"]);
+        // Not installed, no files: only the install hooks.
+        let reg = registry(&[&FakeProvider::new("brew")]);
+        let case = Case::new(&sb, &reg, &NoFiles);
+        let events: Vec<String> = case.plan().hooks.into_iter().map(|h| h.event).collect();
+        assert_eq!(events, ["pre_install", "post_install"]);
+    }
+
+    #[test]
+    fn scope_selects_the_install_or_the_files_half() {
+        let (sb, _) = hooked(ALL);
+        let reg = registry(&[&FakeProvider::new("brew")]);
+        let files = files_for_x();
+        let mut case = Case::new(&sb, &reg, &files);
+        case.scope.files_only = true;
+        let events: Vec<String> = case.plan().hooks.into_iter().map(|h| h.event).collect();
+        assert_eq!(events, ["pre_files", "post_files"]);
+        case.scope = Scope {
+            packages_only: true,
+            ..Scope::default()
+        };
+        let events: Vec<String> = case.plan().hooks.into_iter().map(|h| h.event).collect();
+        assert_eq!(events, ["pre_install", "post_install"]);
+    }
+
+    #[test]
+    fn a_failing_post_hook_fails_the_run_skips_the_rest_and_is_retried() {
+        let (sb, order) = hooked(&[
+            ("post_install", "echo post_install >> {order}; exit 3"),
+            ("post_files", "echo post_files >> {order}"),
+        ]);
+        let brew = FakeProvider::new("brew");
+        let reg = registry(&[&brew]);
+        let files = files_for_x();
+        let case = Case::new(&sb, &reg, &files);
+        let r = case.apply(true);
+        assert_eq!(r.status, Status::Failed);
+        assert_eq!(
+            lines(&order),
+            ["post_install"],
+            "post_files must be skipped"
+        );
+        assert_eq!(r.hooks.len(), 1);
+        assert!(!r.hooks[0].ok);
+        assert_eq!(r.hooks_skipped.len(), 1);
+        assert_eq!(r.hooks_skipped[0].0.event, "post_files");
+        let err = r
+            .errors
+            .iter()
+            .find(|e| e.code == "hook-failed")
+            .expect("hook-failed");
+        assert!(
+            err.message.contains("post_install") && err.message.contains("x.hook-post_install.log")
+        );
+        // The package itself installed and its files landed.
+        assert_eq!(status_of(&r, "x"), &StepStatus::Ok);
+        assert_eq!(r.files.len(), 1);
+        let entry = read_journal(&sb)
+            .into_iter()
+            .find(|e| e["op"] == "hook-post_install")
+            .unwrap();
+        assert_eq!(entry["exit"], 1);
+        assert_eq!(read_state(&sb)["hooks_failed"][0], "x:post_install");
+        // Next run: the package is installed and nothing changes, but the failed hook runs again.
+        let reg2 = registry(&[&FakeProvider::new("brew").with_installed("x", "1.0.0")]);
+        let case = Case::new(&sb, &reg2, &NoFiles);
+        let plan = case.plan();
+        assert_eq!(plan.hooks.len(), 1);
+        assert_eq!(plan.hooks[0].why, "failed last run");
+        write(
+            &sb.root.join("packages/x/package.toml"),
+            "schema = 1\nname = \"x\"\n[providers.brew]\n[hooks]\npost_install = \"true\"\n",
+        );
+        let r = case.apply(true);
+        assert_eq!(r.status, Status::Done, "{:?}", r.errors);
+        assert!(read_state(&sb).get("hooks_failed").is_none());
+    }
+
+    #[test]
+    fn a_failing_pre_install_hook_stops_the_install() {
+        let (sb, _) = hooked(&[("pre_install", "exit 7"), ("post_install", "true")]);
+        let brew = FakeProvider::new("brew");
+        let reg = registry(&[&brew]);
+        let files = files_for_x();
+        let case = Case::new(&sb, &reg, &files);
+        let r = case.apply(true);
+        assert_eq!(r.status, Status::Failed);
+        assert!(brew.executed().is_empty(), "the install must not run");
+        assert_eq!(status_of(&r, "x"), &StepStatus::Failed);
+        assert!(
+            r.files.is_empty(),
+            "files of a package that did not install are left alone"
+        );
+        assert_eq!(r.hooks_skipped.len(), 1, "post_install is skipped");
+        assert!(r.errors.iter().any(|e| e.code == "hook-failed"));
+    }
+
+    #[test]
+    fn a_failing_pre_files_hook_leaves_the_files_alone() {
+        let (sb, _) = hooked(&[("pre_files", "exit 1"), ("post_files", "true")]);
+        let reg = registry(&[&FakeProvider::new("brew").with_installed("x", "1")]);
+        let files = files_for_x();
+        let case = Case::new(&sb, &reg, &files);
+        let r = case.apply(true);
+        assert_eq!(r.status, Status::Failed);
+        assert!(r.files.is_empty());
+        assert_eq!(r.files_skipped.len(), 1);
+        assert_eq!(r.hooks_skipped.len(), 1);
+    }
+
+    #[test]
+    fn hooks_ask_for_confirmation_because_they_run_code() {
+        let (sb, _) = hooked(&[("post_files", "true")]);
+        let reg = registry(&[&FakeProvider::new("brew").with_installed("x", "1")]);
+        let files = FakeFiles::new(vec![fstep("x", "~/.xrc", true)]);
+        let case = Case::new(&sb, &reg, &files);
+        // Only owned files would need no question; the hook does.
+        assert!(case.plan().touches_more_than_owned_files());
+        let r = case.apply_with(&cfg(false), &NoPrompt);
+        assert_eq!(r.status, Status::ConfirmationRequired);
+    }
+}
+
+// ------------------------------------------------------------------ shims
+
+mod shims {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    /// A repo with `fd` (brew, `bin = "fdfind"`, `shim = "fd"`), a PATH dir holding an
+    /// executable `fdfind`, and a context whose PATH is that dir.
+    fn fixture() -> (Sandbox, PathBuf, PathBuf) {
+        let sb = sandbox(
+            &[("fd", "[providers.brew]\nbin = \"fdfind\"\nshim = \"fd\"")],
+            &[],
+        );
+        let bin = sb.root.parent().unwrap().join("pathdir");
+        write(&bin.join("fdfind"), "#!/bin/sh\n");
+        std::fs::set_permissions(bin.join("fdfind"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        let link = sb.dirs.home.join(".local/bin/fd");
+        (sb, bin, link)
+    }
+
+    fn with_path<'a>(case: &mut Case<'a>, dir: &Path) {
+        case.ctx
+            .env
+            .insert("PATH".into(), dir.to_string_lossy().into_owned());
+    }
+
+    #[test]
+    fn install_creates_the_shim_records_it_and_a_second_run_leaves_it() {
+        let (sb, bin, link) = fixture();
+        let reg = registry(&[&FakeProvider::new("brew")]);
+        let mut case = Case::new(&sb, &reg, &NoFiles);
+        with_path(&mut case, &bin);
+        let plan = case.plan();
+        assert_eq!(plan.shims.len(), 1);
+        assert_eq!(plan.shims[0].dst, "~/.local/bin/fd");
+        assert!(plan_text(&plan).contains("Shims (1)"));
+        let r = case.apply(true);
+        assert_eq!(r.status, Status::Done, "{:?}", r.errors);
+        assert_eq!(r.shims.len(), 1);
+        assert_eq!(std::fs::read_link(&link).unwrap(), bin.join("fdfind"));
+        let state = read_state(&sb);
+        assert_eq!(
+            state["shims"][link.to_str().unwrap()]["package"],
+            "fd",
+            "{state}"
+        );
+        assert!(read_journal(&sb).iter().any(|e| e["op"] == "shim-create"));
+        // Installed and linked: nothing to do.
+        let reg = registry(&[&FakeProvider::new("brew").with_installed("fd", "1")]);
+        let mut case = Case::new(&sb, &reg, &NoFiles);
+        with_path(&mut case, &bin);
+        assert!(case.plan().shims.is_empty());
+    }
+
+    #[test]
+    fn a_dangling_shim_is_repaired_and_a_real_file_is_never_replaced() {
+        let (sb, bin, link) = fixture();
+        let reg = registry(&[&FakeProvider::new("brew").with_installed("fd", "1")]);
+        let mut case = Case::new(&sb, &reg, &NoFiles);
+        with_path(&mut case, &bin);
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink("/nonexistent/fdfind", &link).unwrap();
+        let plan = case.plan();
+        assert_eq!(plan.shims[0].action, "update");
+        assert_eq!(case.apply(true).status, Status::Done);
+        assert_eq!(std::fs::read_link(&link).unwrap(), bin.join("fdfind"));
+        // A real file in the way.
+        std::fs::remove_file(&link).unwrap();
+        std::fs::write(&link, "mine").unwrap();
+        let r = case.apply(true);
+        assert_eq!(r.status, Status::Failed);
+        assert!(
+            r.errors.iter().any(|e| e.message.contains("not a symlink")),
+            "{:?}",
+            r.errors
+        );
+        assert_eq!(std::fs::read_to_string(&link).unwrap(), "mine");
+    }
+
+    #[test]
+    fn a_missing_target_fails_the_shim_not_the_package() {
+        let (sb, _bin, link) = fixture();
+        let reg = registry(&[&FakeProvider::new("brew")]);
+        let mut case = Case::new(&sb, &reg, &NoFiles);
+        with_path(&mut case, &sb.root); // no `fdfind` here
+        let r = case.apply(true);
+        assert_eq!(r.status, Status::Failed);
+        assert_eq!(status_of(&r, "fd"), &StepStatus::Ok);
+        assert!(!r.shims[0].ok);
+        assert!(r.shims[0].detail.as_deref().unwrap().contains("fdfind"));
+        assert!(std::fs::symlink_metadata(&link).is_err());
+    }
+
+    #[test]
+    fn a_shim_of_a_dropped_package_is_removed_on_a_full_run_only() {
+        let (sb, bin, link) = fixture();
+        // dots made `~/.local/bin/old` for a package that is no longer in the repo.
+        let old = sb.dirs.home.join(".local/bin/old");
+        std::fs::create_dir_all(old.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(bin.join("fdfind"), &old).unwrap();
+        write(
+            &sb.dirs.state_json(),
+            &format!(
+                r#"{{"schema":1,"shims":{{{:?}:{{"package":"old","target":"x","run":"r","ts":"t"}}}}}}"#,
+                old.to_str().unwrap()
+            ),
+        );
+        let reg = registry(&[&FakeProvider::new("brew").with_installed("fd", "1")]);
+        let mut case = Case::new(&sb, &reg, &NoFiles);
+        with_path(&mut case, &bin);
+        // A run scoped to one package leaves it alone.
+        case.scope.targets = vec!["fd".into()];
+        assert!(case.plan().shims.iter().all(|s| s.action != "remove"));
+        case.scope.targets.clear();
+        let plan = case.plan();
+        assert!(
+            plan.shims
+                .iter()
+                .any(|s| s.action == "remove" && s.package == "old")
+        );
+        let r = case.apply(true);
+        assert_eq!(r.status, Status::Done, "{:?}", r.errors);
+        assert!(
+            std::fs::symlink_metadata(&old).is_err(),
+            "the dropped shim is gone"
+        );
+        assert!(
+            read_state(&sb)
+                .get("shims")
+                .is_some_and(|s| s.get(old.to_str().unwrap()).is_none())
+        );
+        assert!(
+            std::fs::symlink_metadata(&link).is_ok(),
+            "fd's own shim was created"
+        );
+    }
 }

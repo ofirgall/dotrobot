@@ -6,6 +6,7 @@
 //! Steps that would change nothing are not planned at all, so a converged machine has an
 //! empty plan.
 
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::time::Instant;
@@ -13,7 +14,7 @@ use std::time::Instant;
 use dots_core::{Diagnostic, Dirs};
 use dots_engine::{FileStep, FileStepResult, FilesPhase, FilesRequest, Payload};
 use dots_env::{Contribution, EnvCtx, Shell};
-use dots_facts::{Condition, EvalCtx, NoSettings};
+use dots_facts::{Condition, EvalCtx};
 use dots_files::{
     Action, BackupKind, FilesCtx, Ledger, Mode, OutcomeStatus, expand_path, resolve_path_vars,
 };
@@ -51,6 +52,7 @@ fn mode_word(m: Mode) -> &'static str {
         Mode::Render => "render",
         Mode::Inject => "inject",
         Mode::Dir => "dir",
+        Mode::Terminfo => "terminfo",
     }
 }
 
@@ -66,7 +68,12 @@ fn action_word(a: Action) -> &'static str {
 }
 
 fn message(d: &Diagnostic) -> String {
-    d.message.clone()
+    // A required setting without a value says what to run: `msg → dots config set ...`.
+    if d.code == "setting-required" {
+        format!("{} \u{2192} {}", d.message, d.hint)
+    } else {
+        d.message.clone()
+    }
 }
 
 impl RepoFiles<'_> {
@@ -100,10 +107,38 @@ impl RepoFiles<'_> {
             "platform": c.chain,
             "facts": facts,
         });
+        // Package settings: every applicable value with a name `<pkg>.<key>` (a file reads its
+        // own package's as `setting.x`, others as `settings.<pkg>.x`), and the same in
+        // `template_vars.settings` for jinja layers.
+        let settings = crate::config_cmd::settings_for(rc);
+        c.settings = settings
+            .iter()
+            .filter(|s| s.applies)
+            .filter_map(|s| {
+                Some(dots_files::SettingUse {
+                    name: s.id(),
+                    value: s.value()?.clone(),
+                    scope: s.scope()?.as_str().to_string(),
+                    secret: s.secret(),
+                })
+            })
+            .collect();
+        c.template_vars["settings"] = settings.vars("")["settings"].clone();
+        // Conditions in `dots:if` directives and `[[files.set]] when`.
+        c.cond = Some(std::sync::Arc::new(dots_files::CondEnv {
+            facts: rc.m.facts.clone(),
+            chain: rc.chain.clone(),
+            tags: rc.m.machine.tags.iter().cloned().collect(),
+            declared_tags: rc.repo.manifest.tags.keys().cloned().collect(),
+        }));
         c
     }
 
-    pub fn when(&self) -> impl Fn(&str) -> Result<bool, String> + '_ {
+    /// Conditions that can read package settings (`setting.x` is the lookup's own package).
+    pub fn when_with<'s>(
+        &'s self,
+        settings: &'s dyn dots_facts::SettingLookup,
+    ) -> impl Fn(&str) -> Result<bool, String> + 's {
         let tags: BTreeSet<String> = self.rc.m.machine.tags.iter().cloned().collect();
         let declared: BTreeSet<String> = self.rc.repo.manifest.tags.keys().cloned().collect();
         move |src: &str| {
@@ -114,7 +149,7 @@ impl RepoFiles<'_> {
                         chain: &self.rc.chain,
                         tags: &tags,
                         declared_tags: &declared,
-                        settings: &NoSettings,
+                        settings,
                     })
                 })
                 .map_err(|e| e.message)
@@ -122,23 +157,18 @@ impl RepoFiles<'_> {
     }
 
     /// The repo-override, machine-profile and machine-override layers of one file, lowest
-    /// first, for those whose conventional path (`overrides/packages/<pkg>/<dst file name>`
-    /// under each scope) exists.
+    /// first, for those whose path exists. The path is `overrides/` +
+    /// [`dots_files::override_layer_rel`] of the resolved destination under each scope.
     pub fn extra_layers(
         &self,
         pkg: &str,
         entry: &dots_model::FileEntry,
+        ctx: &FilesCtx,
     ) -> Vec<dots_files::LayerSrc> {
-        let Some(dst) = &entry.dst else {
+        let Some(dst) = dots_files::entry_dst(entry, ctx) else {
             return vec![];
         };
-        let raw = match dst {
-            dots_model::PlatformString::Plain(s) => s.as_str(),
-            _ => return vec![],
-        };
-        let Some(file) = raw.rsplit(['/', '\\']).next().filter(|f| !f.is_empty()) else {
-            return vec![];
-        };
+        let rel = dots_files::override_layer_rel(pkg, &dst, &ctx.home);
         let root = &self.rc.m.root;
         let mut scopes = vec![root.join("overrides")];
         if let Some(profile) = &self.rc.m.machine.profile {
@@ -147,7 +177,7 @@ impl RepoFiles<'_> {
         scopes.push(self.dirs.config.join("overrides"));
         scopes
             .into_iter()
-            .map(|s| s.join("packages").join(pkg).join(file))
+            .map(|s| s.join(&rel))
             .filter(|p| p.is_file())
             .map(|path| dots_files::LayerSrc {
                 label: path
@@ -163,20 +193,62 @@ impl RepoFiles<'_> {
     /// Every `[[files]]` entry of `packages` resolved (conditions evaluated, layers found),
     /// plus the entries that could not be. `apply`, `plan` and `status` all go through this.
     pub fn resolved_files(&self, packages: &[String], ctx: &FilesCtx) -> ResolvedFiles<'_> {
-        let when = self.when();
+        let settings = crate::config_cmd::settings_for(self.rc);
         let mut out = ResolvedFiles::default();
-        for name in packages {
+        // A file several packages contribute to (`mode = "fragment"`) is assembled from every
+        // active package, also those outside this run, so a targeted apply cannot drop a part.
+        let outside: Vec<&String> = self
+            .resolution
+            .order
+            .iter()
+            .filter(|n| {
+                !packages.contains(*n) && self.resolution.get(n).is_some_and(|p| p.is_active())
+            })
+            .collect();
+        let scoped = packages.iter().map(|n| (n, true));
+        for (name, in_scope) in scoped.chain(outside.into_iter().map(|n| (n, false))) {
             let Some(pkg) = self.rc.repo.packages.get(name) else {
                 continue;
             };
-            for entry in &pkg.files {
-                let extra = self.extra_layers(name, entry);
-                match dots_files::resolve_entry(name, &pkg.dir, entry, ctx, &when, &extra) {
+            let lookup = settings.lookup(name);
+            let when = self.when_with(&lookup);
+            // A required setting without a value blocks this package's files, and only its.
+            let blocked = settings
+                .missing(name)
+                .first()
+                .map(|s| Diagnostic::from_code("setting-required", &[("setting", &s.id())]));
+            // A service's `unit` is one more owned file: linked into the manager's unit dir.
+            let unit = crate::services_phase::unit_entry(self.rc, self.resolution, name);
+            let entries = pkg
+                .files
+                .iter()
+                .map(Cow::Borrowed)
+                .chain(unit.map(Cow::Owned));
+            for entry in entries {
+                if !in_scope && entry.mode.as_deref() != Some("fragment") {
+                    continue;
+                }
+                if let Some(d) = &blocked {
+                    out.failures.push((name.clone(), entry, d.clone()));
+                    continue;
+                }
+                let extra = self.extra_layers(name, &entry, ctx);
+                match dots_files::resolve_entry(name, &pkg.dir, &entry, ctx, &when, &extra) {
                     Ok(None) => {}
                     Ok(Some(f)) => out.files.push(f),
                     Err(d) => out.failures.push((name.clone(), entry, d)),
                 }
             }
+        }
+        if out
+            .failures
+            .iter()
+            .any(|(_, e, _)| e.mode.as_deref() == Some("fragment"))
+        {
+            // One contribution is missing, so the assembled file would be wrong: leave it be.
+            out.files.retain(|f| f.extras.fragment.is_none());
+        } else {
+            out.files = dots_files::compose_fragments(std::mem::take(&mut out.files));
         }
         out
     }
@@ -197,7 +269,10 @@ impl RepoFiles<'_> {
         }
         for (name, entry, d) in r.failures {
             unresolved.insert(name.clone());
-            steps.push(unresolved_step(&name, entry, d, ctx));
+            if entry.mode.as_deref() == Some("fragment") {
+                unresolved.insert(dots_files::FRAGMENT_OWNER.to_string());
+            }
+            steps.push(unresolved_step(&name, &entry, d, ctx));
         }
         (steps, unresolved)
     }
@@ -208,7 +283,7 @@ impl RepoFiles<'_> {
 pub struct ResolvedFiles<'a> {
     pub files: Vec<dots_files::ResolvedFile>,
     /// Package, entry and why it could not be resolved.
-    pub failures: Vec<(String, &'a dots_model::FileEntry, Diagnostic)>,
+    pub failures: Vec<(String, Cow<'a, dots_model::FileEntry>, Diagnostic)>,
 }
 
 /// A step standing for an entry that could not even be resolved.
@@ -227,9 +302,10 @@ fn unresolved_step(
         dst,
         mode: match entry.mode.as_deref() {
             Some("copy") => Mode::Copy,
-            Some("render") => Mode::Render,
+            Some("render" | "fragment") => Mode::Render,
             Some("inject") => Mode::Inject,
             Some("dir") => Mode::Dir,
+            Some("terminfo") => Mode::Terminfo,
             _ => Mode::Link,
         },
         action: Action::Failed,
@@ -260,6 +336,13 @@ fn detail(s: &dots_files::FileStep, root: &Path) -> String {
             Mode::Render => format!("{} layer(s): {}", s.layers.len(), s.layers.join(" + ")),
             Mode::Inject => format!("block `{}`", s.marker.as_deref().unwrap_or("")),
             Mode::Dir => "directory".to_string(),
+            Mode::Terminfo => format!(
+                "tic -x -o {}",
+                s.dst
+                    .parent()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default()
+            ),
         }
     };
     match s.backup {

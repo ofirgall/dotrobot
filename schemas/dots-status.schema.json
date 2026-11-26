@@ -38,6 +38,20 @@
               },
               "type": "object"
             },
+            "services": {
+              "additionalProperties": {
+                "minimum": 1,
+                "type": "integer"
+              },
+              "type": "object"
+            },
+            "settings": {
+              "additionalProperties": {
+                "minimum": 1,
+                "type": "integer"
+              },
+              "type": "object"
+            },
             "todos": {
               "additionalProperties": {
                 "minimum": 1,
@@ -49,6 +63,8 @@
           "required": [
             "packages",
             "files",
+            "settings",
+            "services",
             "todos",
             "git",
             "bins"
@@ -102,6 +118,8 @@
                 "enum": [
                   "packages",
                   "files",
+                  "settings",
+                  "services",
                   "todos",
                   "git",
                   "bins"
@@ -163,7 +181,8 @@
                   "skipped",
                   "auto",
                   "failed",
-                  "running"
+                  "running",
+                  "unknown"
                 ]
               },
               "want": {
@@ -302,6 +321,8 @@
                 "enum": [
                   "packages",
                   "files",
+                  "settings",
+                  "services",
                   "todos",
                   "git",
                   "bins"
@@ -363,7 +384,8 @@
                   "skipped",
                   "auto",
                   "failed",
-                  "running"
+                  "running",
+                  "unknown"
                 ]
               },
               "want": {
@@ -442,7 +464,8 @@
             "skipped",
             "auto",
             "failed",
-            "running"
+            "running",
+            "unknown"
           ]
         },
         "todos": {
@@ -452,6 +475,8 @@
                 "enum": [
                   "packages",
                   "files",
+                  "settings",
+                  "services",
                   "todos",
                   "git",
                   "bins"
@@ -513,7 +538,8 @@
                   "skipped",
                   "auto",
                   "failed",
-                  "running"
+                  "running",
+                  "unknown"
                 ]
               },
               "want": {

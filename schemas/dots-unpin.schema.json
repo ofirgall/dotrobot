@@ -3,6 +3,65 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "properties": {
     "data": {
+      "properties": {
+        "changed": {
+          "type": "boolean"
+        },
+        "commit": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "file": {
+          "type": "string"
+        },
+        "native": {
+          "properties": {
+            "action": {
+              "enum": [
+                "pin",
+                "unpin"
+              ]
+            },
+            "commands": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "provider": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "provider",
+            "action",
+            "commands"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "package": {
+          "type": "string"
+        },
+        "version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "package",
+        "version",
+        "file",
+        "changed",
+        "native",
+        "commit"
+      ],
       "type": "object"
     },
     "errors": {

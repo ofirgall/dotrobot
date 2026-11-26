@@ -455,3 +455,20 @@ fn real_brew_read_only() {
     assert!(m.values().all(|i| !i.version.is_empty()));
     assert!(m.keys().all(|k| !k.is_empty()));
 }
+
+#[test]
+fn roots_are_what_the_user_asked_for_not_what_brew_pulled_in() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (p, rec, ctx, b) = scripted(tmp.path());
+    rec.on(
+        &[&b, "info", "--json=v2", "--installed"],
+        Output::ok(INSTALLED),
+    );
+    let roots = p.roots(&ctx).unwrap().expect("brew can tell");
+    assert_eq!(rec.count(), 1, "one batched call: {:?}", rec.lines());
+    assert!(roots.contains("bat"));
+    // Installed only as a dependency: not a root.
+    assert!(!roots.contains("jpeg-turbo"));
+    // Casks are always on request.
+    assert!(roots.contains("1password-cli"));
+}

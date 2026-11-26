@@ -3,6 +3,66 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "properties": {
     "data": {
+      "properties": {
+        "changed": {
+          "type": "boolean"
+        },
+        "created": {
+          "type": "boolean"
+        },
+        "dst": {
+          "type": "string"
+        },
+        "keys": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "layer": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "method": {
+          "enum": [
+            "copy",
+            "inject",
+            "text-merge",
+            "structural"
+          ]
+        },
+        "mode": {
+          "enum": [
+            "copy",
+            "render",
+            "inject"
+          ]
+        },
+        "notes": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "package": {
+          "type": "string"
+        },
+        "setting": {
+          "type": "string"
+        },
+        "target": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "value": {}
+      },
+      "required": [
+        "changed"
+      ],
       "type": "object"
     },
     "errors": {

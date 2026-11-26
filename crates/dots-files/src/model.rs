@@ -16,6 +16,8 @@ pub enum Mode {
     Render,
     Inject,
     Dir,
+    /// Compile a terminfo source with `tic -x -o <dir>`.
+    Terminfo,
 }
 
 /// One source layer of a render.
@@ -47,6 +49,38 @@ pub struct ResolvedFile {
     pub merge: BTreeMap<String, Strategy>,
     /// Line-comment prefix for text/inject (default `#`).
     pub comment: String,
+    pub extras: Extras,
+}
+
+/// What a `render` file carries beyond layers: structured patches and fragment composition.
+#[derive(Debug, Clone, Default)]
+pub struct Extras {
+    /// `[[files.set]]`, applied after the merge in declaration order.
+    pub set: Vec<SetPatch>,
+    /// `Some(priority)` for one package's `mode = "fragment"` entry (it renders like a `render`
+    /// entry but is meant to be composed with the others for the same `dst`).
+    pub fragment: Option<i64>,
+    /// For a composed file: its contributions. Empty otherwise.
+    pub parts: Vec<ResolvedFile>,
+}
+
+/// One `[[files.set]]` entry.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SetPatch {
+    /// Dotted key path; a segment containing `.` is written `"a.b"`.
+    pub path: String,
+    pub value: Option<serde_json::Value>,
+    pub delete: bool,
+    pub when: Option<String>,
+}
+
+/// Facts, platform chain and tags for evaluating conditions in directives and patches.
+#[derive(Debug, Clone)]
+pub struct CondEnv {
+    pub facts: dots_facts::Facts,
+    pub chain: dots_facts::Chain,
+    pub tags: std::collections::BTreeSet<String>,
+    pub declared_tags: std::collections::BTreeSet<String>,
 }
 
 /// A setting value that went into a render, shown in the generated header.
@@ -56,6 +90,9 @@ pub struct SettingUse {
     pub value: serde_json::Value,
     /// Scope the value came from: `default`, `repo`, `machine`, ...
     pub scope: String,
+    /// A secret setting: its value is never printed (the header shows `•••`).
+    #[serde(default)]
+    pub secret: bool,
 }
 
 /// Everything the file engine needs besides the files themselves.
@@ -77,7 +114,12 @@ pub struct FilesCtx {
     pub settings: Vec<SettingUse>,
     /// Context for `template = "jinja"` layers.
     pub template_vars: serde_json::Value,
+    /// Conditions in `dots:if` and `[[files.set]] when`. Without it a minimal environment is
+    /// derived from `os`, `chain` and `template_vars.tags`.
+    pub cond: Option<std::sync::Arc<CondEnv>>,
     pub dry_run: bool,
+    /// `tic` and `infocmp` for the `terminfo` mode (real processes by default).
+    pub tools: std::sync::Arc<dyn crate::terminfo::Tools>,
 }
 
 impl FilesCtx {
@@ -98,7 +140,9 @@ impl FilesCtx {
             vars: BTreeMap::new(),
             settings: Vec::new(),
             template_vars: serde_json::json!({}),
+            cond: None,
             dry_run: false,
+            tools: crate::terminfo::system_tools(),
         }
     }
     pub fn active_dir(&self) -> PathBuf {

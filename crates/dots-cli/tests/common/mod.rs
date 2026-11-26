@@ -56,8 +56,28 @@ pub const VALID_INVOCATIONS: &[&[&str]] = &[
 
 /// Commands that are implemented; the stub-contract tests skip them.
 pub const IMPLEMENTED: &[&str] = &[
-    "facts", "why", "lint", "restore", "plan", "apply", "init", "status", "outdated", "bins",
-    "which", "doctor",
+    "facts",
+    "why",
+    "lint",
+    "restore",
+    "plan",
+    "apply",
+    "init",
+    "status",
+    "outdated",
+    "bins",
+    "which",
+    "doctor",
+    "config",
+    "questions",
+    "upgrade",
+    "pin",
+    "unpin",
+    "lock",
+    "show",
+    "override",
+    "migrate",
+    "adopt",
 ];
 
 /// Valid invocations of the commands that are still stubs.

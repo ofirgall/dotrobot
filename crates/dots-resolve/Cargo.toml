@@ -12,6 +12,8 @@ workspace = true
 dots-core.workspace = true
 dots-model.workspace = true
 dots-facts.workspace = true
+dots-files.workspace = true
+dots-config.workspace = true
 dots-providers.workspace = true
 serde_json.workspace = true
 

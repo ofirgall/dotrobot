@@ -3,6 +3,112 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "properties": {
     "data": {
+      "properties": {
+        "action": {
+          "enum": [
+            "list",
+            "edit",
+            "diff"
+          ]
+        },
+        "address": {
+          "type": "string"
+        },
+        "changes": {
+          "items": {
+            "properties": {
+              "after": {},
+              "before": {},
+              "change": {
+                "enum": [
+                  "added",
+                  "removed",
+                  "changed"
+                ]
+              },
+              "path": {
+                "type": "string"
+              },
+              "source": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "path",
+              "change"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "created": {
+          "type": "boolean"
+        },
+        "path": {
+          "type": "string"
+        },
+        "scope": {
+          "enum": [
+            "repo",
+            "profile",
+            "machine"
+          ]
+        },
+        "scopes": {
+          "items": {
+            "properties": {
+              "location": {
+                "type": "string"
+              },
+              "overrides": {
+                "items": {
+                  "properties": {
+                    "file": {
+                      "type": "string"
+                    },
+                    "keys": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "target": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "target",
+                    "file",
+                    "keys"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "scope": {
+                "enum": [
+                  "repo",
+                  "profile",
+                  "machine"
+                ]
+              }
+            },
+            "required": [
+              "scope",
+              "location",
+              "overrides"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "action"
+      ],
       "type": "object"
     },
     "errors": {

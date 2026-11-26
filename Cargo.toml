@@ -7,10 +7,14 @@ members = [
     "crates/dots-model",
     "crates/dots-facts",
     "crates/dots-resolve",
+    "crates/dots-lock",
     "crates/dots-providers",
     "crates/dots-engine",
     "crates/dots-files",
     "crates/dots-env",
+    "crates/dots-settings",
+    "crates/dots-services",
+    "crates/dots-config",
     "crates/dots-testkit",
 ]
 
@@ -27,10 +31,14 @@ dots-ui = { path = "crates/dots-ui" }
 dots-model = { path = "crates/dots-model" }
 dots-facts = { path = "crates/dots-facts" }
 dots-resolve = { path = "crates/dots-resolve" }
+dots-lock = { path = "crates/dots-lock" }
 dots-providers = { path = "crates/dots-providers" }
 dots-engine = { path = "crates/dots-engine" }
 dots-files = { path = "crates/dots-files" }
 dots-env = { path = "crates/dots-env" }
+dots-settings = { path = "crates/dots-settings" }
+dots-services = { path = "crates/dots-services" }
+dots-config = { path = "crates/dots-config" }
 dots-testkit = { path = "crates/dots-testkit" }
 # external
 clap = { version = "4.6", features = ["derive"] }

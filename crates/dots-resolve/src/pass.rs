@@ -5,14 +5,17 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use dots_core::{Diagnostic, Provenance};
-use dots_facts::{Chain, CondError, Condition, EvalCtx, Facts, NoSettings, suggest};
+use dots_facts::{Chain, CondError, Condition, EvalCtx, Facts, NoSettings, SettingLookup, suggest};
 use dots_model::{MachineConfig, Package, Repo, Requirement};
 use dots_providers::{Installed, Registry};
 
-use crate::constraints::{Constraint, ConstraintSet, ConstraintSource};
+use crate::constraints::{
+    Constraint, ConstraintSet, ConstraintSource, NoOffers, OfferSource, can_satisfy,
+};
 use crate::diag::{At, cond_diag, cycle_at, entry_at, prov_at};
 use crate::graph;
 use crate::model::*;
+use dots_model::vspec::Spec;
 
 /// Installed packages per provider: provider id -> provider-native name -> install.
 /// Built from each provider's one batched `installed()` call.
@@ -31,10 +34,53 @@ pub struct Inputs<'a> {
 /// Resolve the machine's package set. Never panics on bad input; problems are returned as
 /// `errors` (resolution is then partial) and `warnings`.
 pub fn resolve(inp: &Inputs) -> Resolution {
+    resolve_with(inp, &NoOffers)
+}
+
+/// Like [`resolve`], with what the providers offer, so provider selection can skip a candidate
+/// that cannot deliver the intersected version constraint.
+pub fn resolve_with(inp: &Inputs, offers: &dyn OfferSource) -> Resolution {
+    resolve_full(inp, offers, &NoSettingsSource)
+}
+
+/// Where `when = "setting.x == ..."` on packages, requirements, provider sections and bundle
+/// members reads package settings from. `setting.x` means the setting of the package the
+/// condition belongs to (for a bundle member, the member's package).
+///
+/// Settings resolution never depends on the resolver: a setting's own `when` is evaluated
+/// without settings (facts, tags and platforms only), and a package's applicability is not
+/// an input of settings resolution. So settings can be resolved first, from the repo and the
+/// machine config, and then handed to the resolver, which breaks the cycle between
+/// "setting applies" and "package `when`".
+pub trait SettingsSource {
+    fn lookup<'a>(&'a self, package: &'a str) -> Box<dyn SettingLookup + 'a>;
+}
+
+/// No settings: every `setting.*` reference is an unresolved-reference error.
+pub struct NoSettingsSource;
+
+impl SettingsSource for NoSettingsSource {
+    fn lookup<'a>(&'a self, _: &'a str) -> Box<dyn SettingLookup + 'a> {
+        Box::new(NoSettings)
+    }
+}
+
+impl SettingsSource for dots_config::Settings {
+    fn lookup<'a>(&'a self, package: &'a str) -> Box<dyn SettingLookup + 'a> {
+        Box::new(dots_config::Settings::lookup(self, package))
+    }
+}
+
+/// [`resolve_with`], with package settings readable from conditions.
+pub fn resolve_full(
+    inp: &Inputs,
+    offers: &dyn OfferSource,
+    settings: &dyn SettingsSource,
+) -> Resolution {
     let mut dropped: BTreeMap<String, String> = BTreeMap::new();
     let mut injected: BTreeSet<(String, String, String)> = BTreeSet::new();
     for _ in 0..256 {
-        let mut pass = Pass::new(inp);
+        let mut pass = Pass::new(inp, offers, settings);
         let out = pass.run(&dropped, &injected);
         let mut changed = false;
         for (victim, by) in out.new_replacements {
@@ -48,7 +94,9 @@ pub fn resolve(inp: &Inputs) -> Resolution {
         }
     }
     // Unreachable in practice (both sets are bounded by the package count squared).
-    Pass::new(inp).run(&dropped, &injected).resolution
+    Pass::new(inp, offers, settings)
+        .run(&dropped, &injected)
+        .resolution
 }
 
 struct PassOut {
@@ -59,6 +107,8 @@ struct PassOut {
 
 struct Pass<'a> {
     inp: &'a Inputs<'a>,
+    offers: &'a dyn OfferSource,
+    settings: &'a dyn SettingsSource,
     tags: BTreeSet<String>,
     declared_tags: BTreeSet<String>,
     errors: Vec<Diagnostic>,
@@ -79,6 +129,14 @@ fn prov(source: &str, file: &str) -> Provenance {
     }
 }
 
+fn path_label(steps: &[Step]) -> String {
+    steps
+        .iter()
+        .map(Step::label)
+        .collect::<Vec<_>>()
+        .join(" → ")
+}
+
 fn arrow_join(names: &[String]) -> String {
     names.join(" → ")
 }
@@ -92,9 +150,15 @@ struct Reach {
 }
 
 impl<'a> Pass<'a> {
-    fn new(inp: &'a Inputs<'a>) -> Self {
+    fn new(
+        inp: &'a Inputs<'a>,
+        offers: &'a dyn OfferSource,
+        settings: &'a dyn SettingsSource,
+    ) -> Self {
         Pass {
             inp,
+            offers,
+            settings,
             tags: inp.machine.tags.iter().cloned().collect(),
             declared_tags: inp.repo.manifest.tags.keys().cloned().collect(),
             errors: Vec::new(),
@@ -117,14 +181,53 @@ impl<'a> Pass<'a> {
 
     // ------------------------------------------------------------ conditions
 
-    fn eval_when(&mut self, when: &str, file: &str, at: At) -> bool {
+    /// The package's own `version` as a constraint, attributed to the layer that set it
+    /// (an override replaces the package's own spec, never its dependents').
+    fn own_constraint(&self, name: &str, spec: &str, path: &[Step]) -> Constraint {
+        let repo = self.inp.repo;
+        let located = repo
+            .effective
+            .as_ref()
+            .and_then(|info| info.objects.get(&format!("pkg:{name}")))
+            .and_then(|obj| obj.prov.get("version"));
+        if let Some(loc) = located {
+            let file = loc.source.file.clone();
+            return if loc.source.scope == dots_model::Scope::Definition {
+                Constraint {
+                    spec: spec.to_string(),
+                    source: ConstraintSource::Own { file },
+                    line: loc.line,
+                    via: path_label(path),
+                }
+            } else {
+                Constraint {
+                    spec: spec.to_string(),
+                    source: ConstraintSource::Override { file },
+                    line: loc.line,
+                    via: loc.source.scope.label().to_string(),
+                }
+            };
+        }
+        Constraint {
+            spec: spec.to_string(),
+            source: ConstraintSource::Own {
+                file: pkg_file(name),
+            },
+            line: repo.packages[name].spans.get("version").map(|s| s.0),
+            via: path_label(path),
+        }
+    }
+
+    /// `owner` is the package whose settings `setting.x` reads.
+    fn eval_when(&mut self, owner: &str, when: &str, file: &str, at: At) -> bool {
+        let lookup = self.settings.lookup(owner);
         let result = Condition::parse(when).and_then(|c| {
             c.eval(&EvalCtx {
                 facts: self.inp.facts,
                 chain: self.inp.chain,
                 tags: &self.tags,
                 declared_tags: &self.declared_tags,
-                settings: &NoSettings,
+                settings: &*lookup,
             })
         });
         match result {
@@ -145,13 +248,13 @@ impl<'a> Pass<'a> {
         &mut self,
         inc_conds: &mut Vec<PathCondition>,
         active: &mut bool,
-        on: &str,
+        (owner, on): (&str, &str),
         when: Option<&str>,
         file: &str,
         at: At,
     ) {
         if let Some(w) = when {
-            let result = self.eval_when(w, file, at);
+            let result = self.eval_when(owner, w, file, at);
             inc_conds.push(PathCondition {
                 on: on.to_string(),
                 when: w.to_string(),
@@ -169,7 +272,7 @@ impl<'a> Pass<'a> {
         let when = pkg.and_then(|p| p.when.clone());
         let at = pkg.and_then(|p| p.spans.get("when").copied());
         let b = match when {
-            Some(w) => self.eval_when(&w, &pkg_file(name), at),
+            Some(w) => self.eval_when(name, &w, &pkg_file(name), at),
             None => true,
         };
         self.own_when.insert(name.to_string(), b);
@@ -233,7 +336,14 @@ impl<'a> Pass<'a> {
             let mut conds = conds.to_vec();
             let mut active = active;
             let when_at = bundle.spans.get(&format!("packages.{i}.when")).copied();
-            self.path_cond(&mut conds, &mut active, name, member.when(), &file, when_at);
+            self.path_cond(
+                &mut conds,
+                &mut active,
+                (member.name(), name),
+                member.when(),
+                &file,
+                when_at,
+            );
             let mut steps = steps.clone();
             steps.push(Step::Package(member.name().to_string()));
             queue.push_back(Reach {
@@ -329,7 +439,14 @@ impl<'a> Pass<'a> {
                 let mut conds = inc.conditions.clone();
                 let mut active = true;
                 let when_at = pkg.spans.get(&format!("requires.{ri}.when")).copied();
-                self.path_cond(&mut conds, &mut active, &name, rwhen, &pfile, when_at);
+                self.path_cond(
+                    &mut conds,
+                    &mut active,
+                    (&name, &name),
+                    rwhen,
+                    &pfile,
+                    when_at,
+                );
                 let mut steps = inc.steps.clone();
                 steps.push(Step::Requires {
                     package: rname.to_string(),
@@ -441,10 +558,44 @@ impl<'a> Pass<'a> {
         Ok(())
     }
 
+    /// Can provider `id` deliver `wanted` for `native`? Asks the provider what it offers only
+    /// when the answer could matter (a numeric constraint on an exact-version-limited provider).
+    fn constraint_check(
+        &self,
+        id: &str,
+        pkg: &str,
+        native: &str,
+        cfg: Option<&dots_model::ProviderConfig>,
+        wanted: &Spec,
+    ) -> Result<(), String> {
+        let exact = self
+            .inp
+            .providers
+            .get_for(id, pkg)
+            .map(|p| p.caps().exact_version);
+        let installed = self
+            .inp
+            .installed
+            .get(id)
+            .and_then(|m| m.get(native))
+            .map(|i| i.version.as_str());
+        let needs_offer = (wanted.is_range() || matches!(wanted, Spec::Exact(_)))
+            && exact != Some(dots_providers::Support::Yes)
+            && crate::constraints::offers_only_current(id);
+        let offered = if needs_offer {
+            let dir = self.inp.repo.packages.get(pkg).map(|p| p.dir.as_path());
+            let spec = crate::spec::spec_for_in(native, cfg, dir);
+            self.offers.offered(id, pkg, native, &spec)
+        } else {
+            None
+        };
+        can_satisfy(id, exact, wanted, installed, offered.as_deref())
+    }
+
     fn select(
         &mut self,
         name: &str,
-        set: &ConstraintSet,
+        wanted: &Spec,
         dropped: &BTreeMap<String, String>,
     ) -> ProviderSelection {
         let repo = self.inp.repo;
@@ -453,11 +604,32 @@ impl<'a> Pass<'a> {
         let priority = self.priority_list();
         let priority_ids: Vec<String> = priority.as_ref().map(|p| p.1.clone()).unwrap_or_default();
 
-        // A package with only `[[files]]` (no providers, no `bin`/`bins`) has nothing to install.
+        // A meta package carries other content (files, hooks, env, settings, system settings,
+        // `requires`, a `manual/` dir) and names nothing to install: no providers, no
+        // `bin`/`bins`, no `version`/`prefer`, no `[service]` that needs the software.
+        // repo-schema says "no `[providers]` table = every provider", but applied to such a
+        // package it ran `apt install <name>` for something that is not software (found
+        // migrating a real repo: a manual-only `serial-access`). It is inert for providers.
+        // A package that is only `schema` + `name` still gets the default chain.
+        let has_other_content = !pkg.files.is_empty()
+            || !pkg.requires.is_empty()
+            || pkg.hooks != dots_model::Hooks::default()
+            || pkg.env != dots_model::EnvSpec::default()
+            || !pkg.settings.is_empty()
+            || !pkg.defaults.is_empty()
+            || !pkg.registry.is_empty()
+            || !pkg.xdg.is_empty()
+            || pkg.dir.join("manual").is_dir();
+        // (A package with `[[files]]` and nothing to install was always inert, whatever else it
+        // says.)
         let files_only = pkg.providers.is_empty()
             && pkg.bin.is_none()
             && pkg.bins.is_empty()
-            && !pkg.files.is_empty();
+            && (!pkg.files.is_empty()
+                || (pkg.version.is_none()
+                    && pkg.prefer.is_empty()
+                    && pkg.service.is_none()
+                    && has_other_content));
 
         // Candidate ids, before `when`.
         let mut ids: Vec<String> = if !pkg.providers.is_empty() {
@@ -471,7 +643,7 @@ impl<'a> Pass<'a> {
             }
             seen
         } else {
-            // `providers_only` with no providers: a files-only package (see above), nothing to install.
+            // `providers_only` with no providers, or a meta package (see above): nothing to install.
             return ProviderSelection {
                 chosen: None,
                 candidates: vec![],
@@ -527,7 +699,7 @@ impl<'a> Pass<'a> {
             };
             let when_at = pkg.spans.get(&format!("providers.{id}.when")).copied();
             if let Some(w) = &common.when
-                && !self.eval_when(w, &file, when_at)
+                && !self.eval_when(name, w, &file, when_at)
             {
                 ev.skip = Some(SkipReason::WhenFalse(w.clone()));
             } else {
@@ -536,7 +708,9 @@ impl<'a> Pass<'a> {
                     Ok(a) => {
                         if self.needs_root(id, name, cfg) && !self.inp.facts.has_sudo {
                             ev.skip = Some(SkipReason::NeedsRoot);
-                        } else if let Err(why) = crate::constraints::can_satisfy(id, name, set) {
+                        } else if let Err(why) =
+                            self.constraint_check(id, name, &native, cfg, wanted)
+                        {
                             ev.skip = Some(SkipReason::CannotSatisfy(why));
                         } else if let dots_providers::Availability::Bootstrap { pkg: bp } = &a
                             && let Err(why) = self.check_bootstrap(bp, name, dropped)
@@ -652,6 +826,7 @@ impl<'a> Pass<'a> {
                     inclusions: incs,
                     provider: None,
                     constraints: ConstraintSet::default(),
+                    wanted: Spec::Latest,
                 },
             );
         }
@@ -701,33 +876,31 @@ impl<'a> Pass<'a> {
             .map(|p| p.name.clone())
             .collect();
 
-        // Constraints (opaque specs with provenance).
+        // Constraints with provenance, intersected per package.
         for name in &active {
             let pkg = &repo.packages[name];
             let file = pkg_file(name);
-            if let Some(v) = &pkg.version {
-                packages
-                    .get_mut(name)
-                    .unwrap()
-                    .constraints
-                    .constraints
-                    .push(Constraint {
-                        spec: v.clone(),
-                        source: ConstraintSource::Own { file: file.clone() },
-                    });
-            }
             let path = packages[name]
                 .inclusions
                 .iter()
                 .find(|i| i.active)
                 .map(|i| i.steps.clone())
                 .unwrap_or_default();
+            if let Some(v) = &pkg.version {
+                let c = self.own_constraint(name, v, &path);
+                packages
+                    .get_mut(name)
+                    .unwrap()
+                    .constraints
+                    .constraints
+                    .push(c);
+            }
             for (ri, req) in pkg.requires.iter().enumerate() {
                 let (rname, rver, rwhen) = requirement_parts(req);
                 let Some(ver) = rver else { continue };
                 let when_at = pkg.spans.get(&format!("requires.{ri}.when")).copied();
                 if let Some(w) = rwhen
-                    && !self.eval_when(w, &file, when_at)
+                    && !self.eval_when(name, w, &file, when_at)
                 {
                     continue;
                 }
@@ -739,6 +912,11 @@ impl<'a> Pass<'a> {
                     });
                     t.constraints.constraints.push(Constraint {
                         spec: ver.to_string(),
+                        line: pkg
+                            .spans
+                            .get(&format!("requires.{ri}.version"))
+                            .map(|s| s.0),
+                        via: path_label(&p),
                         source: ConstraintSource::Requires {
                             from: name.clone(),
                             file: file.clone(),
@@ -748,12 +926,23 @@ impl<'a> Pass<'a> {
                 }
             }
         }
+        for name in &active {
+            let t = packages.get_mut(name).unwrap();
+            t.constraints.sort();
+            match t.constraints.effective(name) {
+                Ok(spec) => t.wanted = spec,
+                Err(d) => {
+                    t.wanted = Spec::Latest;
+                    self.error(d);
+                }
+            }
+        }
 
         // Providers.
         let mut new_injections = Vec::new();
         for name in &active {
-            let set = packages[name].constraints.clone();
-            let sel = self.select(name, &set, dropped);
+            let wanted = packages[name].wanted.clone();
+            let sel = self.select(name, &wanted, dropped);
             if let Some(bp) = sel.chosen.as_ref().and_then(|c| c.bootstrap.clone()) {
                 let id = sel.chosen.as_ref().unwrap().id.clone();
                 new_injections.push((bp, id, name.clone()));
@@ -835,7 +1024,7 @@ impl<'a> Pass<'a> {
                 let (rname, _, rwhen) = requirement_parts(req);
                 let when_at = pkg.spans.get(&format!("requires.{ri}.when")).copied();
                 if let Some(w) = rwhen
-                    && !self.eval_when(w, &file, when_at)
+                    && !self.eval_when(name, w, &file, when_at)
                 {
                     continue;
                 }

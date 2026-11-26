@@ -13,8 +13,9 @@
 //! [`dots_providers::Registry`] and installed state from a caller-supplied [`InstalledMap`],
 //! so tests drive it with `FakeProvider`.
 //!
-//! Version specs are opaque strings for now; [`constraints`] keeps a constraint set per
-//! package with provenance and a `can_satisfy` hook that task 5.8 fills in.
+//! Version specs follow the grammar in `dots_model::vspec`; [`constraints`] keeps a constraint
+//! set per package with provenance, intersects it (`version-conflict` names both sides) and
+//! checks whether a provider can deliver the result.
 
 pub mod constraints;
 mod diag;
@@ -24,8 +25,13 @@ mod model;
 mod pass;
 mod spec;
 
-pub use constraints::{Constraint, ConstraintSet, ConstraintSource, can_satisfy};
+pub use constraints::{
+    Constraint, ConstraintSet, ConstraintSource, NoOffers, OfferSource, can_satisfy,
+    offers_only_current,
+};
 pub use lint::{LintInputs, LintReport, lint};
 pub use model::*;
-pub use pass::{Inputs, InstalledMap, resolve};
-pub use spec::spec_for;
+pub use pass::{
+    Inputs, InstalledMap, NoSettingsSource, SettingsSource, resolve, resolve_full, resolve_with,
+};
+pub use spec::{spec_for, spec_for_in};

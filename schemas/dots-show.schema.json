@@ -3,6 +3,72 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "properties": {
     "data": {
+      "properties": {
+        "address": {
+          "type": "string"
+        },
+        "effective": {
+          "type": "boolean"
+        },
+        "overrides": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "provenance": {
+          "items": {
+            "properties": {
+              "file": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "line": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "path": {
+                "type": "string"
+              },
+              "scope": {
+                "enum": [
+                  "definition",
+                  "repo",
+                  "profile",
+                  "machine"
+                ]
+              },
+              "source": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "path",
+              "scope",
+              "source"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "text": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "value": {}
+      },
+      "required": [
+        "address",
+        "effective",
+        "value",
+        "text"
+      ],
       "type": "object"
     },
     "errors": {

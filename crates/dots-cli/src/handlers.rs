@@ -9,6 +9,20 @@ use crate::cli::Cmd;
 pub fn dispatch(cmd: Option<&Cmd>, ctx: &Context) -> Report {
     // `dots` with no arguments behaves like `dots status`.
     let name = cmd.map_or("status", Cmd::name);
+    // `adopt` writes repo and machine files, so it is exclusive with `apply` and friends.
+    let _adopt_lock = match cmd {
+        Some(Cmd::Adopt { .. }) => match crate::adopt::lock(ctx) {
+            Ok(l) => Some(l),
+            Err(r) => return *r,
+        },
+        _ => None,
+    };
+    // `dots adopt defaults:<domain>:<key>` (and the other setting ids) adopts a system setting.
+    if let Some(Cmd::Adopt { dst, .. }) = cmd
+        && let Some(report) = crate::settings_phase::adopt(ctx, dst)
+    {
+        return report;
+    }
     match cmd {
         Some(Cmd::Facts) => facts(ctx),
         Some(Cmd::Why { pkg }) => crate::why::run(ctx, pkg),
@@ -35,8 +49,59 @@ pub fn dispatch(cmd: Option<&Cmd>, ctx: &Context) -> Report {
             },
         ),
         Some(Cmd::Doctor) => crate::doctor::run(ctx),
+        Some(Cmd::Adopt {
+            dst,
+            layer,
+            as_patch,
+            machine,
+        }) => crate::adopt::run(
+            ctx,
+            &crate::adopt::Args {
+                dst,
+                layer: layer.as_deref(),
+                as_patch: *as_patch,
+                machine: *machine,
+            },
+        ),
         Some(Cmd::Restore { run_id }) => crate::restore::run(ctx, run_id),
         Some(Cmd::Lint) => crate::lint_cmd::run(ctx),
+        Some(Cmd::Lock { .. }) => crate::lock_cmd::run(ctx),
+        Some(Cmd::Upgrade {
+            pkgs,
+            all,
+            provider,
+            commit,
+        }) => crate::upgrade::run(
+            ctx,
+            &crate::upgrade::UpgradeArgs {
+                pkgs,
+                all: *all,
+                provider: provider.as_deref(),
+                commit: *commit,
+            },
+        ),
+        Some(Cmd::Pin {
+            pkg,
+            version,
+            commit,
+        }) => crate::pin::run(
+            ctx,
+            &crate::pin::PinArgs {
+                pkg,
+                version: version.as_deref(),
+                unpin: false,
+                commit: *commit,
+            },
+        ),
+        Some(Cmd::Unpin { pkg, commit }) => crate::pin::run(
+            ctx,
+            &crate::pin::PinArgs {
+                pkg,
+                version: None,
+                unpin: true,
+                commit: *commit,
+            },
+        ),
         Some(Cmd::Init {
             from,
             root,
@@ -85,6 +150,13 @@ pub fn dispatch(cmd: Option<&Cmd>, ctx: &Context) -> Report {
                 root: root.clone(),
             },
         ),
+        Some(Cmd::Config { action }) => crate::config_cmd::run(ctx, action),
+        Some(Cmd::Questions) => crate::questions::run(ctx),
+        Some(Cmd::Migrate { pkg, to }) => {
+            crate::migrate::run(ctx, &crate::migrate::MigrateArgs { pkg, to })
+        }
+        Some(Cmd::Show { address, effective }) => crate::show::run(ctx, address, *effective),
+        Some(Cmd::Override { action }) => crate::override_cmd::run(ctx, action),
         _ => not_implemented(name, ctx),
     }
 }
@@ -104,20 +176,18 @@ fn facts(ctx: &Context) -> Report {
         Err(errors) => return Report::failure("facts", ExitCode::Error, errors),
     };
     let mut warnings = m.warnings.clone();
-    // Platform parents live in the repo; a missing or broken repo only costs those.
-    let repo = if m.root.join("dots.toml").is_file() {
-        match dots_model::Repo::load(&m.root) {
-            Ok(l) => Some(l.value),
-            Err(e) => {
-                warnings.extend(e.errors.into_iter().take(1));
-                None
+    // Platform parents live in the effective repo (overrides can declare `[platforms]`); a
+    // missing or broken repo only costs those.
+    let chain = match crate::context::load_repo(ctx, None) {
+        Ok(rc) => rc.chain,
+        Err((errors, _)) => {
+            if m.root.join("dots.toml").is_file() {
+                warnings.extend(errors.into_iter().take(1));
             }
+            crate::context::build_chain(&m, None)
         }
-    } else {
-        None
     };
     let f = &m.facts;
-    let chain = crate::context::build_chain(&m, repo.as_ref());
     let tags: Vec<String> = m.machine.tags.clone();
 
     let entries = f.entries();

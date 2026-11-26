@@ -26,7 +26,7 @@ pub fn plan(files: &[ResolvedFile], ctx: &FilesCtx) -> Vec<FileStep> {
                 return s;
             }
             let rec = ledger.get(&f.dst, f.mode, &f.package);
-            let state = observe(&s, rec);
+            let state = observe(&s, rec, ctx);
             s.from = Some(state);
             let through_link =
                 fs::symlink_metadata(&s.dst).is_ok_and(|m| m.file_type().is_symlink());
@@ -169,6 +169,11 @@ fn write(step: &FileStep, ctx: &FilesCtx) -> FileOutcome {
             atomic_write(g, step.content.as_deref().unwrap_or_default())?;
             link(step, ctx)
         }
+        Mode::Terminfo => {
+            let dir = step.dst.parent().unwrap_or(Path::new("."));
+            let src = step.src.as_deref().unwrap_or(Path::new(""));
+            crate::terminfo::compile(ctx.tools.as_ref(), dir, src).map_err(std::io::Error::other)
+        }
         Mode::Inject => {
             let real = fs::canonicalize(&step.dst).unwrap_or_else(|_| step.dst.clone());
             let old = fs::read_to_string(&real);
@@ -292,6 +297,12 @@ fn remove(step: &FileStep, ctx: &FilesCtx) -> FileOutcome {
                 fs::remove_file(&real)?;
             } else {
                 atomic_write(&real, new.as_bytes())?;
+            }
+            Ok(true)
+        }
+        Mode::Terminfo => {
+            if let (Some(dir), Some(name)) = (dst.parent(), dst.file_name()) {
+                crate::terminfo::remove_compiled(dir, &name.to_string_lossy())?;
             }
             Ok(true)
         }

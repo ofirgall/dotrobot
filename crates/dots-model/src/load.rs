@@ -43,16 +43,15 @@ pub(crate) struct Loaded<T> {
     pub escape_hatch: Vec<String>,
     /// Key path to `(line, col)`.
     pub spans: crate::spans::Spans,
+    /// Every `[platform."<key>"]` key in the file.
+    pub platform_keys: Vec<crate::effective::PlatformKeyRef>,
 }
 
-/// Parse `src`, require a supported `schema = 1`, validate against `ty`, then deserialize.
-/// Every problem is appended to `diags`; `None` means the file is unusable.
-pub(crate) fn load_typed<T: DeserializeOwned>(
-    src: &SourceFile,
-    ty: &Ty,
-    check_paths: bool,
+/// Parse `src` and require a supported `schema = 1`. Problems go to `diags`.
+pub(crate) fn parse_schema1<'a>(
+    src: &'a SourceFile,
     diags: &mut Diags,
-) -> Option<Loaded<T>> {
+) -> Option<Document<&'a str>> {
     let doc = match Document::parse(src.text.as_str()) {
         Ok(d) => d,
         Err(e) => {
@@ -119,10 +118,24 @@ pub(crate) fn load_typed<T: DeserializeOwned>(
             Some(_) => {}
         },
     }
+    Some(doc)
+}
+
+/// Parse `src`, require a supported `schema = 1`, validate against `ty`, then deserialize.
+/// Every problem is appended to `diags`; `None` means the file is unusable.
+pub(crate) fn load_typed<T: DeserializeOwned>(
+    src: &SourceFile,
+    ty: &Ty,
+    check_paths: bool,
+    diags: &mut Diags,
+) -> Option<Loaded<T>> {
+    let doc = parse_schema1(src, diags)?;
+    let root: &Item = doc.as_item();
 
     let env = Env {
         src,
         check_paths,
+        partial: false,
         provider_ty: defs::provider_ty,
     };
     let mut state = State::default();
@@ -138,6 +151,7 @@ pub(crate) fn load_typed<T: DeserializeOwned>(
             value,
             escape_hatch: state.escape_hatch,
             spans: crate::spans::collect(src, root),
+            platform_keys: crate::effective::platform_refs(src, &state.platform_keys),
         }),
         Err(e) => {
             diags.report(

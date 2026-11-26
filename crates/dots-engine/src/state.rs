@@ -45,6 +45,13 @@ pub struct State {
     pub files: BTreeMap<String, OwnedFile>,
     #[serde(default)]
     pub todos: Vec<Todo>,
+    /// Hooks (`<pkg>:<event>`) whose last run failed: they run again next time even though
+    /// their trigger no longer changed.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub hooks_failed: std::collections::BTreeSet<String>,
+    /// Provider shims dots created, keyed by path.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub shims: BTreeMap<String, crate::shims::OwnedShim>,
 }
 
 impl Default for State {
@@ -54,6 +61,8 @@ impl Default for State {
             packages: BTreeMap::new(),
             files: BTreeMap::new(),
             todos: Vec::new(),
+            hooks_failed: Default::default(),
+            shims: BTreeMap::new(),
         }
     }
 }

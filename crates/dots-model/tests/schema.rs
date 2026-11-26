@@ -213,6 +213,28 @@ fn enum_values_are_checked() {
     assert!(e.errors[0].hint.contains("`render`"));
 }
 
+/// A directory under `packages/` without `package.toml` is a lint warning and is skipped; it
+/// must not fail the load (spec repo-schema; it broke every command).
+#[test]
+fn directory_without_manifest_is_a_warning_not_an_error() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("dots.toml"), "schema = 1\n").unwrap();
+    std::fs::create_dir_all(dir.path().join("packages/placeholder")).unwrap();
+    let ok = dir.path().join("packages/ok");
+    std::fs::create_dir_all(&ok).unwrap();
+    std::fs::write(ok.join("package.toml"), "schema = 1\nname = \"ok\"\n").unwrap();
+    let loaded = Repo::load(dir.path()).expect("loads despite the bare directory");
+    assert!(loaded.value.packages.contains_key("ok"));
+    assert!(!loaded.value.packages.contains_key("placeholder"));
+    let w: Vec<_> = loaded
+        .warnings
+        .iter()
+        .filter(|d| d.code == "package-missing-manifest")
+        .collect();
+    assert_eq!(w.len(), 1, "{:?}", loaded.warnings);
+    assert!(w[0].message.contains("packages/placeholder/package.toml"));
+}
+
 // ---------------------------------------------------------------- machines
 
 #[test]

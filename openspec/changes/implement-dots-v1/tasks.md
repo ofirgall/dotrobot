@@ -51,21 +51,21 @@
 
 ## 5. v0.2: customize
 
-- [ ] 5.1 Implement platform tables on every supported object, with merge-before-`when`. Verify the release-specific-override, unknown-platform and platform-changes-existence scenarios.
-- [ ] 5.2 Implement settings (declarations, types, validation, the 6-scope precedence, secrets and required-blocks-render). Verify every `package-settings` scenario except `questions`.
-- [ ] 5.3 Implement the `dots config` subcommands and `dots questions`, with stable JSON. Verify the explain and accept-defaults scenarios, and that `questions --json` passes schema validation.
-- [ ] 5.4 Implement directives (`dots:if`/`elif`/`else`/`end`, `dots:if!`, `dots:include`, `@dots()@` with filters) and `[[files.set]]` structured patches. Verify the inline-setting, unknown-name and delete-by-condition scenarios.
-- [ ] 5.5 Implement fragments, with collision lint. Verify the gitconfig-composition scenario.
-- [ ] 5.6 Implement overrides: addresses, the grammar, three locations, the precedence order and the identity-field guard. Verify the edit-a-bundle's-list, identity-field and machine-only-tweak scenarios.
-- [ ] 5.7 Implement `show --effective` with provenance, the `override list`/`edit`/`diff` commands, the status customization marker, and stale and redundant override lint. Verify the annotated-output, scaffold, overridden-package and renamed-target scenarios.
-- [ ] 5.8 Implement the version grammar, constraint intersection with provenance errors, and constraint-aware provider selection. Verify the invalid-spec, prefix-and-floor, conflict-with-provenance, provider-cannot-satisfy and override-cannot-loosen scenarios.
-- [ ] 5.9 Implement `dots.lock` (format, platform keying, the lock-vs-spec rules, no implicit downgrades), `upgrade`, `pin`/`unpin` and `lock --fix`. Verify every `lockfile` scenario.
-- [ ] 5.10 Implement `dots adopt` (`--layer`, `--machine`, 3-way merge for text). Verify the adopt-into-machine-scope scenario.
-- [ ] 5.11 Implement `dots migrate` and orphan/unmanaged classification. Verify the brew-dependency-is-not-an-orphan scenario. Run the v0.2 README blocks as golden tests.
-- [ ] 5.12 Implement apt repositories (`repo` as PPA or url with key and fingerprint, optional `pin`, owned keyring, sources and preferences files, reference-counted removal, one `apt-get update` on change), cargo/uv `path` and `git` sources with `git_fetch_with_cli`, and script `fetch` with the unpinned `curl | sh` lint warning. Verify the PPA-installs-after-one-apt-get-update, fingerprint-mismatch-refuses, repository-removed-with-its-last-package, local-crate-goes-outdated, pinned-installer-runs and unpinned-curl-pipe-sh scenarios.
-- [ ] 5.13 Implement the `terminfo` file mode (`tic -x -o ~/.terminfo`, `infocmp -x` check). Verify the compile-on-apply, already-installed and source-changed scenarios.
-- [ ] 5.14 Implement `system-settings` (`[[defaults]]`, `[[registry]]`, `[[xdg]]`): batched read-before-write, drift and adopt, original-value ledger and restore, aggregated restarts, root entries in the single sudo prompt, and the Settings step in the pipeline order. Verify every `system-settings` scenario with fake `defaults`, registry and `xdg-mime` backends.
-- [ ] 5.15 Implement `services` (`[service]`: manager auto-selection, enabled and running, restart once on config change, status with one call per manager) and the Services pipeline step. Verify every `services` scenario and the `reconcile-engine` service-after-its-config scenario.
+- [x] 5.1 Implement platform tables on every supported object, with merge-before-`when`. Verify the release-specific-override, unknown-platform and platform-changes-existence scenarios.
+- [x] 5.2 Implement settings (declarations, types, validation, the 6-scope precedence, secrets and required-blocks-render). Verify every `package-settings` scenario except `questions`.
+- [x] 5.3 Implement the `dots config` subcommands and `dots questions`, with stable JSON. Verify the explain and accept-defaults scenarios, and that `questions --json` passes schema validation.
+- [x] 5.4 Implement directives (`dots:if`/`elif`/`else`/`end`, `dots:if!`, `dots:include`, `@dots()@` with filters) and `[[files.set]]` structured patches. Verify the inline-setting, unknown-name and delete-by-condition scenarios.
+- [x] 5.5 Implement fragments, with collision lint. Verify the gitconfig-composition scenario.
+- [x] 5.6 Implement overrides: addresses, the grammar, three locations, the precedence order and the identity-field guard. Verify the edit-a-bundle's-list, identity-field and machine-only-tweak scenarios.
+- [x] 5.7 Implement `show --effective` with provenance, the `override list`/`edit`/`diff` commands, the status customization marker, and stale and redundant override lint. Verify the annotated-output, scaffold, overridden-package and renamed-target scenarios.
+- [x] 5.8 Implement the version grammar, constraint intersection with provenance errors, and constraint-aware provider selection. Verify the invalid-spec, prefix-and-floor, conflict-with-provenance, provider-cannot-satisfy and override-cannot-loosen scenarios.
+- [x] 5.9 Implement `dots.lock` (format, platform keying, the lock-vs-spec rules, no implicit downgrades), `upgrade`, `pin`/`unpin` and `lock --fix`. Verify every `lockfile` scenario.
+- [x] 5.10 Implement `dots adopt` (`--layer`, `--machine`, 3-way merge for text). Verify the adopt-into-machine-scope scenario.
+- [x] 5.11 Implement `dots migrate` and orphan/unmanaged classification. Verify the brew-dependency-is-not-an-orphan scenario. Run the v0.2 README blocks as golden tests.
+- [x] 5.12 Implement apt repositories (`repo` as PPA or url with key and fingerprint, optional `pin`, owned keyring, sources and preferences files, reference-counted removal, one `apt-get update` on change), cargo/uv `path` and `git` sources with `git_fetch_with_cli`, and script `fetch` with the unpinned `curl | sh` lint warning. Verify the PPA-installs-after-one-apt-get-update, fingerprint-mismatch-refuses, repository-removed-with-its-last-package, local-crate-goes-outdated, pinned-installer-runs and unpinned-curl-pipe-sh scenarios.
+- [x] 5.13 Implement the `terminfo` file mode (`tic -x -o ~/.terminfo`, `infocmp -x` check). Verify the compile-on-apply, already-installed and source-changed scenarios.
+- [x] 5.14 Implement `system-settings` (`[[defaults]]`, `[[registry]]`, `[[xdg]]`): batched read-before-write, drift and adopt, original-value ledger and restore, aggregated restarts, root entries in the single sudo prompt, and the Settings step in the pipeline order. Verify every `system-settings` scenario with fake `defaults`, registry and `xdg-mime` backends.
+- [x] 5.15 Implement `services` (`[service]`: manager auto-selection, enabled and running, restart once on config change, status with one call per manager) and the Services pipeline step. Verify every `services` scenario and the `reconcile-engine` service-after-its-config scenario.
 
 ## 6. v0.3: share, integrity, history
 

@@ -6,7 +6,9 @@ const STRS: Ty = Ty::List(&Ty::Str);
 const STR_OR_PLATFORM_MAP: Ty = Ty::Alt(&[Ty::Str, Ty::Map(&Ty::Str)]);
 const SETTING_VALUES: Ty = Ty::Map(&Ty::Map(&Ty::Any));
 
-const FILE_MODES: &[&str] = &["link", "copy", "render", "inject", "fragment", "git", "dir"];
+const FILE_MODES: &[&str] = &[
+    "link", "copy", "render", "inject", "fragment", "git", "dir", "terminfo",
+];
 const FORMATS: &[&str] = &[
     "toml",
     "json",
@@ -39,17 +41,34 @@ macro_rules! provider {
 }
 
 const BREW: Ty = provider!(("cask", Ty::Bool), ("tap", Ty::Str));
-const APT: Ty = provider!(("ppa", Ty::Str));
+const APT_REPO: Ty = Ty::Table(&[
+    ("ppa", Ty::Str),
+    ("url", Ty::Str),
+    ("suite", Ty::Str),
+    ("components", STRS),
+    ("flat", Ty::Bool),
+    ("key", Ty::Str),
+    ("fingerprint", Ty::Str),
+]);
+const APT_PIN: Ty = Ty::Table(&[("origin", Ty::Str), ("priority", Ty::Int)]);
+const APT: Ty = provider!(("ppa", Ty::Str), ("repo", APT_REPO), ("pin", APT_PIN));
 const CARGO: Ty = provider!(
     ("locked", Ty::Bool),
     ("git", Ty::Str),
     ("rev", Ty::Str),
-    ("features", STRS)
+    ("features", STRS),
+    ("path", Ty::Path),
+    ("git_fetch_with_cli", Ty::Bool)
 );
 const UV: Ty = provider!(
     ("kind", Ty::Str),
     ("python", Ty::Str),
-    ("requirements", Ty::Path)
+    ("requirements", Ty::Path),
+    ("path", Ty::Path),
+    ("git", Ty::Str),
+    ("rev", Ty::Str),
+    ("git_fetch_with_cli", Ty::Bool),
+    ("break_system_packages", Ty::Bool)
 );
 const NPM: Ty = provider!();
 const GIT: Ty = provider!(("url", Ty::Str), ("rev", Ty::Str));
@@ -70,7 +89,9 @@ const SCRIPT: Ty = provider!(
     ("needs_root", Ty::Bool),
     ("interactive", Ty::Bool),
     ("versionless", Ty::Bool),
-    ("timeout", Ty::Str)
+    ("timeout", Ty::Str),
+    ("lock", Ty::Str),
+    ("fetch", Ty::Table(&[("url", Ty::Str), ("sha256", Ty::Str)]))
 );
 const PLAIN: Ty = provider!(("id", Ty::Str));
 const BROWSER_EXT: Ty = provider!(
@@ -150,6 +171,7 @@ const FILE_ENTRY: Ty = Ty::Obj(&[
     ("format", Ty::Enum(FORMATS)),
     ("kind", Ty::Str),
     ("template", Ty::Str),
+    ("comment", Ty::Str),
     ("when", Ty::Str),
     ("url", Ty::Str),
     ("rev", Ty::Str),
@@ -166,9 +188,55 @@ const FILE_ENTRY: Ty = Ty::Obj(&[
     ("merge", Ty::Map(&Ty::Any)),
 ]);
 
+const DEFAULTS_ENTRY: Ty = Ty::Table(&[
+    ("domain", Ty::Str),
+    ("key", Ty::Str),
+    ("value", Ty::Any),
+    ("restart", STRS),
+    ("root", Ty::Bool),
+    ("requires", STRS),
+]);
+
+const REG_TYPES: &[&str] = &[
+    "REG_SZ",
+    "REG_EXPAND_SZ",
+    "REG_MULTI_SZ",
+    "REG_DWORD",
+    "REG_QWORD",
+    "REG_BINARY",
+];
+
+const REGISTRY_ENTRY: Ty = Ty::Table(&[
+    ("key", Ty::Str),
+    ("name", Ty::Str),
+    ("type", Ty::Enum(REG_TYPES)),
+    ("value", Ty::Any),
+]);
+
+const XDG_ENTRY: Ty = Ty::Table(&[
+    ("mime", STRS),
+    ("app", Ty::Str),
+    ("setting", Ty::Str),
+    ("value", Ty::Str),
+]);
+
+const SERVICE_MANAGERS: &[&str] = &["auto", "brew", "launchd", "systemd-user", "windows-startup"];
+
+const SERVICE: Ty = Ty::Table(&[
+    ("name", Ty::Str),
+    ("manager", Ty::Enum(SERVICE_MANAGERS)),
+    ("enabled", Ty::Bool),
+    ("running", Ty::Bool),
+    ("unit", Ty::Path),
+]);
+
 const REQUIRE: Ty = Ty::Alt(&[
     Ty::Str,
-    Ty::Table(&[("name", Ty::Str), ("version", Ty::Str), ("when", Ty::Str)]),
+    Ty::Table(&[
+        ("name", Ty::Str),
+        ("version", Ty::VersionSpec),
+        ("when", Ty::Str),
+    ]),
 ]);
 
 const SETTING_DECL: Ty = Ty::Obj(&[
@@ -192,7 +260,7 @@ pub const PACKAGE: Ty = Ty::Obj(&[
     ("when", Ty::Str),
     ("bin", Ty::Str),
     ("bins", STRS),
-    ("version", Ty::Str),
+    ("version", Ty::VersionSpec),
     ("requires", Ty::List(&REQUIRE)),
     ("after", STRS),
     ("conflicts", STRS),
@@ -201,6 +269,10 @@ pub const PACKAGE: Ty = Ty::Obj(&[
     ("providers_only", Ty::Bool),
     ("providers", Ty::Providers),
     ("files", Ty::List(&FILE_ENTRY)),
+    ("defaults", Ty::List(&DEFAULTS_ENTRY)),
+    ("registry", Ty::List(&REGISTRY_ENTRY)),
+    ("xdg", Ty::List(&XDG_ENTRY)),
+    ("service", SERVICE),
     ("settings", Ty::Map(&SETTING_DECL)),
     (
         "env",

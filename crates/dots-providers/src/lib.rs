@@ -8,13 +8,17 @@ use std::sync::Arc;
 use dots_facts::Facts;
 
 pub mod apt;
+pub mod apt_repo;
 pub mod brew;
 pub mod cargo;
 pub mod custom;
+pub mod fetch;
 pub mod git;
+pub(crate) mod pathsrc;
 mod runner;
 pub mod script;
 pub mod uv;
+pub use fetch::{CurlFetcher, Fetcher};
 pub use runner::{Cmd, DEFAULT_TIMEOUT, Output, RealRunner, Runner, Stdin};
 
 pub type Result<T> = std::result::Result<T, ProviderError>;
@@ -85,6 +89,8 @@ pub struct Ctx {
     pub cache_dir: PathBuf,
     /// `logs/<run-id>/`: `exec` writes `<pkg>.<action>.log` here.
     pub log_dir: PathBuf,
+    /// Downloads (apt keys, script `fetch` files) go through this (default: `curl`).
+    pub fetcher: Arc<dyn Fetcher>,
 }
 
 impl Default for Ctx {
@@ -97,6 +103,7 @@ impl Default for Ctx {
             home: PathBuf::new(),
             cache_dir: PathBuf::new(),
             log_dir: PathBuf::new(),
+            fetcher: Arc::new(CurlFetcher),
         }
     }
 }
@@ -210,6 +217,12 @@ pub trait Provider: Send + Sync {
     fn id(&self) -> &'static str;
     fn caps(&self) -> Caps;
 
+    /// Instances of providers that return the same key never run concurrently (a script
+    /// package's `lock`, for packages that rewrite one shared file). `None`: no restriction.
+    fn lock_key(&self) -> Option<String> {
+        None
+    }
+
     /// Is the backend usable here? Providers find their own binary, not via `PATH`.
     fn availability(&self, facts: &Facts) -> Availability;
 
@@ -229,10 +242,51 @@ pub trait Provider: Send + Sync {
     /// Pure: turn ops into the exact commands, with no side effects.
     fn plan(&self, ops: &[Op]) -> Result<Vec<Action>>;
 
+    /// Like [`Provider::plan`], told which specs of this provider stay wanted after the run
+    /// (the whole desired set, not just this batch). Providers with shared resources (apt
+    /// repositories) use it to drop a resource only with its last user. The default ignores
+    /// `wanted`.
+    fn plan_with_wanted(&self, ops: &[Op], wanted: &[Spec]) -> Result<Vec<Action>> {
+        let _ = wanted;
+        self.plan(ops)
+    }
+
     fn exec(&self, ctx: &Ctx, action: &Action) -> Result<Outcome>;
+
+    /// `spec` is installed and satisfies its version, but something it declares is not set up
+    /// on this machine yet, so it must be upgraded anyway (apt: the `repo` is not configured,
+    /// so the package still comes from the distribution archive). Returns the reason; it is
+    /// shown in the plan. Asked only for installed packages the version rules leave alone, and
+    /// must read local state only. Default: never.
+    fn stale_reason(&self, ctx: &Ctx, spec: &Spec) -> Option<String> {
+        let _ = (ctx, spec);
+        None
+    }
+
+    /// `action` (an install or upgrade of several packages) exited non-zero: the per-package
+    /// actions to run instead, so one bad name fails only itself. `None` (the default): a batch
+    /// failure fails every package in it.
+    fn retry_each(&self, action: &Action) -> Option<Vec<Action>> {
+        let _ = action;
+        None
+    }
+
+    /// Packages other than the ones `action` names that carrying it out would also remove
+    /// (reverse dependencies the package manager would take along), found by simulating it.
+    /// Only meaningful for removals. The default cannot tell and reports none.
+    fn removal_collateral(&self, _ctx: &Ctx, _action: &Action) -> Result<Vec<String>> {
+        Ok(Vec::new())
+    }
 
     /// Executables each installed package put on disk. Batched.
     fn bins(&self, ctx: &Ctx, installed: &BTreeMap<String, Installed>) -> Result<Vec<BinEntry>>;
+
+    /// The installed packages the user asked for, as opposed to the ones the package manager
+    /// pulled in as dependencies (`brew info --installed-on-request`, `apt-mark showmanual`).
+    /// `Ok(None)`: this provider cannot tell, so every install counts as a root.
+    fn roots(&self, _ctx: &Ctx) -> Result<Option<std::collections::BTreeSet<String>>> {
+        Ok(None)
+    }
 
     /// Optional reverse lookup from paths to the owning package.
     fn owner_of(&self, _ctx: &Ctx, _paths: &[PathBuf]) -> Result<BTreeMap<PathBuf, String>> {

@@ -17,8 +17,24 @@ pub fn run(ctx: &Context) -> Report {
                 machine: Some(&rc.m.machine),
                 chain: &rc.chain,
             });
+            // Directives must sit behind the file's comment leader.
+            for pkg in rc.repo.packages.values() {
+                for entry in &pkg.files {
+                    rep.errors.extend(dots_files::lint_layers(&pkg.dir, entry));
+                }
+            }
             let mut warnings = rc.m.warnings.clone();
             warnings.append(&mut rep.warnings);
+            // Overrides whose target is gone, and ones that change nothing.
+            if let Some(info) = &rc.repo.effective {
+                let (stale, redundant) = info.lint();
+                rep.errors.extend(stale);
+                warnings.extend(redundant);
+            }
+            // Package settings: invalid values, conflicting bundles, committed secrets.
+            let settings = crate::config_cmd::settings_for(&rc);
+            rep.errors.extend(settings.errors);
+            warnings.extend(settings.warnings);
             (
                 rep.errors,
                 warnings,

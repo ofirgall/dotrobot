@@ -1,0 +1,9 @@
+schema = 1
+name = "hooked"
+
+[[files]]
+src = "files/rc"
+dst = "~/.hookedrc"
+
+[hooks]
+post_files = 'echo "$DOTS_PKG $DOTS_HOOK" >> "$HOME/hook-ran"'

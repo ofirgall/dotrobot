@@ -1,0 +1,7 @@
+target/
+**/target/
+.git/
+docker/
+.claude/
+openspec/
+readme-versions/

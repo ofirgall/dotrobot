@@ -4,21 +4,34 @@
 //! `file:line:col` and "did you mean" hints) and collects every error instead of stopping at
 //! the first. Entry points: [`Repo::load`] and [`MachineConfig::load`].
 
+mod address;
 mod defs;
+mod effective;
+mod explain;
 mod load;
 mod machine;
+mod merge;
 mod repo;
 mod schema;
+mod setting;
 mod source;
 mod spans;
 mod types;
 pub mod version;
+pub mod vspec;
 
+pub use address::{Address, Found, Sub};
 pub use defs::BUILTIN_PROVIDERS;
+pub use effective::{
+    EffObject, EffectiveInfo, Located, Miss, OverrideFile, OverrideLocation, PlatformKeyRef, Prov,
+    Scope, Source,
+};
+pub use explain::{Change, Origin, RenderLine, Rendered};
 pub use load::SUPPORTED_SCHEMA;
 pub use machine::MachineConfig;
 pub use repo::{LoadErrors, Loaded, Repo};
 pub use schema::escapes_package;
+pub use setting::DeclProblem;
 pub use spans::Spans;
 pub use types::*;
 pub use version::check_requires_dots;

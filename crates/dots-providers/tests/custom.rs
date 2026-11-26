@@ -300,3 +300,51 @@ conformance_test!(custom_go_provider_conforms, {
         .backend(Arc::new(backend));
     (go(), fixture)
 });
+
+/// The resolver calls `availability(facts)` with no context. A provider given a probe
+/// context runs its `available` command (once): `Ready` when it passes, `Bootstrap` when it
+/// fails and the tool comes from another package of the run, and `installed()` is empty (not
+/// an error) until then.
+#[test]
+fn availability_without_a_context_probes_available_once() {
+    let facts = Facts::default();
+    let r = Arc::new(RecordingRunner::new());
+    r.on(&["/bin/sh", "-c", "command -v go"], Output::fail(1, ""));
+    let p = CustomProvider::new(CustomDef::from_json("go", &go_table()).unwrap(), &facts)
+        .with_probe(ctx_with(&r));
+    for _ in 0..3 {
+        assert_eq!(
+            p.availability(&facts),
+            Availability::Bootstrap { pkg: "go".into() },
+            "the tool is installed by the `go` package of this run"
+        );
+    }
+    assert_eq!(
+        r.lines()
+            .iter()
+            .filter(|l| l.ends_with("command -v go"))
+            .count(),
+        1,
+        "probed once: {:?}",
+        r.lines()
+    );
+    // Not there yet: nothing installed, and the listing command is never run.
+    assert!(p.installed(&ctx_with(&r)).unwrap().is_empty());
+    assert!(!r.lines().iter().any(|l| l.contains("ls ~/go/bin")));
+
+    let r = Arc::new(RecordingRunner::new());
+    r.on(
+        &["/bin/sh", "-c", "command -v go"],
+        Output::ok("/usr/local/go/bin/go\n"),
+    );
+    let p = CustomProvider::new(CustomDef::from_json("go", &go_table()).unwrap(), &facts)
+        .with_probe(ctx_with(&r));
+    assert_eq!(
+        p.availability(&facts),
+        Availability::Ready {
+            bin_path: "/usr/local/go/bin/go".into()
+        }
+    );
+    // Without a probe context nothing is guessed: only the facts count.
+    assert_eq!(go().availability(&facts), Availability::Unsupported);
+}

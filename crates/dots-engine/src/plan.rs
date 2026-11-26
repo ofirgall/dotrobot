@@ -6,10 +6,16 @@ use std::path::Path;
 use dots_core::{Diagnostic, Dirs};
 use dots_model::{ProviderConfig, Repo};
 use dots_providers::{Action, Ctx, Op, OpKind, Registry};
-use dots_resolve::{EdgeKind, InstalledMap, Resolution, spec_for};
+use dots_resolve::{EdgeKind, InstalledMap, Resolution, spec_for_in};
 
 use crate::files::{FileStep, FilesPhase, FilesRequest};
-use crate::version::{Change, Wanted, diff, parse_wanted};
+use crate::hooks::{self, HookStep, HooksPhase};
+use crate::locks::{LockInputs, LockStep};
+use crate::phases::{
+    ServiceStep, ServicesPhase, ServicesRequest, SettingStep, SettingsPhase, SettingsRequest,
+};
+use crate::shims::{self, ShimStep};
+use dots_lock::rules::{self, Exact, Facts, Kind, Locked};
 
 /// Which part of the resolved set to act on.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -27,6 +33,10 @@ pub struct Inputs<'a> {
     pub registry: &'a Registry,
     pub installed: &'a InstalledMap,
     pub files: &'a dyn FilesPhase,
+    pub settings: &'a dyn SettingsPhase,
+    pub services: &'a dyn ServicesPhase,
+    /// How `[hooks]` commands run.
+    pub hooks: &'a dyn HooksPhase,
     /// Provider context: the sandboxed home, environment and runner.
     pub ctx: &'a Ctx,
     pub dirs: &'a Dirs,
@@ -34,6 +44,9 @@ pub struct Inputs<'a> {
     /// Packages whose scripts come from a source the user has not reviewed. Their install
     /// always asks, even under `--yes`.
     pub unreviewed: &'a BTreeSet<String>,
+    /// The lock and what providers offer. `None` plans without a lock (every version spec is
+    /// still honoured).
+    pub locks: Option<&'a LockInputs<'a>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,6 +82,8 @@ pub struct PkgStep {
     pub bootstrap: bool,
     /// Why this step must always be confirmed, even with `--yes`.
     pub always_confirm: Option<String>,
+    /// Why an otherwise unneeded upgrade is planned (the provider's `stale_reason`).
+    pub note: Option<String>,
     /// Packages (with steps) that must finish first.
     pub deps: Vec<String>,
     /// Index of the batch carrying this step.
@@ -93,21 +108,41 @@ pub struct Plan {
     pub steps: Vec<PkgStep>,
     pub batches: Vec<Batch>,
     pub files: Vec<FileStep>,
+    /// System setting changes (after files).
+    pub settings: Vec<SettingStep>,
+    /// Service actions (after settings, before hooks).
+    pub services: Vec<ServiceStep>,
+    /// Provider shims to create, repair or remove (after the installs, before files).
+    pub shims: Vec<ShimStep>,
+    /// Package hooks that will run, in the order they fire per package (last in the pipeline,
+    /// after services; `pre_*` ones just before the action they precede).
+    pub hooks: Vec<HookStep>,
     /// Selected active packages (those whose files are in scope).
     pub packages: Vec<String>,
     /// Packages left out because no provider could install them, with the reason.
     pub unplanned: Vec<(String, String)>,
+    /// Lock rows that change or are recorded, and drift notes. Bookkeeping: it does not make
+    /// an otherwise empty plan non-empty.
+    pub lock: Vec<LockStep>,
 }
 
 impl Plan {
     pub fn is_empty(&self) -> bool {
-        self.steps.is_empty() && self.files.is_empty()
+        self.steps.is_empty()
+            && self.files.is_empty()
+            && self.settings.is_empty()
+            && self.services.is_empty()
+            && self.shims.is_empty()
+            && self.hooks.is_empty()
     }
 
+    /// Does anything need root: a provider action, or a `root = true` setting? One sudo prompt
+    /// covers all of it.
     pub fn needs_root(&self) -> bool {
         self.batches
             .iter()
             .any(|b| b.actions.iter().any(|a| a.needs_root))
+            || self.settings.iter().any(|s| s.root)
     }
 
     pub fn step(&self, package: &str) -> Option<&PkgStep> {
@@ -130,12 +165,23 @@ impl Plan {
                 out.push(r.clone());
             }
         }
+        for h in &self.hooks {
+            if let Some(r) = &h.always_confirm {
+                out.push(r.clone());
+            }
+        }
         out
     }
 
     /// Does the plan do more than refresh files dots already owns?
     pub fn touches_more_than_owned_files(&self) -> bool {
-        !self.steps.is_empty() || self.files.iter().any(|f| !f.owned)
+        !self.steps.is_empty()
+            || !self.settings.is_empty()
+            || !self.services.is_empty()
+            || !self.shims.is_empty()
+            // A hook is code: it is always shown and confirmed.
+            || !self.hooks.is_empty()
+            || self.files.iter().any(|f| !f.owned)
     }
 }
 
@@ -235,6 +281,7 @@ pub fn plan(inp: &Inputs<'_>, run_id: &str) -> Result<Plan, Vec<Diagnostic>> {
 
     if !inp.scope.files_only {
         plan_packages(inp, &selected, &mut plan)?;
+        plan.shims = plan_shims(inp, &plan);
     }
     if !inp.scope.packages_only {
         let req = FilesRequest {
@@ -251,7 +298,141 @@ pub fn plan(inp: &Inputs<'_>, run_id: &str) -> Result<Plan, Vec<Diagnostic>> {
             )]
         })?;
     }
+    if !inp.scope.packages_only && !inp.scope.files_only {
+        let sreq = SettingsRequest {
+            run_id,
+            packages: &plan.packages,
+            home: &inp.dirs.home,
+            state_dir: &inp.dirs.state,
+            dry_run: true,
+            full: inp.scope.targets.is_empty(),
+            sudo: false,
+        };
+        plan.settings = inp
+            .settings
+            .plan(&sreq)
+            .map_err(|e| vec![e.into_diagnostic("settings")])?;
+        // A service restarts when its package's config (or unit) changes in this run.
+        let changed: Vec<String> = plan
+            .files
+            .iter()
+            .map(|f| f.package.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let vreq = ServicesRequest {
+            run_id,
+            packages: &plan.packages,
+            home: &inp.dirs.home,
+            state_dir: &inp.dirs.state,
+            dry_run: true,
+            changed: &changed,
+            teardown: false,
+        };
+        plan.services = inp
+            .services
+            .plan(&vreq)
+            .map_err(|e| vec![e.into_diagnostic("services")])?;
+    }
+    plan.hooks = plan_hooks(inp, &plan);
     Ok(plan)
+}
+
+/// Shim steps: see the `shims` module.
+fn plan_shims(inp: &Inputs<'_>, plan: &Plan) -> Vec<ShimStep> {
+    let (state, _) = crate::state::State::load(&inp.dirs.state_json());
+    let installing: BTreeSet<String> = plan.steps.iter().map(|s| s.package.clone()).collect();
+    let installed: BTreeSet<String> = plan
+        .packages
+        .iter()
+        .filter(|n| {
+            inp.resolution
+                .get(n)
+                .and_then(|p| p.chosen_provider())
+                .is_some_and(|c| {
+                    inp.installed
+                        .get(&c.id)
+                        .is_some_and(|m| m.contains_key(&c.native_name))
+                })
+        })
+        .cloned()
+        .collect();
+    let path_var = inp
+        .ctx
+        .env
+        .get("PATH")
+        .cloned()
+        .or_else(|| std::env::var("PATH").ok())
+        .unwrap_or_default();
+    shims::plan(&shims::ShimInputs {
+        repo: inp.repo,
+        resolution: inp.resolution,
+        packages: &plan.packages,
+        installing: &installing,
+        installed: &installed,
+        ledger: &state.shims,
+        full: inp.scope.targets.is_empty(),
+        home: &inp.dirs.home,
+        path_var: &path_var,
+    })
+}
+
+/// The hooks that fire in this run (see the `hooks` module): per package in plan order, those
+/// whose trigger changed, plus any that failed last time.
+fn plan_hooks(inp: &Inputs<'_>, plan: &Plan) -> Vec<HookStep> {
+    let (state, _) = crate::state::State::load(&inp.dirs.state_json());
+    let mut out = Vec::new();
+    for name in &plan.packages {
+        let Some(pkg) = inp.repo.packages.get(name) else {
+            continue;
+        };
+        let h = &pkg.hooks;
+        let installs = plan.steps.iter().any(|s| s.package == *name);
+        let files = plan.files.iter().any(|f| f.package == *name);
+        for event in hooks::EVENTS {
+            let Some(command) = (match event {
+                "pre_install" => &h.pre_install,
+                "post_install" => &h.post_install,
+                "pre_files" => &h.pre_files,
+                _ => &h.post_files,
+            }) else {
+                continue;
+            };
+            let in_scope = if hooks::is_install_event(event) {
+                !inp.scope.files_only
+            } else {
+                !inp.scope.packages_only
+            };
+            let changed = if hooks::is_install_event(event) {
+                installs
+            } else {
+                files
+            };
+            let failed = state.hooks_failed.contains(&format!("{name}:{event}"));
+            if !in_scope || !(changed || failed) {
+                continue;
+            }
+            out.push(HookStep {
+                package: name.clone(),
+                event: event.to_string(),
+                command: command.clone(),
+                pkg_dir: pkg.dir.clone(),
+                why: if changed {
+                    if hooks::is_install_event(event) {
+                        "package installs".into()
+                    } else {
+                        "files change".into()
+                    }
+                } else {
+                    "failed last run".into()
+                },
+                always_confirm: inp.unreviewed.contains(name).then(|| {
+                    format!("`{name}` runs a `{event}` hook from a source you have not reviewed")
+                }),
+            });
+        }
+    }
+    out
 }
 
 struct Draft {
@@ -265,6 +446,7 @@ fn plan_packages(
     plan: &mut Plan,
 ) -> Result<(), Vec<Diagnostic>> {
     let selected_set: BTreeSet<&str> = selected.iter().map(String::as_str).collect();
+    let (owned, _) = crate::state::State::load(&inp.dirs.state_json());
     let bootstrap_targets: BTreeSet<&str> = inp
         .resolution
         .edges
@@ -297,20 +479,109 @@ fn plan_packages(
             .installed
             .get(&choice.id)
             .and_then(|m| m.get(&choice.native_name));
-        let wanted: Wanted = parse_wanted(pkg.and_then(|p| p.version.as_deref()));
-        let change = diff(&wanted, installed.map(|i| i.version.as_str()));
-        let (kind, op_kind, version) = match change {
-            Change::None => continue,
-            Change::Install(v) => (StepKind::Install, OpKind::Install, v),
-            Change::Upgrade(v) => (StepKind::Upgrade, OpKind::Upgrade, v),
-            Change::Downgrade(v) => (StepKind::Downgrade, OpKind::Install, Some(v)),
+        let spec = spec_for_in(&choice.native_name, cfg, pkg.map(|p| p.dir.as_path()));
+        let exact = inp
+            .registry
+            .get_for(&choice.id, name)
+            .map_or(Exact::Limited, |p| match p.caps().exact_version {
+                dots_providers::Support::Yes => Exact::Yes,
+                dots_providers::Support::Limited => Exact::Limited,
+                dots_providers::Support::No => Exact::No,
+            });
+        let platform = dots_lock::platform_for(&choice.id, inp.locks.map_or("", |l| l.machine_key));
+        let row = inp.locks.and_then(|l| l.lock.pkg(name, &platform));
+        let locked: Option<Locked<'_>> = row.map(Locked::from);
+        let installed_v = installed.map(|i| i.version.as_str());
+        let offered = inp.locks.and_then(|l| {
+            let wanted_range = pr.wanted.is_range();
+            ((wanted_range || (locked.is_some() && exact != Exact::Yes))
+                && !l.upgrade.contains_key(name))
+            .then(|| {
+                l.offers
+                    .offered(&choice.id, name, &choice.native_name, &spec)
+            })
+            .flatten()
+        });
+        let decision = match inp.locks.and_then(|l| l.upgrade.get(name)) {
+            Some(t) => rules::Decision {
+                step: Some(rules::Step {
+                    kind: if installed_v.is_some() {
+                        Kind::Upgrade
+                    } else {
+                        Kind::Install
+                    },
+                    version: t.version.clone(),
+                }),
+                rewrite: true,
+                expected: t.to.clone(),
+                ..Default::default()
+            },
+            None => rules::decide(&Facts {
+                spec: &pr.wanted,
+                locked,
+                installed: installed_v,
+                installed_rev: installed.and_then(|i| i.source.as_deref()),
+                owned: owned
+                    .packages
+                    .get(name)
+                    .is_some_and(|o| o.provider == choice.id),
+                offered: offered.as_deref(),
+                exact,
+            }),
         };
+        if decision.rewrite || decision.adopt || decision.drift.is_some() {
+            plan.lock.push(LockStep {
+                package: name.clone(),
+                provider: choice.id.clone(),
+                native: choice.native_name.clone(),
+                platform: platform.clone(),
+                from: row.map(|r| r.shown()),
+                to: decision.expected.clone(),
+                rewrite: decision.rewrite,
+                adopt: decision.adopt,
+                drift: decision.drift.clone(),
+                has_step: decision.step.is_some(),
+                installed: installed.map(|i| i.version.clone()),
+                installed_source: installed.and_then(|i| i.source.clone()),
+                spec: Some(spec.clone()),
+                git_ref: match &pr.wanted {
+                    dots_model::vspec::Spec::Git(r) => Some(r.clone()),
+                    _ => None,
+                },
+            });
+        }
+        // Installed and fine by the version rules, but the provider says something it declares
+        // is missing on this machine (an apt repository): upgrade from there.
+        let mut note = None;
+        let decided = match decision.step {
+            Some(step) => Some(step),
+            None if installed.is_some() => inp
+                .registry
+                .get_for(&choice.id, name)
+                .and_then(|p| p.stale_reason(inp.ctx, &spec))
+                .map(|reason| {
+                    note = Some(reason);
+                    rules::Step {
+                        kind: Kind::Upgrade,
+                        version: None,
+                    }
+                }),
+            None => None,
+        };
+        let Some(step) = decided else { continue };
+        // A package built from a git or local source takes its version from the source.
+        let source_bound = spec.opts.contains_key("git") || spec.opts.contains_key("path");
+        let (kind, op_kind, version) = match step.kind {
+            Kind::Install => (StepKind::Install, OpKind::Install, step.version),
+            Kind::Upgrade => (StepKind::Upgrade, OpKind::Upgrade, step.version),
+            Kind::Downgrade => (StepKind::Downgrade, OpKind::Install, step.version),
+        };
+        let version = if source_bound { None } else { version };
         let needs_root_cfg = matches!(cfg, Some(ProviderConfig::Script(s)) if s.needs_root);
         let interactive = matches!(cfg, Some(ProviderConfig::Script(s)) if s.interactive);
         let is_script = choice.id == "script";
         let always_confirm = (is_script && inp.unreviewed.contains(name))
             .then(|| format!("`{name}` runs a script from a source you have not reviewed"));
-        let spec = spec_for(&choice.native_name, cfg);
         let op = Op {
             kind: op_kind,
             spec,
@@ -330,6 +601,7 @@ fn plan_packages(
                     interactive,
                     bootstrap: bootstrap_targets.contains(name.as_str()),
                     always_confirm,
+                    note,
                     deps: Vec::new(),
                     batch: 0,
                 },
@@ -410,12 +682,16 @@ fn plan_packages(
             .get_for(provider, pkgs.first().map_or("", String::as_str));
         let ops: Vec<Op> = pkgs.iter().map(|p| drafts[p].op.clone()).collect();
         let actions = match provider_impl {
-            Some(p) => p.plan(&ops).map_err(|e| {
-                vec![Diagnostic::from_code(
-                    "plan-failed",
-                    &[("package", &pkgs.join(", ")), ("detail", &e.to_string())],
-                )]
-            })?,
+            // The whole desired set of this provider, not just this batch: a provider with a
+            // shared resource (an apt repository) drops it only with its last user.
+            Some(p) => p
+                .plan_with_wanted(&ops, &wanted_specs(inp, provider))
+                .map_err(|e| {
+                    vec![Diagnostic::from_code(
+                        "plan-failed",
+                        &[("package", &pkgs.join(", ")), ("detail", &e.to_string())],
+                    )]
+                })?,
             None => {
                 return Err(vec![Diagnostic::from_code(
                     "provider-unavailable",
@@ -470,6 +746,26 @@ fn plan_packages(
     // Bootstraps lead, otherwise keep resolution order (stable).
     plan.steps.sort_by_key(|s| !s.bootstrap);
     Ok(())
+}
+
+/// Every spec of `provider`'s packages that stays desired after this run: all active packages
+/// of the resolution that chose it, whether or not they are part of this run's batches.
+fn wanted_specs(inp: &Inputs<'_>, provider: &str) -> Vec<dots_providers::Spec> {
+    inp.resolution
+        .order
+        .iter()
+        .filter_map(|name| {
+            let pr = inp.resolution.get(name).filter(|p| p.is_active())?;
+            let choice = pr.chosen_provider().filter(|c| c.id == provider)?;
+            let pkg = inp.repo.packages.get(name);
+            let cfg = pkg.and_then(|p| p.providers.get(&choice.id));
+            Some(spec_for_in(
+                &choice.native_name,
+                cfg,
+                pkg.map(|p| p.dir.as_path()),
+            ))
+        })
+        .collect()
 }
 
 /// Relative path of `p` under `base` (for journal logs), or `p` itself.

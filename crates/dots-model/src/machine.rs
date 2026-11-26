@@ -24,6 +24,10 @@ pub struct MachineConfig {
     pub platform_extra: Vec<String>,
     pub facts: BTreeMap<String, Value>,
     pub settings: SettingValues,
+    /// `[settings]` of the committed profile alone (scope 5 of the settings precedence).
+    pub profile_settings: SettingValues,
+    /// `[settings]` of the local `machine.toml` alone (scope 6).
+    pub local_settings: SettingValues,
     /// The profile file that was applied.
     pub profile_path: Option<PathBuf>,
 }
@@ -75,9 +79,11 @@ impl MachineConfig {
         };
         if let Some(p) = &profile_file {
             cfg.overlay(p);
+            cfg.profile_settings = p.settings.clone();
         }
         if let Some(l) = &local {
             cfg.overlay(l);
+            cfg.local_settings = l.settings.clone();
         }
         Ok(Loaded {
             value: cfg,

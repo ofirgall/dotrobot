@@ -8,6 +8,10 @@
 //! * [`apply`] performs one step; [`status`] reports drift; [`plan_removals`] covers owned
 //!   paths that are no longer desired; [`restore`] puts backups back.
 
+mod adopt;
+mod diff3;
+mod directives;
+mod fragments;
 mod fsops;
 mod ledger;
 mod merge;
@@ -17,19 +21,29 @@ mod pathvars;
 mod render;
 mod resolve;
 mod restore;
+mod scope;
+mod set;
 mod status;
 mod structured;
+pub mod terminfo;
 
-pub use fsops::{Stage, atomic_symlink, atomic_write, atomic_write_hooked, sha256_hex};
+pub use adopt::{AdoptOpts, Adopted, adopt};
+pub use diff3::{Conflict, Merged, merge3};
+pub use directives::lint_layers;
+pub use fragments::{FRAGMENT_OWNER, FragmentSource, compose_fragments, lint_collisions};
+pub use fsops::{
+    Stage, atomic_symlink, atomic_write, atomic_write_follow, atomic_write_hooked, resolve_link,
+    sha256_hex,
+};
 pub use ledger::{Ledger, Record};
 pub use merge::{DELETE_MARKER, Node, Strategy};
 pub use model::{
-    Action, BackupKind, FileOutcome, FileState, FileStatus, FileStep, FilesCtx, LayerSrc, Mode,
-    OutcomeStatus, Resolution, ResolvedFile, SettingUse,
+    Action, BackupKind, CondEnv, Extras, FileOutcome, FileState, FileStatus, FileStep, FilesCtx,
+    LayerSrc, Mode, OutcomeStatus, Resolution, ResolvedFile, SetPatch, SettingUse,
 };
 pub use ops::{apply, plan, plan_removals};
 pub use pathvars::{expand_path, pick_platform, resolve_path_vars};
 pub use render::render_layers;
-pub use resolve::resolve_entry;
+pub use resolve::{detect_format, entry_dst, infer_comment, override_layer_rel, resolve_entry};
 pub use restore::{RestoreReport, list_runs, restore};
 pub use status::status;

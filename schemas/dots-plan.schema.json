@@ -96,6 +96,224 @@
           },
           "type": "array"
         },
+        "hooks": {
+          "items": {
+            "properties": {
+              "command": {
+                "type": "string"
+              },
+              "event": {
+                "enum": [
+                  "pre_install",
+                  "post_install",
+                  "pre_files",
+                  "post_files"
+                ]
+              },
+              "package": {
+                "type": "string"
+              },
+              "why": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "package",
+              "event",
+              "command",
+              "why"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "lock": {
+          "description": "dots.lock rows that change or drift (present only when there are any)",
+          "items": {
+            "properties": {
+              "drift": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "from": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "package": {
+                "type": "string"
+              },
+              "platform": {
+                "type": "string"
+              },
+              "provider": {
+                "type": "string"
+              },
+              "rewrite": {
+                "type": "boolean"
+              },
+              "to": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "package",
+              "provider",
+              "platform",
+              "from",
+              "to",
+              "rewrite",
+              "drift"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "services": {
+          "items": {
+            "properties": {
+              "action": {
+                "type": "string"
+              },
+              "commands": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "detail": {
+                "type": "string"
+              },
+              "manager": {
+                "enum": [
+                  "brew",
+                  "launchd",
+                  "systemd-user",
+                  "windows-startup"
+                ]
+              },
+              "name": {
+                "type": "string"
+              },
+              "package": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "package",
+              "name",
+              "manager",
+              "action",
+              "detail",
+              "commands"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "settings": {
+          "items": {
+            "properties": {
+              "action": {
+                "enum": [
+                  "set",
+                  "restore",
+                  "delete"
+                ]
+              },
+              "detail": {
+                "type": "string"
+              },
+              "id": {
+                "type": "string"
+              },
+              "kind": {
+                "enum": [
+                  "defaults",
+                  "registry",
+                  "xdg"
+                ]
+              },
+              "label": {
+                "type": "string"
+              },
+              "package": {
+                "type": "string"
+              },
+              "requires": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "restart": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "root": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "package",
+              "id",
+              "label",
+              "kind",
+              "action",
+              "detail",
+              "root",
+              "restart",
+              "requires"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "shims": {
+          "items": {
+            "properties": {
+              "action": {
+                "enum": [
+                  "create",
+                  "update",
+                  "remove"
+                ]
+              },
+              "dst": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "package": {
+                "type": "string"
+              },
+              "target": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "package",
+              "name",
+              "dst",
+              "action",
+              "target"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
         "steps": {
           "items": {
             "properties": {
@@ -133,6 +351,12 @@
               },
               "needs_root": {
                 "type": "boolean"
+              },
+              "note": {
+                "type": [
+                  "string",
+                  "null"
+                ]
               },
               "package": {
                 "type": "string"
@@ -174,6 +398,10 @@
               "minimum": 0,
               "type": "integer"
             },
+            "hooks": {
+              "minimum": 0,
+              "type": "integer"
+            },
             "packages": {
               "minimum": 0,
               "type": "integer"
@@ -181,11 +409,27 @@
             "root_actions": {
               "minimum": 0,
               "type": "integer"
+            },
+            "services": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "settings": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "shims": {
+              "minimum": 0,
+              "type": "integer"
             }
           },
           "required": [
             "packages",
             "files",
+            "settings",
+            "services",
+            "shims",
+            "hooks",
             "downgrades",
             "root_actions"
           ],
@@ -215,6 +459,10 @@
         "steps",
         "batches",
         "files",
+        "settings",
+        "services",
+        "shims",
+        "hooks",
         "unplanned",
         "summary"
       ],

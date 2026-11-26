@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use dots_facts::Facts;
-use dots_providers::script::{ScriptConfig, ScriptEnv, ScriptProvider, parse_duration};
+use dots_providers::script::{FetchSpec, ScriptConfig, ScriptEnv, ScriptProvider, parse_duration};
 use dots_providers::{Availability, Ctx, Op, OpKind, Provider, ProviderError, Spec};
 use tempfile::TempDir;
 
@@ -47,6 +47,7 @@ fn sandbox() -> Sandbox {
         ..Ctx::default()
     };
     let env = ScriptEnv {
+        home: PathBuf::new(),
         pkg_dir: pkg_dir.clone(),
         root: root.join("repo"),
         state: state.clone(),
@@ -509,6 +510,195 @@ dots_testkit::conformance_test!(script_conforms, {
     (p, fx)
 });
 
+/// Records every command; everything succeeds.
+#[derive(Debug, Default)]
+struct Recorder(std::sync::Mutex<Vec<Vec<String>>>);
+
+impl dots_providers::Runner for Recorder {
+    fn run(&self, cmd: &dots_providers::Cmd) -> dots_providers::Result<dots_providers::Output> {
+        self.0.lock().unwrap().push(cmd.argv());
+        Ok(dots_providers::Output::ok(""))
+    }
+}
+
+/// The engine wraps a `needs_root` action in `sudo -n`; the post-install check must still run
+/// through the shell (unprivileged), not as `sudo -c <text>`.
+#[test]
+fn check_of_a_root_script_runs_through_the_shell_not_sudo() {
+    let sb = sandbox();
+    let p = provider(
+        &sb,
+        ScriptConfig {
+            needs_root: true,
+            ..cfg("do-install", "is-installed")
+        },
+    );
+    let mut action = p.plan(&[install_op(None)]).unwrap().remove(0);
+    let mut argv = vec!["/usr/bin/sudo".to_string(), "-n".to_string()];
+    argv.append(&mut action.argv);
+    action.argv = argv;
+    let rec = std::sync::Arc::new(Recorder::default());
+    let ctx = Ctx {
+        runner: rec.clone(),
+        ..sb.ctx.clone()
+    };
+    assert!(p.exec(&ctx, &action).unwrap().success);
+    let cmds = rec.0.lock().unwrap().clone();
+    assert_eq!(cmds.len(), 2, "{cmds:?}");
+    assert_eq!(cmds[0][0], "/usr/bin/sudo");
+    assert!(
+        !cmds[1][0].ends_with("sudo")
+            && cmds[1][1] == "-c"
+            && cmds[1].last().unwrap().ends_with("is-installed"),
+        "check ran as {:?}",
+        cmds[1]
+    );
+}
+
+/// Run a root script's install through a recording runner; `sudo` says whether the engine
+/// put `sudo -n` in front. Returns the first command's argv, and the env file's mode and text
+/// as read while the command "ran".
+fn root_install(sudo: bool) -> (Vec<String>, u32, String, PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    type Seen = (Vec<String>, u32, String, PathBuf);
+    #[derive(Debug, Default)]
+    struct Peek(std::sync::Mutex<Option<Seen>>);
+    impl dots_providers::Runner for Peek {
+        fn run(&self, cmd: &dots_providers::Cmd) -> dots_providers::Result<dots_providers::Output> {
+            let argv = cmd.argv();
+            let mut g = self.0.lock().unwrap();
+            if g.is_none() {
+                let text = argv.last().unwrap();
+                let file = text
+                    .lines()
+                    .next()
+                    .and_then(|l| l.strip_prefix("set -a; . "))
+                    .and_then(|l| l.strip_suffix("; set +a"))
+                    .map(|p| PathBuf::from(p.trim_matches('\'')))
+                    .unwrap_or_default();
+                let mode = fs::metadata(&file).map_or(0, |m| m.permissions().mode() & 0o777);
+                let body = fs::read_to_string(&file).unwrap_or_default();
+                *g = Some((argv, mode, body, file));
+            }
+            Ok(dots_providers::Output::ok(""))
+        }
+    }
+    let mut sb = sandbox();
+    sb.env.home = PathBuf::from("/home/ofir");
+    sb.env
+        .settings
+        .insert("token".into(), "s3cr3t'value with space".into());
+    let p = provider(
+        &sb,
+        ScriptConfig {
+            needs_root: true,
+            ..cfg("do-install", "is-installed")
+        },
+    );
+    let mut action = p.plan(&[install_op(None)]).unwrap().remove(0);
+    if sudo {
+        let mut argv = vec!["/usr/bin/sudo".to_string(), "-n".to_string()];
+        argv.append(&mut action.argv);
+        action.argv = argv;
+    }
+    let peek = std::sync::Arc::new(Peek::default());
+    let ctx = Ctx {
+        runner: peek.clone(),
+        ..sb.ctx.clone()
+    };
+    assert!(p.exec(&ctx, &action).unwrap().success);
+    let got = peek.0.lock().unwrap().clone().unwrap();
+    // Gone once the action finished.
+    assert!(!got.3.exists(), "env file left behind: {}", got.3.display());
+    got
+}
+
+/// `sudo -n` resets the environment: HOME, the DOTS_* variables and the `[env]` PATH directories
+/// travel in a 0600 file the script text sources, never in argv.
+#[test]
+fn root_script_carries_env_in_a_private_file_not_argv() {
+    let (argv, mode, body, _) = root_install(true);
+    assert_eq!(&argv[..2], ["/usr/bin/sudo", "-n"]);
+    assert!(
+        argv[2].ends_with("sh") || argv[2].ends_with("bash"),
+        "{argv:?}"
+    );
+    assert_eq!(argv[3], "-c");
+    assert_eq!(argv.len(), 5, "{argv:?}");
+    let text = &argv[4];
+    assert!(text.starts_with("set -a; . "), "{text}");
+    assert!(text.lines().next().unwrap().ends_with("; set +a"), "{text}");
+    assert!(text.ends_with("do-install"), "{text}");
+    // No value of any carried variable is in argv.
+    for v in ["/home/ofir", "s3cr3t", "work gpu-box", "/usr/bin:/bin"] {
+        assert!(argv.iter().all(|a| !a.contains(v)), "{v} in {argv:?}");
+    }
+    assert_eq!(mode, 0o600);
+    assert!(body.contains("HOME=/home/ofir\n"), "{body}");
+    assert!(body.contains("DOTS_PKG=kv\n"), "{body}");
+    assert!(body.contains("DOTS_TAGS='work gpu-box'\n"), "{body}");
+    assert!(
+        body.contains("DOTS_SETTING_TOKEN='s3cr3t'\\''value with space'\n"),
+        "{body}"
+    );
+    assert!(body.contains("PATH="), "{body}");
+    assert!(
+        !body.contains("do-install"),
+        "script text stays out of the file"
+    );
+}
+
+/// Already root: no `sudo`, the same file prelude.
+#[test]
+fn root_script_without_sudo_gets_the_same_prelude() {
+    let (argv, mode, body, _) = root_install(false);
+    assert!(
+        argv[1] == "-c" && argv[2].starts_with("set -a; . "),
+        "{argv:?}"
+    );
+    assert_eq!(mode, 0o600);
+    assert!(body.contains("HOME=/home/ofir\n"));
+}
+
+/// The pwsh shell has no such prelude: a root pwsh script is refused with a clear error.
+#[test]
+fn root_pwsh_script_is_refused() {
+    let sb = sandbox();
+    let p = provider(
+        &sb,
+        ScriptConfig {
+            needs_root: true,
+            shell: Some("pwsh".into()),
+            ..cfg("do-install", "is-installed")
+        },
+    );
+    let mut ctx = sb.ctx.clone();
+    ctx.runner = std::sync::Arc::new(Recorder::default());
+    let action = dots_providers::Action {
+        kind: OpKind::Install,
+        ops: vec![install_op(None)],
+        argv: vec!["/usr/bin/pwsh".into(), "-Command".into(), "x".into()],
+        needs_root: true,
+    };
+    let e = p.exec(&ctx, &action).unwrap_err().to_string();
+    assert!(e.contains("needs_root") && e.contains("bash"), "{e}");
+}
+
+/// Unprivileged actions are left exactly as planned.
+#[test]
+fn unprivileged_script_argv_is_unchanged() {
+    let sb = sandbox();
+    let p = provider(&sb, cfg("do-install", "is-installed"));
+    let action = p.plan(&[install_op(None)]).unwrap().remove(0);
+    let rec = std::sync::Arc::new(Recorder::default());
+    let ctx = Ctx {
+        runner: rec.clone(),
+        ..sb.ctx.clone()
+    };
+    assert!(p.exec(&ctx, &action).unwrap().success);
+    assert_eq!(rec.0.lock().unwrap()[0], action.argv);
+}
+
 #[test]
 fn exec_runs_nothing_under_dry_run() {
     let sb = sandbox();
@@ -520,4 +710,280 @@ fn exec_runs_nothing_under_dry_run() {
     };
     assert!(p.exec(&ctx, &a[0]).unwrap().success);
     assert!(!sb.pkg_dir.join("ran").exists());
+}
+
+// ---------------------------------------------------------------------- fetch
+
+mod fetch {
+    use super::*;
+    use dots_providers::Fetcher;
+    use sha2::{Digest, Sha256};
+    use std::sync::{Arc, Mutex};
+
+    const INSTALLER: &str = "echo ran > \"$DOTS_STATE/ran\"\n";
+    const URL: &str = "https://sh.rustup.rs";
+
+    #[derive(Debug, Default)]
+    struct Fake(Mutex<Vec<String>>);
+    impl Fetcher for Fake {
+        fn fetch(&self, url: &str) -> dots_providers::Result<Vec<u8>> {
+            self.0.lock().unwrap().push(url.into());
+            Ok(INSTALLER.as_bytes().to_vec())
+        }
+    }
+
+    fn sha(bytes: &str) -> String {
+        Sha256::digest(bytes.as_bytes())
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
+    }
+
+    fn fetching(sb: &mut Sandbox, pin: Option<String>) -> (ScriptConfig, Arc<Fake>) {
+        let fake = Arc::new(Fake::default());
+        sb.ctx.fetcher = fake.clone();
+        sb.ctx.cache_dir = sb.state.join("cache");
+        let c = ScriptConfig {
+            install: Some("sh {fetched}".into()),
+            check: Some("test -f \"$DOTS_STATE/ran\"".into()),
+            versionless: true,
+            fetch: Some(FetchSpec {
+                url: URL.into(),
+                sha256: pin,
+            }),
+            ..ScriptConfig::default()
+        };
+        (c, fake)
+    }
+
+    #[test]
+    fn pinned_installer_runs_with_fetched_path() {
+        let mut sb = sandbox();
+        let (c, fake) = fetching(&mut sb, Some(format!("sha256:{}", sha(INSTALLER))));
+        let p = provider(&sb, c);
+        let a = p.plan(&[install_op(None)]).unwrap();
+        assert!(
+            a[0].argv.last().unwrap().contains("{fetched}"),
+            "plan shows the placeholder"
+        );
+        let out = p.exec(&sb.ctx, &a[0]).unwrap();
+        assert!(out.success);
+        assert!(sb.state.join("ran").is_file(), "the installer ran");
+        assert_eq!(fake.0.lock().unwrap().as_slice(), [URL]);
+        assert_eq!(p.fetched_sha256().as_deref(), Some(sha(INSTALLER).as_str()));
+        let log = fs::read_to_string(out.log.unwrap()).unwrap();
+        assert!(log.contains("dots-fetch-"), "{log}");
+        assert!(sb.state.join("cache/fetch/kv/sh.rustup.rs").is_file());
+    }
+
+    /// The verified bytes run from a private, exclusively-created copy, never from the
+    /// user-writable cache path, and the copy is deleted afterwards.
+    #[test]
+    fn installer_runs_from_a_private_copy_not_the_cache() {
+        let mut sb = sandbox();
+        let (c, _) = fetching(&mut sb, None);
+        let p = provider(&sb, c);
+        let a = p.plan(&[install_op(None)]).unwrap();
+        let out = p.exec(&sb.ctx, &a[0]).unwrap();
+        assert!(out.success);
+        let log = fs::read_to_string(out.log.unwrap()).unwrap();
+        assert!(
+            !log.contains(&sb.ctx.cache_dir.to_string_lossy().into_owned()),
+            "must not run the cache path: {log}"
+        );
+        let used = log
+            .split_whitespace()
+            .find(|w| w.contains("dots-fetch-"))
+            .expect("private path in log")
+            .trim_matches('\'');
+        let dir = Path::new(used).parent().unwrap();
+        assert!(!dir.exists(), "private copy removed after the run");
+    }
+
+    /// A symlink planted at the cache path must not be written through.
+    #[cfg(unix)]
+    #[test]
+    fn cache_write_does_not_follow_a_planted_symlink() {
+        let mut sb = sandbox();
+        let (c, _) = fetching(&mut sb, None);
+        let victim = sb.state.join("victim");
+        fs::write(&victim, "precious").unwrap();
+        let cached = sb.state.join("cache/fetch/kv");
+        fs::create_dir_all(&cached).unwrap();
+        std::os::unix::fs::symlink(&victim, cached.join("sh.rustup.rs")).unwrap();
+        let p = provider(&sb, c);
+        assert!(run_install(&p, &sb, None).unwrap().success);
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "precious");
+    }
+
+    #[test]
+    fn hash_mismatch_refuses_and_runs_nothing() {
+        let mut sb = sandbox();
+        let (c, _) = fetching(&mut sb, Some("0".repeat(64)));
+        let p = provider(&sb, c);
+        match run_install(&p, &sb, None) {
+            Err(ProviderError::Coded { code, message, .. }) => {
+                assert_eq!(code, "integrity-mismatch");
+                assert!(
+                    message.contains(&sha(INSTALLER)) && message.contains(URL),
+                    "{message}"
+                );
+            }
+            other => panic!("expected integrity-mismatch, got {other:?}"),
+        }
+        assert!(!sb.state.join("ran").exists());
+        assert_eq!(p.fetched_sha256(), None);
+    }
+
+    #[test]
+    fn lock_pin_must_match_too() {
+        let mut sb = sandbox();
+        let (c, _) = fetching(&mut sb, None);
+        let p = provider(&sb, c.clone()).with_lock_pin(Some("f".repeat(64)));
+        assert!(matches!(
+            run_install(&p, &sb, None),
+            Err(ProviderError::Coded {
+                code: "integrity-mismatch",
+                ..
+            })
+        ));
+        assert!(!sb.state.join("ran").exists());
+        let p = provider(&sb, c).with_lock_pin(Some(sha(INSTALLER)));
+        assert!(run_install(&p, &sb, None).unwrap().success);
+    }
+
+    #[test]
+    fn first_use_reports_the_hash_to_record() {
+        let mut sb = sandbox();
+        let (c, _) = fetching(&mut sb, None);
+        let p = provider(&sb, c);
+        assert_eq!(p.fetched_sha256(), None);
+        assert!(run_install(&p, &sb, None).unwrap().success);
+        assert_eq!(p.fetched_sha256().as_deref(), Some(sha(INSTALLER).as_str()));
+    }
+
+    #[test]
+    fn offline_and_dry_run_download_nothing() {
+        let mut sb = sandbox();
+        let (c, fake) = fetching(&mut sb, None);
+        let p = provider(&sb, c);
+        sb.ctx.offline = true;
+        assert!(run_install(&p, &sb, None).is_err());
+        sb.ctx.offline = false;
+        sb.ctx.dry_run = true;
+        assert!(run_install(&p, &sb, None).unwrap().success);
+        assert!(fake.0.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn fetch_needs_a_placeholder_and_a_web_url() {
+        let sb = sandbox();
+        let mut c = cfg("sh installer.sh", "true");
+        c.fetch = Some(FetchSpec {
+            url: URL.into(),
+            sha256: None,
+        });
+        assert!(ScriptProvider::new("kv", c.clone(), sb.env.clone(), &facts()).is_err());
+        c.install = Some("sh {fetched}".into());
+        assert!(ScriptProvider::new("kv", c.clone(), sb.env.clone(), &facts()).is_ok());
+        c.fetch = Some(FetchSpec {
+            url: "file:///etc/passwd".into(),
+            sha256: None,
+        });
+        assert!(ScriptProvider::new("kv", c, sb.env.clone(), &facts()).is_err());
+    }
+}
+
+// ---------------------------------------------------------------- file or shell text
+
+/// `install = "install.sh"`: one token that names a file in the package directory runs that
+/// file with the script's shell (cwd = the package directory, no executable bit needed);
+/// anything else is shell text. Same for `upgrade`, `uninstall`, `check`, `version`,
+/// `latest` and hooks.
+#[test]
+fn a_single_token_naming_a_file_in_the_package_dir_runs_as_a_file() {
+    let sb = sandbox();
+    fs::write(
+        sb.pkg_dir.join("install.sh"),
+        "pwd > \"$DOTS_STATE/where\"\necho \"args=$#\" >> \"$DOTS_STATE/where\"\ntouch \"$DOTS_STATE/ok\"\n",
+    )
+    .unwrap();
+    fs::write(sb.pkg_dir.join("check.sh"), "test -f \"$DOTS_STATE/ok\"\n").unwrap();
+    fs::write(sb.pkg_dir.join("version.sh"), "echo 4.5.6\n").unwrap();
+    fs::write(sb.pkg_dir.join("bye.sh"), "rm -f \"$DOTS_STATE/ok\"\n").unwrap();
+    let mut c = cfg("install.sh", "check.sh");
+    c.version = Some("version.sh".into());
+    c.uninstall = Some("bye.sh".into());
+    let p = provider(&sb, c);
+    assert!(
+        p.installed(&sb.ctx).unwrap().is_empty(),
+        "not installed yet"
+    );
+    let plan = p.plan(&[install_op(None)]).unwrap();
+    assert!(
+        plan[0].argv.last().unwrap().contains("bash ./install.sh"),
+        "{:?}",
+        plan[0].argv
+    );
+    assert!(run_install(&p, &sb, None).unwrap().success);
+    let where_ = fs::read_to_string(sb.state.join("where")).unwrap();
+    let mut lines = where_.lines();
+    assert_eq!(
+        fs::canonicalize(lines.next().unwrap()).unwrap(),
+        fs::canonicalize(&sb.pkg_dir).unwrap()
+    );
+    assert_eq!(lines.next(), Some("args=0"));
+    assert_eq!(p.installed(&sb.ctx).unwrap()["kv"].version, "4.5.6");
+    // uninstall and a hook run their files the same way.
+    let rm = Op {
+        kind: OpKind::Remove,
+        ..install_op(None)
+    };
+    let a = p.plan(&[rm]).unwrap();
+    assert!(p.exec(&sb.ctx, &a[0]).unwrap().success);
+    assert!(!sb.state.join("ok").exists());
+    fs::write(sb.pkg_dir.join("hook.sh"), "touch \"$DOTS_STATE/hooked\"\n").unwrap();
+    let cmd = p.hook_cmd(&sb.ctx, "hook.sh").unwrap();
+    assert!(
+        <dots_providers::RealRunner as dots_providers::Runner>::run(
+            &dots_providers::RealRunner,
+            &cmd
+        )
+        .map(|o| o.success())
+        .unwrap()
+    );
+    assert!(sb.state.join("hooked").exists());
+}
+
+#[test]
+fn anything_that_is_not_one_existing_file_stays_shell_text() {
+    let sb = sandbox();
+    fs::write(
+        sb.pkg_dir.join("install.sh"),
+        "touch \"$DOTS_STATE/from-file\"\n",
+    )
+    .unwrap();
+    // A file named as the first word of a longer command is not run as a file.
+    let p = provider(&sb, cfg("true install.sh", "true"));
+    let a = p.plan(&[install_op(None)]).unwrap();
+    assert!(a[0].argv.last().unwrap().ends_with("true install.sh"));
+    // A single token with no such file is the command itself.
+    let p = provider(&sb, cfg("touch-me", "true"));
+    let a = p.plan(&[install_op(None)]).unwrap();
+    assert!(a[0].argv.last().unwrap().ends_with("touch-me"));
+    assert!(!a[0].argv.last().unwrap().contains("bash"));
+    // A plain command word that happens to be a file name in another form is quoted shell
+    // text; here `true` has no file next to the package and runs as the builtin.
+    let p = provider(&sb, cfg("true", "true"));
+    assert!(run_install(&p, &sb, None).unwrap().success);
+    assert!(!sb.state.join("from-file").exists());
+}
+
+#[test]
+fn the_lock_key_is_exposed_to_the_engine() {
+    let sb = sandbox();
+    let mut c = cfg("true", "true");
+    assert_eq!(provider(&sb, c.clone()).lock_key(), None);
+    c.lock = Some("pi".into());
+    assert_eq!(provider(&sb, c).lock_key().as_deref(), Some("pi"));
 }

@@ -3,6 +3,156 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "properties": {
     "data": {
+      "properties": {
+        "questions": {
+          "items": {
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "kind": {
+                      "const": "setting"
+                    }
+                  },
+                  "required": [
+                    "kind"
+                  ]
+                },
+                "then": {
+                  "required": [
+                    "package",
+                    "key",
+                    "type",
+                    "secret",
+                    "reason"
+                  ]
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "kind": {
+                      "enum": [
+                        "bundle",
+                        "tag"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "kind"
+                  ]
+                },
+                "then": {
+                  "properties": {
+                    "recommended": {
+                      "const": true
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "secret": {
+                      "const": true
+                    }
+                  },
+                  "required": [
+                    "secret"
+                  ]
+                },
+                "then": {
+                  "properties": {
+                    "recommended": {
+                      "type": "null"
+                    }
+                  }
+                }
+              }
+            ],
+            "properties": {
+              "answer": {
+                "type": "string"
+              },
+              "description": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "id": {
+                "pattern": "^(setting|bundle|tag):",
+                "type": "string"
+              },
+              "key": {
+                "type": "string"
+              },
+              "kind": {
+                "enum": [
+                  "setting",
+                  "bundle",
+                  "tag"
+                ]
+              },
+              "name": {
+                "type": "string"
+              },
+              "package": {
+                "type": "string"
+              },
+              "question": {
+                "type": "string"
+              },
+              "reason": {
+                "enum": [
+                  "ask",
+                  "required"
+                ]
+              },
+              "recommended": {},
+              "required": {
+                "type": "boolean"
+              },
+              "secret": {
+                "type": "boolean"
+              },
+              "type": {
+                "type": "string"
+              },
+              "values": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "id",
+              "kind",
+              "name",
+              "question",
+              "required",
+              "recommended",
+              "answer"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "required_unanswered": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "unanswered": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "questions",
+        "unanswered",
+        "required_unanswered"
+      ],
       "type": "object"
     },
     "errors": {

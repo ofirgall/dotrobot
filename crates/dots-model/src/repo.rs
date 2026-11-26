@@ -2,12 +2,15 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use dots_core::Diagnostic;
 
 use crate::defs;
+use crate::effective::{EffectiveInfo, PlatformKeyRef};
 use crate::load::{load_typed, read_source, top_key_span};
-use crate::source::Diags;
+use crate::setting::DeclProblem;
+use crate::source::{Diags, SourceFile};
 use crate::types::{Bundle, Package, RepoManifest};
 
 /// A loaded repository.
@@ -17,6 +20,11 @@ pub struct Repo {
     pub manifest: RepoManifest,
     pub bundles: BTreeMap<String, Bundle>,
     pub packages: BTreeMap<String, Package>,
+    /// Every `[platform."<key>"]` key in the definition files (and, after
+    /// [`Repo::effective`], in the override files), for the `unknown-platform` lint.
+    pub platform_keys: Vec<PlatformKeyRef>,
+    /// Set by [`Repo::effective`]: provenance and the raw objects. `None` on a plain load.
+    pub effective: Option<Arc<EffectiveInfo>>,
 }
 
 /// Result of a successful load: the value plus lint warnings (such as `escape-hatch-path`).
@@ -46,9 +54,10 @@ impl Repo {
     pub fn load(root: &Path) -> Result<Loaded<Repo>, LoadErrors> {
         let mut diags = Diags::default();
 
-        let manifest = load_manifest(root, &mut diags);
-        let bundles = load_bundles(root, &mut diags);
-        let packages = load_packages(root, &mut diags);
+        let mut keys = Vec::new();
+        let manifest = load_manifest(root, &mut diags, &mut keys);
+        let bundles = load_bundles(root, &mut diags, &mut keys);
+        let packages = load_packages(root, &mut diags, &mut keys);
 
         match (manifest, diags.errors.is_empty()) {
             (Some(manifest), true) => Ok(Loaded {
@@ -57,6 +66,8 @@ impl Repo {
                     manifest,
                     bundles,
                     packages,
+                    platform_keys: keys,
+                    effective: None,
                 },
                 warnings: diags.warnings,
             }),
@@ -80,12 +91,17 @@ impl RepoManifest {
     }
 }
 
-fn load_manifest(root: &Path, diags: &mut Diags) -> Option<RepoManifest> {
+fn load_manifest(
+    root: &Path,
+    diags: &mut Diags,
+    keys: &mut Vec<PlatformKeyRef>,
+) -> Option<RepoManifest> {
     let path = root.join("dots.toml");
     let src = read_source(&path, "dots.toml".into(), "dots.toml".into(), diags)?;
     load_typed::<RepoManifest>(&src, &defs::REPO, false, diags).map(|l| {
         let mut m = l.value;
         m.spans = l.spans;
+        keys.extend(l.platform_keys);
         m
     })
 }
@@ -99,7 +115,11 @@ fn sorted_entries(dir: &Path) -> Vec<PathBuf> {
     v
 }
 
-fn load_bundles(root: &Path, diags: &mut Diags) -> BTreeMap<String, Bundle> {
+fn load_bundles(
+    root: &Path,
+    diags: &mut Diags,
+    keys: &mut Vec<PlatformKeyRef>,
+) -> BTreeMap<String, Bundle> {
     let mut out = BTreeMap::new();
     for path in sorted_entries(&root.join("bundles")) {
         if path.extension().and_then(|e| e.to_str()) != Some("toml") {
@@ -116,13 +136,18 @@ fn load_bundles(root: &Path, diags: &mut Diags) -> BTreeMap<String, Bundle> {
             let mut b = l.value;
             b.name = stem.to_string();
             b.spans = l.spans;
+            keys.extend(l.platform_keys);
             out.insert(stem.to_string(), b);
         }
     }
     out
 }
 
-fn load_packages(root: &Path, diags: &mut Diags) -> BTreeMap<String, Package> {
+fn load_packages(
+    root: &Path,
+    diags: &mut Diags,
+    keys: &mut Vec<PlatformKeyRef>,
+) -> BTreeMap<String, Package> {
     let mut out = BTreeMap::new();
     for dir in sorted_entries(&root.join("packages")) {
         if !dir.is_dir() {
@@ -132,6 +157,13 @@ fn load_packages(root: &Path, diags: &mut Diags) -> BTreeMap<String, Package> {
             continue;
         };
         let display = format!("packages/{dirname}/package.toml");
+        // A directory without a manifest (a placeholder, a leftover) is not a package: warn
+        // and skip it, it must not break every command.
+        if !dir.join("package.toml").exists() {
+            let stub = SourceFile::new(display, format!("package:{dirname}"), String::new());
+            diags.report(true, "package-missing-manifest", &[], &stub, None, None);
+            continue;
+        }
         let Some(src) = read_source(
             &dir.join("package.toml"),
             display,
@@ -167,10 +199,57 @@ fn load_packages(root: &Path, diags: &mut Diags) -> BTreeMap<String, Package> {
             );
             continue;
         }
+        if !check_setting_decls(&pkg, &src, diags) {
+            continue;
+        }
         pkg.dir = dir.clone();
         pkg.escape_hatch_paths = l.escape_hatch;
         pkg.spans = l.spans;
+        keys.extend(l.platform_keys);
         out.insert(dirname.to_string(), pkg);
     }
     out
+}
+
+/// Byte range of 1-based `line`.
+fn line_span(src: &SourceFile, line: u32) -> Option<std::ops::Range<usize>> {
+    let mut start = 0usize;
+    for (i, l) in src.text.split_inclusive('\n').enumerate() {
+        if i as u32 + 1 == line {
+            return Some(start..start + l.len());
+        }
+        start += l.len();
+    }
+    None
+}
+
+/// `[settings.<key>]`: exactly one of `default` / `required`, and a consistent declaration
+/// (ARCHITECTURE §17.1). Returns false when the package must be dropped.
+fn check_setting_decls(pkg: &Package, src: &SourceFile, diags: &mut Diags) -> bool {
+    let mut ok = true;
+    for (key, decl) in &pkg.settings {
+        let Err(problem) = decl.check_decl() else {
+            continue;
+        };
+        ok = false;
+        let span = pkg
+            .spans
+            .get(&format!("settings.{key}"))
+            .and_then(|(line, _)| line_span(src, *line));
+        let setting = format!("{}.{key}", pkg.name);
+        match problem {
+            DeclProblem::NoDefault => {
+                diags.error("setting-no-default", &[("setting", &setting)], src, span)
+            }
+            DeclProblem::Invalid(detail) => diags.report(
+                false,
+                "schema-invalid-value",
+                &[("key", &format!("settings.{key}")), ("detail", &detail)],
+                src,
+                span,
+                Some(format!("Fix the declaration of `{setting}`.")),
+            ),
+        }
+    }
+    ok
 }

@@ -1,6 +1,6 @@
 //! `dots plan` and `dots apply`: wire the engine to the real machine.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -12,12 +12,14 @@ use dots_engine::{
     ApplyConfig, ApplyReport, Inputs, JournalMeta, Mode, Observer, Prompter, RunLock, Scope,
     Status, StepResult, apply_observed, new_run_id, plan, plan_json,
 };
-use dots_resolve::resolve;
+use dots_resolve::resolve_full;
 
 use crate::app::Context;
 use crate::context::{RepoCtx, load_repo};
 use crate::files_phase::RepoFiles;
 use crate::providers;
+use crate::services_phase::RepoServices;
+use crate::settings_phase::RepoSettings;
 
 /// The files phase: `dots-files` over the loaded repo.
 fn files_phase<'a>(p: &'a Prepared, dirs: &'a dots_core::Dirs) -> RepoFiles<'a> {
@@ -25,6 +27,39 @@ fn files_phase<'a>(p: &'a Prepared, dirs: &'a dots_core::Dirs) -> RepoFiles<'a> 
         dirs,
         rc: &p.rc,
         resolution: &p.resolution,
+    }
+}
+
+/// The settings phase: `dots-settings` over the loaded repo.
+fn settings_phase<'a>(p: &'a Prepared, ctx: &'a dots_providers::Ctx) -> RepoSettings<'a> {
+    RepoSettings {
+        rc: &p.rc,
+        resolution: &p.resolution,
+        ctx,
+    }
+}
+
+/// The hooks phase: the script runtime over the loaded repo.
+fn hooks_phase<'a>(
+    p: &'a Prepared,
+    dirs: &'a dots_core::Dirs,
+    settings: &'a dots_config::Settings,
+) -> crate::hooks_phase::RepoHooks<'a> {
+    crate::hooks_phase::RepoHooks {
+        facts: &p.rc.m.facts,
+        dirs,
+        root: &p.rc.m.root,
+        tags: &p.rc.m.machine.tags,
+        settings,
+    }
+}
+
+/// The services phase: `dots-services` over the loaded repo.
+fn services_phase<'a>(p: &'a Prepared, ctx: &'a dots_providers::Ctx) -> RepoServices<'a> {
+    RepoServices {
+        rc: &p.rc,
+        resolution: &p.resolution,
+        ctx,
     }
 }
 
@@ -68,6 +103,10 @@ fn split(rc: &RepoCtx, res: &dots_resolve::Resolution) -> (Vec<Diagnostic>, Vec<
         }
     }
     warnings.extend(res.warnings.iter().cloned());
+    // Invalid setting values and bundle conflicts stop a run; stale values only warn.
+    let settings = crate::config_cmd::settings_for(rc);
+    errors.extend(settings.errors);
+    warnings.extend(settings.warnings);
     (errors, warnings)
 }
 
@@ -83,7 +122,7 @@ fn git(root: &Path, args: &[&str]) -> Option<String> {
         .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
-fn journal_meta(rc: &RepoCtx) -> JournalMeta {
+pub(crate) fn journal_meta(rc: &RepoCtx) -> JournalMeta {
     JournalMeta {
         host: rc.m.facts.hostname.clone(),
         root: "main".into(),
@@ -96,37 +135,71 @@ fn journal_meta(rc: &RepoCtx) -> JournalMeta {
 
 /// Everything both commands compute before the engine: the loaded repo, the registry of real
 /// providers, installed state and the resolution.
-struct Prepared {
-    rc: RepoCtx,
-    registry: dots_providers::Registry,
-    installed: dots_resolve::InstalledMap,
-    resolution: dots_resolve::Resolution,
-    pctx: dots_providers::Ctx,
+pub(crate) struct Prepared {
+    pub(crate) rc: RepoCtx,
+    pub(crate) registry: dots_providers::Registry,
+    pub(crate) installed: dots_resolve::InstalledMap,
+    pub(crate) resolution: dots_resolve::Resolution,
+    pub(crate) pctx: dots_providers::Ctx,
+    /// `dots.lock`, and this machine's platform key in it.
+    pub(crate) lock: dots_lock::Lock,
+    pub(crate) machine_key: String,
+    /// The script provider instances, for the hashes of what they downloaded.
+    pub(crate) scripts: providers::ScriptHandles,
 }
 
-fn prepare(
+pub(crate) fn prepare(
     ctx: &Context,
     root: Option<&Path>,
     run_id: &str,
 ) -> Result<Prepared, (Vec<Diagnostic>, Vec<Diagnostic>)> {
     let rc = load_repo(ctx, root)?;
-    let pctx = providers::exec_ctx(&ctx.dirs, ctx.opts.offline, false, run_id);
-    let registry = providers::registry(&ctx.dirs, &pctx, &rc.m.facts, Some(&rc.repo), &rc.m.root);
+    let pctx = providers::with_env_path(
+        providers::exec_ctx(&ctx.dirs, ctx.opts.offline, false, run_id),
+        &rc,
+        &ctx.dirs,
+    );
+    let settings = crate::config_cmd::settings_for(&rc);
+    let (registry, scripts) = providers::registry_with_handles(
+        &ctx.dirs,
+        &pctx,
+        &rc.m.facts,
+        Some(&rc.repo),
+        &rc.m.root,
+        providers::ScriptInputs {
+            tags: &rc.m.machine.tags,
+            settings: &settings,
+        },
+    );
     let installed = providers::installed(&registry, &pctx);
-    let resolution = resolve(&dots_resolve::Inputs {
-        repo: &rc.repo,
-        machine: &rc.m.machine,
-        facts: &rc.m.facts,
-        chain: &rc.chain,
-        providers: &registry,
-        installed: &installed,
-    });
+    let lock = dots_lock::Lock::load(&crate::lock_cmd::path(&rc.m.root))
+        .map_err(|d| (vec![d], rc.m.warnings.clone()))?;
+    let machine_key = crate::lock_cmd::machine_key(&rc);
+    // Provider choice is constraint-aware: ask what providers offer when a constraint needs it.
+    let resolution = {
+        let offers = providers::LiveOffers::new(&registry, &pctx);
+        resolve_full(
+            &dots_resolve::Inputs {
+                repo: &rc.repo,
+                machine: &rc.m.machine,
+                facts: &rc.m.facts,
+                chain: &rc.chain,
+                providers: &registry,
+                installed: &installed,
+            },
+            &offers,
+            &settings,
+        )
+    };
     Ok(Prepared {
         rc,
         registry,
         installed,
         resolution,
         pctx,
+        lock,
+        machine_key,
+        scripts,
     })
 }
 
@@ -143,18 +216,34 @@ pub fn plan_cmd(ctx: &Context, args: &Args, check: bool) -> Report {
         return failure("plan", ExitCode::Error, errors, warnings);
     }
     let files = files_phase(&p, &ctx.dirs);
+    let settings = settings_phase(&p, &p.pctx);
+    let services = services_phase(&p, &p.pctx);
+    let hook_settings = crate::config_cmd::settings_for(&p.rc);
+    let hooks = hooks_phase(&p, &ctx.dirs, &hook_settings);
     let scope = args.scope();
     let unreviewed = BTreeSet::new();
+    let offers = providers::LiveOffers::new(&p.registry, &p.pctx);
+    let no_upgrade = BTreeMap::new();
+    let locks = dots_engine::LockInputs {
+        lock: &p.lock,
+        machine_key: &p.machine_key,
+        offers: &offers,
+        upgrade: &no_upgrade,
+    };
     let inp = Inputs {
         repo: &p.rc.repo,
         resolution: &p.resolution,
         registry: &p.registry,
         installed: &p.installed,
         files: &files,
+        settings: &settings,
+        services: &services,
+        hooks: &hooks,
         ctx: &p.pctx,
         dirs: &ctx.dirs,
         scope: &scope,
         unreviewed: &unreviewed,
+        locks: Some(&locks),
     };
     match plan(&inp, &run_id) {
         Err(errors) => failure("plan", ExitCode::Error, errors, warnings),
@@ -225,6 +314,23 @@ fn stop_flag() -> Arc<AtomicBool> {
 }
 
 pub fn apply_cmd(ctx: &Context, a: &ApplyArgs) -> Report {
+    apply_inner(ctx, a, "apply", None).0
+}
+
+/// Packages `dots upgrade` moves, computed from the prepared run (or the report to return
+/// instead: an error, or "nothing to upgrade").
+pub(crate) type UpgradeSet = BTreeMap<String, dots_engine::UpgradeTarget>;
+pub(crate) type Planner<'a> = &'a dyn Fn(&Prepared) -> Result<UpgradeSet, Box<Report>>;
+
+/// `apply`, or (with a `planner`) `upgrade`: the same engine run, with some packages moved to
+/// explicit targets. Returns the report and the lock rows that were written.
+pub(crate) fn apply_inner(
+    ctx: &Context,
+    a: &ApplyArgs,
+    command: &str,
+    planner: Option<Planner<'_>>,
+) -> (Report, Vec<crate::lock_cmd::Written>) {
+    let none = |r: Report| (r, Vec::new());
     let run_id = new_run_id();
     let _ = ctx.dirs.ensure_all();
     // Only a real run takes the lock; `--dry-run` is `plan`.
@@ -239,33 +345,67 @@ pub fn apply_cmd(ctx: &Context, a: &ApplyArgs) -> Report {
                 } else {
                     ExitCode::Error
                 };
-                return failure("apply", exit, vec![d], vec![]);
+                return none(failure(command, exit, vec![d], vec![]));
             }
         }
     };
 
     let p = match prepare(ctx, a.root.as_deref(), &run_id) {
         Ok(p) => p,
-        Err((e, w)) => return failure("apply", ExitCode::Error, e, w),
+        Err((e, w)) => return none(failure(command, ExitCode::Error, e, w)),
     };
     let (errors, warnings) = split(&p.rc, &p.resolution);
     if !errors.is_empty() {
-        return failure("apply", ExitCode::Error, errors, warnings);
+        return none(failure(command, ExitCode::Error, errors, warnings));
     }
     let files = files_phase(&p, &ctx.dirs);
-    let scope = a.common.scope();
+    let upgrade = match planner {
+        Some(f) => match f(&p) {
+            Ok(set) => set,
+            Err(report) => return none(*report),
+        },
+        None => BTreeMap::new(),
+    };
+    let scope = if planner.is_some() {
+        Scope {
+            targets: upgrade.keys().cloned().collect(),
+            files_only: false,
+            packages_only: true,
+        }
+    } else {
+        a.common.scope()
+    };
     let unreviewed = BTreeSet::new();
-    let pctx = providers::exec_ctx(&ctx.dirs, ctx.opts.offline, a.dry_run, &run_id);
+    let pctx = providers::with_env_path(
+        providers::exec_ctx(&ctx.dirs, ctx.opts.offline, a.dry_run, &run_id),
+        &p.rc,
+        &ctx.dirs,
+    );
+    let settings = settings_phase(&p, &pctx);
+    let services = services_phase(&p, &pctx);
+    let hook_settings = crate::config_cmd::settings_for(&p.rc);
+    let hooks = hooks_phase(&p, &ctx.dirs, &hook_settings);
+    let offers = providers::LiveOffers::new(&p.registry, &pctx);
+    let locks = dots_engine::LockInputs {
+        lock: &p.lock,
+        machine_key: &p.machine_key,
+        offers: &offers,
+        upgrade: &upgrade,
+    };
     let inp = Inputs {
         repo: &p.rc.repo,
         resolution: &p.resolution,
         registry: &p.registry,
         installed: &p.installed,
         files: &files,
+        settings: &settings,
+        services: &services,
+        hooks: &hooks,
         ctx: &pctx,
         dirs: &ctx.dirs,
         scope: &scope,
         unreviewed: &unreviewed,
+        locks: Some(&locks),
     };
     let cfg = ApplyConfig {
         run_id: run_id.clone(),
@@ -303,14 +443,32 @@ pub fn apply_cmd(ctx: &Context, a: &ApplyArgs) -> Report {
         Some(env),
     );
     drop(progress);
-    to_report(report, warnings, &backup_dir(ctx))
+    let mut warnings = warnings;
+    let hashes = crate::lock_cmd::first_use_hashes(&p.scripts, &p.rc.repo, &p.lock, &report);
+    let written = match crate::lock_cmd::write_updates(&p.rc.m.root, &report.lock_updates, &hashes)
+    {
+        Ok(w) => w,
+        Err(d) => {
+            warnings.push(d);
+            Vec::new()
+        }
+    };
+    (
+        to_report(command, report, warnings, &backup_dir(ctx)),
+        written,
+    )
 }
 
 fn backup_dir(ctx: &Context) -> String {
     format!("{}/backup/<run-id>/", ctx.dirs.state.display())
 }
 
-fn to_report(r: ApplyReport, mut warnings: Vec<Diagnostic>, backup_dir: &str) -> Report {
+fn to_report(
+    command: &str,
+    r: ApplyReport,
+    mut warnings: Vec<Diagnostic>,
+    backup_dir: &str,
+) -> Report {
     let exit = match r.status {
         Status::Done | Status::DryRun => ExitCode::Success,
         Status::Interrupted => ExitCode::Interrupted,
@@ -319,7 +477,7 @@ fn to_report(r: ApplyReport, mut warnings: Vec<Diagnostic>, backup_dir: &str) ->
         }
     };
     warnings.extend(r.warnings.iter().cloned());
-    let mut report = crate::views::apply_report(Report::ok("apply", r.to_json()), &r, backup_dir);
+    let mut report = crate::views::apply_report(Report::ok(command, r.to_json()), &r, backup_dir);
     report.exit = exit;
     report.errors = r.errors.clone();
     report.warnings = warnings;
@@ -350,7 +508,14 @@ impl Drop for LiveProgress {
 
 impl Observer for LiveProgress {
     fn planned(&self, plan: &dots_engine::Plan) {
-        self.p.set_total(plan.steps.len() + plan.files.len());
+        self.p.set_total(
+            plan.steps.len()
+                + plan.files.len()
+                + plan.settings.len()
+                + plan.services.len()
+                + plan.shims.len()
+                + plan.hooks.len(),
+        );
     }
 
     fn sudo_prompt(&self, begin: bool) {
@@ -389,6 +554,74 @@ impl Observer for LiveProgress {
     fn file_done(&self, r: &dots_engine::FileStepResult) {
         use dots_core::State;
         let id = self.p.start(&r.step.dst, &r.step.kind);
+        let (state, detail) = if r.ok {
+            (State::Done, r.step.action.clone())
+        } else {
+            (State::Failed, r.detail.clone().unwrap_or_default())
+        };
+        self.p.finish(
+            id,
+            state,
+            &detail,
+            Some(std::time::Duration::from_millis(r.dur_ms)),
+        );
+    }
+
+    fn setting_done(&self, r: &dots_engine::SettingStepResult) {
+        use dots_core::State;
+        let id = self.p.start(&r.step.label, &r.step.kind);
+        let (state, detail) = if r.ok {
+            // An ok step with a note was skipped (its tool is still missing).
+            (
+                State::Done,
+                r.detail.clone().unwrap_or_else(|| r.step.detail.clone()),
+            )
+        } else {
+            (State::Failed, r.detail.clone().unwrap_or_default())
+        };
+        self.p.finish(
+            id,
+            state,
+            &detail,
+            Some(std::time::Duration::from_millis(r.dur_ms)),
+        );
+    }
+
+    fn shim_done(&self, r: &dots_engine::ShimStepResult) {
+        use dots_core::State;
+        let id = self.p.start(&r.step.dst, "shim");
+        let (state, detail) = if r.ok {
+            (State::Done, r.step.action.clone())
+        } else {
+            (State::Failed, r.detail.clone().unwrap_or_default())
+        };
+        self.p.finish(
+            id,
+            state,
+            &detail,
+            Some(std::time::Duration::from_millis(r.dur_ms)),
+        );
+    }
+
+    fn hook_done(&self, r: &dots_engine::HookStepResult) {
+        use dots_core::State;
+        let id = self.p.start(&r.step.package, &r.step.event);
+        let (state, detail) = if r.ok {
+            (State::Done, r.step.short())
+        } else {
+            (State::Failed, r.detail.clone().unwrap_or_default())
+        };
+        self.p.finish(
+            id,
+            state,
+            &detail,
+            Some(std::time::Duration::from_millis(r.dur_ms)),
+        );
+    }
+
+    fn service_done(&self, r: &dots_engine::ServiceStepResult) {
+        use dots_core::State;
+        let id = self.p.start(&r.step.name, &r.step.manager);
         let (state, detail) = if r.ok {
             (State::Done, r.step.action.clone())
         } else {

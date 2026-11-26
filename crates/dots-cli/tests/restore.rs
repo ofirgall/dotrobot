@@ -37,6 +37,7 @@ fn restore_puts_back_a_backed_up_file() {
         template: None,
         merge: Default::default(),
         comment: "#".into(),
+        extras: Default::default(),
     };
     for s in plan(&[file], &ctx) {
         assert!(apply(&s, &ctx).error.is_none());

@@ -12,6 +12,8 @@ exit: 2
         "ok": 2,
         "outdated": 3
       },
+      "services": {},
+      "settings": {},
       "todos": {}
     },
     "header": null,

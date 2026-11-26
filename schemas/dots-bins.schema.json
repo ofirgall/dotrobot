@@ -18,6 +18,9 @@
                   "unknown"
                 ]
               },
+              "dependency": {
+                "type": "boolean"
+              },
               "hint": {
                 "type": [
                   "string",

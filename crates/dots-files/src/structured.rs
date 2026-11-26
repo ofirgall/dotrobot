@@ -512,7 +512,7 @@ fn node_to_value(n: &Node) -> Value {
     }
 }
 
-fn node_to_item(n: &Node) -> Item {
+pub fn node_to_item(n: &Node) -> Item {
     match n {
         Node::Array(a) if !a.is_empty() && a.iter().all(|x| matches!(x, Node::Table(_))) => {
             let mut aot = ArrayOfTables::new();
@@ -591,4 +591,66 @@ pub fn merge_toml(
 
 pub fn finish_toml(doc: &mut DocumentMut) {
     strip_toml_deletes(doc.as_table_mut());
+}
+
+/// The whole document as a value tree (comments dropped), for comparing and linting.
+pub fn toml_to_node(doc: &DocumentMut) -> Node {
+    table_to_node(doc.as_table())
+}
+
+/// A JSON value as a tree node.
+pub fn json_to_node(v: &serde_json::Value) -> Node {
+    use serde_json::Value as J;
+    match v {
+        J::Null => Node::Null,
+        J::Bool(b) => Node::Bool(*b),
+        J::Number(n) => n
+            .as_i64()
+            .map(Node::Int)
+            .unwrap_or_else(|| Node::Float(n.as_f64().unwrap_or(0.0))),
+        J::String(s) => Node::Str(s.clone()),
+        J::Array(a) => Node::Array(a.iter().map(json_to_node).collect()),
+        J::Object(o) => Node::Table(
+            o.iter()
+                .map(|(k, v)| (k.clone(), json_to_node(v)))
+                .collect(),
+        ),
+    }
+}
+
+/// Set (`Some`) or delete (`None`) the key at `path` in place. A path that crosses a value that
+/// is not a table fails with the path walked so far and the type found there.
+pub fn patch_toml(
+    doc: &mut DocumentMut,
+    path: &[String],
+    value: Option<&Node>,
+) -> Result<(), (String, &'static str)> {
+    let Some((last, parents)) = path.split_last() else {
+        return Ok(());
+    };
+    let mut cur: &mut dyn TableLike = doc.as_table_mut();
+    for (i, seg) in parents.iter().enumerate() {
+        if cur.get(seg).is_none() {
+            if value.is_none() {
+                return Ok(());
+            }
+            let mut t = Table::new();
+            t.set_implicit(true);
+            cur.insert(seg, Item::Table(t));
+        }
+        let item = cur.get_mut(seg).expect("just inserted");
+        let found = item.type_name();
+        cur = item
+            .as_table_like_mut()
+            .ok_or_else(|| (path[..=i].join("."), found))?;
+    }
+    match value {
+        Some(v) => {
+            cur.insert(last, node_to_item(v));
+        }
+        None => {
+            cur.remove(last);
+        }
+    }
+    Ok(())
 }

@@ -116,11 +116,14 @@ font-size = 15
 
 Structured formats (TOML, JSON, YAML, gitconfig) merge key by key. For text configs, `dots` uses the app's own include mechanism where one exists (ghostty `config-file`, tmux `source-file`, zsh `source`). Otherwise it appends your layer, which only works for last-value-wins formats. For anything else, override the whole file or use a `dots:if` block. Either way, you keep getting their changes to everything you didn't touch.
 
-<!-- golden-skip: config-and-pull | v0.2 | `dots config set` needs package-settings; v0.3 | `dots pull` needs sharing-sources -->
+<!-- golden: config-set -->
 ```console
 $ dots config set delta.side_by_side true    # settings are knobs a package declares; this machine only
 $ dots apply
+```
 
+<!-- golden-skip: pull | v0.3 | `dots pull` needs sharing-sources -->
+```console
 $ dots pull                                  # weeks later: bring in their changes
   ofirgall/dotfiles  14 new commits · 3 items changed · 1 script changed  [v]iew
   ✓ your 2 overrides still apply

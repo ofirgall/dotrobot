@@ -1,0 +1,12 @@
+schema = 1
+name = "shellcfg"
+
+[[files]]
+src = "files/aliases"
+dst = "{home}/.aliases"
+
+[[files]]
+mode = "render"
+template = "jinja"
+dst = "{config}/app/conf.toml"
+layers = ["layers/conf.toml"]

@@ -3,6 +3,47 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "properties": {
     "data": {
+      "properties": {
+        "dropped": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "duplicates": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "fixed": {
+          "type": "boolean"
+        },
+        "had_markers": {
+          "type": "boolean"
+        },
+        "kept": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "path": {
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "missing",
+            "valid",
+            "pruned",
+            "repaired"
+          ]
+        }
+      },
+      "required": [
+        "path",
+        "status",
+        "fixed",
+        "kept",
+        "dropped",
+        "had_markers"
+      ],
       "type": "object"
     },
     "errors": {

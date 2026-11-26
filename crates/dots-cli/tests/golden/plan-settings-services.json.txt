@@ -1,0 +1,72 @@
+exit: 0
+{
+  "data": {
+    "batches": [],
+    "empty": false,
+    "files": [
+      {
+        "action": "create",
+        "detail": "-> packages/keyboard/files/keyboard.conf",
+        "dst": "~/.config/keyboard/keyboard.conf",
+        "kind": "link",
+        "owned": false,
+        "package": "keyboard"
+      },
+      {
+        "action": "create",
+        "detail": "-> packages/keyboard/services/com.example.autolock.plist",
+        "dst": "~/Library/LaunchAgents/com.example.autolock.plist",
+        "kind": "link",
+        "owned": false,
+        "package": "keyboard"
+      }
+    ],
+    "hooks": [],
+    "services": [
+      {
+        "action": "enable+start",
+        "commands": [
+          "<SB>/tools/launchctl enable gui/<uid>/com.example.autolock",
+          "<SB>/tools/launchctl bootstrap gui/<uid> <SB>/home/Library/LaunchAgents/com.example.autolock.plist",
+          "<SB>/tools/launchctl kickstart gui/<uid>/com.example.autolock"
+        ],
+        "detail": "not enabled, not running",
+        "manager": "launchd",
+        "name": "com.example.autolock",
+        "package": "keyboard"
+      }
+    ],
+    "settings": [
+      {
+        "action": "set",
+        "detail": "6 -> 2",
+        "id": "defaults:NSGlobalDomain:KeyRepeat",
+        "kind": "defaults",
+        "label": "NSGlobalDomain KeyRepeat",
+        "package": "keyboard",
+        "requires": [],
+        "restart": [
+          "Dock"
+        ],
+        "root": false
+      }
+    ],
+    "shims": [],
+    "steps": [],
+    "summary": {
+      "downgrades": 0,
+      "files": 2,
+      "hooks": 0,
+      "packages": 0,
+      "root_actions": 0,
+      "services": 1,
+      "settings": 1,
+      "shims": 0
+    },
+    "unplanned": []
+  },
+  "errors": [],
+  "ok": true,
+  "schema": "dots/plan@1",
+  "warnings": []
+}

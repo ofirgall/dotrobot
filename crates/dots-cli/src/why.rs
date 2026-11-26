@@ -7,7 +7,6 @@ use dots_facts::suggest;
 use dots_providers::Registry;
 use dots_resolve::{
     ConstraintSource, Inclusion, Inputs, InstalledMap, PackageResolution, PackageState, Step,
-    resolve,
 };
 use serde_json::{Value, json};
 
@@ -20,8 +19,18 @@ pub fn run(ctx: &Context, pkg: &str) -> Report {
         Err((errors, warnings)) => failure(errors, warnings),
         Ok(rc) => {
             let pctx = providers::exec_ctx(&ctx.dirs, ctx.opts.offline, false, "why");
-            let registry =
-                providers::registry(&ctx.dirs, &pctx, &rc.m.facts, Some(&rc.repo), &rc.m.root);
+            let settings = crate::config_cmd::settings_for(&rc);
+            let registry = providers::registry(
+                &ctx.dirs,
+                &pctx,
+                &rc.m.facts,
+                Some(&rc.repo),
+                &rc.m.root,
+                providers::ScriptInputs {
+                    tags: &rc.m.machine.tags,
+                    settings: &settings,
+                },
+            );
             let installed = providers::installed(&registry, &pctx);
             explain(&rc, &registry, &installed, pkg)
         }
@@ -36,14 +45,18 @@ fn failure(errors: Vec<Diagnostic>, warnings: Vec<Diagnostic>) -> Report {
 
 /// Explain `pkg` against an already loaded context and provider registry.
 pub fn explain(rc: &RepoCtx, registry: &Registry, installed: &InstalledMap, pkg: &str) -> Report {
-    let resolution = resolve(&Inputs {
-        repo: &rc.repo,
-        machine: &rc.m.machine,
-        facts: &rc.m.facts,
-        chain: &rc.chain,
-        providers: registry,
-        installed,
-    });
+    let resolution = dots_resolve::resolve_full(
+        &Inputs {
+            repo: &rc.repo,
+            machine: &rc.m.machine,
+            facts: &rc.m.facts,
+            chain: &rc.chain,
+            providers: registry,
+            installed,
+        },
+        &dots_resolve::NoOffers,
+        &crate::config_cmd::settings_for(rc),
+    );
 
     // Provider problems explain themselves in the output; everything else is an error.
     let mut errors: Vec<Diagnostic> = Vec::new();

@@ -272,19 +272,37 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "ctrlc",
+ "dots-config",
  "dots-core",
  "dots-engine",
  "dots-env",
  "dots-facts",
  "dots-files",
+ "dots-lock",
  "dots-model",
  "dots-providers",
  "dots-resolve",
+ "dots-services",
+ "dots-settings",
  "dots-testkit",
  "dots-ui",
  "jsonschema",
+ "rustix",
  "serde_json",
  "tempfile",
+ "toml_edit",
+]
+
+[[package]]
+name = "dots-config"
+version = "0.1.0"
+dependencies = [
+ "dots-core",
+ "dots-facts",
+ "dots-model",
+ "serde_json",
+ "tempfile",
+ "toml_edit",
 ]
 
 [[package]]
@@ -303,9 +321,11 @@ dependencies = [
  "dots-core",
  "dots-env",
  "dots-facts",
+ "dots-lock",
  "dots-model",
  "dots-providers",
  "dots-resolve",
+ "dots-settings",
  "dots-testkit",
  "serde",
  "serde_json",
@@ -336,6 +356,7 @@ name = "dots-files"
 version = "0.1.0"
 dependencies = [
  "dots-core",
+ "dots-facts",
  "dots-model",
  "indexmap",
  "minijinja",
@@ -348,10 +369,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "dots-lock"
+version = "0.1.0"
+dependencies = [
+ "dots-core",
+ "dots-model",
+ "tempfile",
+ "toml_edit",
+]
+
+[[package]]
 name = "dots-model"
 version = "0.1.0"
 dependencies = [
  "dots-core",
+ "regex",
  "serde",
  "serde_json",
  "strsim",
@@ -367,6 +399,7 @@ dependencies = [
  "dots-testkit",
  "regex",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror",
 ]
@@ -375,13 +408,41 @@ dependencies = [
 name = "dots-resolve"
 version = "0.1.0"
 dependencies = [
+ "dots-config",
  "dots-core",
  "dots-facts",
+ "dots-files",
  "dots-model",
  "dots-providers",
  "dots-testkit",
  "serde_json",
  "tempfile",
+]
+
+[[package]]
+name = "dots-services"
+version = "0.1.0"
+dependencies = [
+ "dots-model",
+ "dots-providers",
+ "dots-testkit",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "dots-settings"
+version = "0.1.0"
+dependencies = [
+ "dots-core",
+ "dots-model",
+ "dots-providers",
+ "dots-testkit",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "toml_edit",
 ]
 
 [[package]]

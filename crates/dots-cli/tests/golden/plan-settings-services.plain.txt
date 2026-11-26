@@ -1,0 +1,27 @@
+exit: 0
+ Plan   2 file changes - 1 setting change - 1 service action
+
+ Files
+
+   +  ~/.config/keyboard/keyboard.conf                   link
+   +  ~/Library/LaunchAgents/com.example.autolock.plist  link
+
+ Settings
+
+   ~  NSGlobalDomain KeyRepeat  defaults  6 -> 2
+
+ Services
+
+   ~  enable+start com.example.autolock  launchd  not enabled, not running
+
+ Service commands
+
+   <SB>/tools/launchctl enable gui/<uid>/com.example.autolock
+   <SB>/tools/launchctl bootstrap gui/<uid> <SB>/home/Library/LaunchAgents/com.example.autolock.plist
+   <SB>/tools/launchctl kickstart gui/<uid>/com.example.autolock
+
+ Heads up
+
+   [!] Dock will be restarted once, at the end
+
+   -> dots apply

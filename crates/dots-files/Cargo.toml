@@ -10,6 +10,7 @@ workspace = true
 
 [dependencies]
 dots-core.workspace = true
+dots-facts.workspace = true
 dots-model.workspace = true
 indexmap = "2.14.2"
 minijinja = { version = "3.1.0", features = ["serde"] }

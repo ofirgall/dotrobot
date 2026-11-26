@@ -1,0 +1,5 @@
+schema = 1
+name = "tree"
+bin = "tree"
+
+[providers.apt]

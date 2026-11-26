@@ -23,6 +23,8 @@ pub enum Ty {
     Cmd,
     /// `>=X.Y[.Z]`.
     DotsReq,
+    /// A version spec: `latest`, `X.Y.Z`, `X[.Y]`, `>=X[.Y[.Z]]` or `git:<ref>`.
+    VersionSpec,
     /// A list. Inside `[platform.*]` tables a `{ add, remove }` edit table is accepted too.
     List(&'static Ty),
     /// A list that always accepts the `{ add, remove }` edit form (machine files).
@@ -46,7 +48,7 @@ impl Ty {
     fn describe(&self) -> String {
         match self {
             Ty::Any => "any value".into(),
-            Ty::Str | Ty::Path | Ty::Cmd | Ty::DotsReq => "a string".into(),
+            Ty::Str | Ty::Path | Ty::Cmd | Ty::DotsReq | Ty::VersionSpec => "a string".into(),
             Ty::Int => "an integer".into(),
             Ty::Bool => "a boolean".into(),
             Ty::Float => "a number".into(),
@@ -111,6 +113,10 @@ pub struct Env<'a> {
     pub src: &'a SourceFile,
     /// Check package-relative paths (package files only).
     pub check_paths: bool,
+    /// Validating an override file: a partial copy of its target. Lists accept
+    /// `{ add, remove, prepend }` everywhere, keyed entries may be tables, and any entry
+    /// accepts `remove = true`.
+    pub partial: bool,
     /// Built-in provider ids and their tables, for `Ty::Providers`.
     pub provider_ty: fn(&str) -> Option<&'static Ty>,
 }
@@ -121,6 +127,8 @@ pub struct State {
     pub diags: Diags,
     /// `//`-prefixed paths seen (accepted, but they block `add --copy`).
     pub escape_hatch: Vec<String>,
+    /// Every `[platform."<key>"]` key seen, with the key's byte span.
+    pub platform_keys: Vec<(String, Option<std::ops::Range<usize>>)>,
 }
 
 /// Validate a whole document against `ty`.
@@ -200,6 +208,21 @@ fn check(env: &Env, st: &mut State, ty: &Ty, key: &str, item: &Item, plat: bool)
             }
             Some(_) => {}
         },
+        Ty::VersionSpec => match item.as_str() {
+            None => wrong_type(env, st, ty, key, item),
+            Some(s) => {
+                if crate::vspec::Spec::parse(s).is_err() {
+                    st.diags.report(
+                        false,
+                        "version-spec-invalid",
+                        &[("spec", s)],
+                        env.src,
+                        span_of(item),
+                        None,
+                    );
+                }
+            }
+        },
         Ty::DotsReq => match item.as_str() {
             None => wrong_type(env, st, ty, key, item),
             Some(s) => {
@@ -239,11 +262,15 @@ fn check(env: &Env, st: &mut State, ty: &Ty, key: &str, item: &Item, plat: bool)
                 }
                 return;
             }
-            let edit_ok = plat || matches!(ty, Ty::ListEdit(_));
+            let edit_ok = plat || env.partial || matches!(ty, Ty::ListEdit(_));
             if edit_ok && let Some(t) = item.as_table_like() {
+                let keyed = env.partial && matches!(inner, Ty::Obj(_) | Ty::Table(_));
                 for (k, v) in t.iter() {
-                    if k == "add" || k == "remove" {
+                    if k == "add" || k == "remove" || (k == "prepend" && env.partial) {
                         check(env, st, &Ty::List(inner), key, v, plat);
+                    } else if keyed {
+                        // `files = { "<dst>" = { ... } }`: an entry addressed by its key.
+                        check(env, st, inner, k, v, plat);
                     } else {
                         unknown_key(env, st, t, k, &["add", "remove"]);
                     }
@@ -263,6 +290,8 @@ fn check(env: &Env, st: &mut State, ty: &Ty, key: &str, item: &Item, plat: bool)
                     check_platform(env, st, fields, v);
                 } else if let Some((_, fty)) = fields.iter().find(|(n, _)| *n == k) {
                     check(env, st, fty, k, v, plat);
+                } else if env.partial && k == "remove" {
+                    check(env, st, &Ty::Bool, k, v, plat);
                 } else {
                     let mut names: Vec<&str> = fields.iter().map(|(n, _)| *n).collect();
                     if allow_platform {
@@ -334,6 +363,10 @@ fn check_platform(env: &Env, st: &mut State, fields: &'static [(&'static str, Ty
         return;
     };
     for (pk, pv) in t.iter() {
+        let span = t
+            .get_key_value(pk)
+            .and_then(|(k, v)| k.span().or_else(|| v.span()));
+        st.platform_keys.push((pk.to_string(), span));
         check(env, st, &Ty::Table(fields), pk, pv, true);
     }
 }

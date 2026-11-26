@@ -36,6 +36,32 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     atomic_write_hooked(path, bytes, &|_| Ok(()))
 }
 
+/// Follow symlinks (also dangling ones) to the path that really holds the content.
+pub fn resolve_link(path: &Path) -> PathBuf {
+    let mut p = path.to_path_buf();
+    for _ in 0..32 {
+        match fs::symlink_metadata(&p) {
+            Ok(m) if m.file_type().is_symlink() => match fs::read_link(&p) {
+                Ok(t) => {
+                    p = match p.parent() {
+                        Some(d) => d.join(t),
+                        None => t,
+                    }
+                }
+                Err(_) => break,
+            },
+            _ => break,
+        }
+    }
+    p
+}
+
+/// As [`atomic_write`], but a symlink at `path` is resolved first: the file it points to is
+/// replaced and the link stays. For files the user owns (repo sources, override layers).
+pub fn atomic_write_follow(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    atomic_write(&resolve_link(path), bytes)
+}
+
 /// As [`atomic_write`], with a failure-injection hook. On error the temp file is removed and the
 /// destination is untouched.
 pub fn atomic_write_hooked(
@@ -155,4 +181,34 @@ pub fn backup_location(backup_dir: &Path, abs: &Path) -> PathBuf {
         }
     }
     p
+}
+
+#[cfg(all(test, unix))]
+mod follow_tests {
+    use super::*;
+
+    #[test]
+    fn atomic_write_follow_replaces_the_target_and_keeps_the_link() {
+        let d = tempfile::tempdir().unwrap();
+        let target = d.path().join("real");
+        let link = d.path().join("link");
+        fs::write(&target, "old").unwrap();
+        std::os::unix::fs::symlink("real", &link).unwrap();
+        atomic_write_follow(&link, b"new").unwrap();
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(fs::read_to_string(&target).unwrap(), "new");
+        // atomic_write alone replaces the link.
+        atomic_write(&link, b"x").unwrap();
+        assert!(
+            !fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
 }

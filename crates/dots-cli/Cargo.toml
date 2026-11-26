@@ -21,13 +21,21 @@ dots-model.workspace = true
 dots-providers.workspace = true
 dots-resolve.workspace = true
 dots-engine.workspace = true
+dots-lock.workspace = true
 dots-env.workspace = true
+dots-settings.workspace = true
+dots-services.workspace = true
+dots-config.workspace = true
 clap.workspace = true
 ctrlc.workspace = true
 serde_json.workspace = true
+toml_edit = "0.25"
 
 [dev-dependencies]
 dots-testkit.workspace = true
 jsonschema.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["process"] }

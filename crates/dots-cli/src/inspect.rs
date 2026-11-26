@@ -10,10 +10,10 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use dots_core::{Diagnostic, Dirs, ExitCode, Report};
-use dots_engine::{Change, Wanted, compare, diff, parse_wanted};
+use dots_engine::parse_wanted;
 use dots_env::{Contribution, EnvCtx, EnvOverlay};
 use dots_providers::{Ctx, Installed, Registry, Spec};
-use dots_resolve::{InstalledMap, ProviderChoice, Resolution, resolve, spec_for};
+use dots_resolve::{InstalledMap, ProviderChoice, Resolution, spec_for_in};
 use serde_json::{Value, json};
 
 use crate::app::Context;
@@ -145,8 +145,23 @@ pub fn failure(
 pub fn load(ctx: &Context, cmd: &str) -> Result<Loaded, Box<Report>> {
     let rc =
         load_repo(ctx, None).map_err(|(e, w)| Box::new(failure(cmd, e, w, ExitCode::Error)))?;
-    let pctx = providers::exec_ctx(&ctx.dirs, ctx.opts.offline, false, cmd);
-    let registry = providers::registry(&ctx.dirs, &pctx, &rc.m.facts, Some(&rc.repo), &rc.m.root);
+    let pctx = providers::with_env_path(
+        providers::exec_ctx(&ctx.dirs, ctx.opts.offline, false, cmd),
+        &rc,
+        &ctx.dirs,
+    );
+    let settings = crate::config_cmd::settings_for(&rc);
+    let registry = providers::registry(
+        &ctx.dirs,
+        &pctx,
+        &rc.m.facts,
+        Some(&rc.repo),
+        &rc.m.root,
+        providers::ScriptInputs {
+            tags: &rc.m.machine.tags,
+            settings: &settings,
+        },
+    );
     assemble(rc, registry, pctx).map_err(|(e, w)| Box::new(failure(cmd, e, w, ExitCode::Error)))
 }
 
@@ -162,14 +177,19 @@ pub fn assemble(
         let inst = installed_parallel(&registry, &pctx);
         (inst, git.join().unwrap_or_default())
     });
-    let resolution = resolve(&dots_resolve::Inputs {
-        repo: &rc.repo,
-        machine: &rc.m.machine,
-        facts: &rc.m.facts,
-        chain: &rc.chain,
-        providers: &registry,
-        installed: &installed,
-    });
+    // Never touches the network: what providers offer is whatever `outdated` cached.
+    let resolution = dots_resolve::resolve_full(
+        &dots_resolve::Inputs {
+            repo: &rc.repo,
+            machine: &rc.m.machine,
+            facts: &rc.m.facts,
+            chain: &rc.chain,
+            providers: &registry,
+            installed: &installed,
+        },
+        &providers::CachedOffers::new(&pctx.cache_dir),
+        &crate::config_cmd::settings_for(&rc),
+    );
     let (errors, warnings) = split(&resolution, rc.m.warnings.clone());
     if !errors.is_empty() {
         return Err((errors, warnings));
@@ -252,16 +272,12 @@ impl Loaded {
             .filter_map(|a| {
                 let c = a.choice?;
                 a.installed?;
-                let cfg = self
-                    .rc
-                    .repo
-                    .packages
-                    .get(a.name)
-                    .and_then(|p| p.providers.get(&c.id));
+                let pkg = self.rc.repo.packages.get(a.name);
+                let cfg = pkg.and_then(|p| p.providers.get(&c.id));
                 Some(LatestRequest {
                     package: a.name.to_string(),
                     provider: c.id.clone(),
-                    spec: spec_for(&c.native_name, cfg),
+                    spec: spec_for_in(&c.native_name, cfg, pkg.map(|p| p.dir.as_path())),
                 })
             })
             .collect()
@@ -286,14 +302,7 @@ pub fn tilde(p: &Path, home: &Path) -> String {
 /// Is `latest` something dots would move `have` to? A newer release only counts when it still
 /// satisfies the wanted version (an exact pin is never outdated), and a pinned install never is.
 pub fn is_outdated(wanted: Option<&str>, have: &str, latest: &str, pinned: bool) -> bool {
-    if pinned {
-        return false;
-    }
-    let w = parse_wanted(wanted);
-    if matches!(w, Wanted::Git(_)) {
-        return false;
-    }
-    compare(latest, have) == std::cmp::Ordering::Greater && diff(&w, Some(latest)) == Change::None
+    dots_engine::is_outdated(&parse_wanted(wanted), have, latest, pinned)
 }
 
 // ------------------------------------------------------------------ latest-version cache
@@ -333,6 +342,10 @@ pub struct LatestCache {
 }
 
 impl LatestCache {
+    pub fn at(dir: PathBuf) -> Self {
+        LatestCache { dir }
+    }
+
     pub fn new(dirs: &Dirs) -> Self {
         LatestCache {
             dir: dirs.latest_cache(),

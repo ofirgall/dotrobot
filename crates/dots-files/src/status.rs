@@ -105,6 +105,10 @@ pub fn build_step(file: &ResolvedFile, ctx: &FilesCtx) -> FileStep {
             }
             Err(d) => fail(&mut step, d),
         },
+        Mode::Terminfo => match read(file.src.as_deref().unwrap_or(Path::new(""))) {
+            Ok(b) => step.sha256 = Some(sha256_hex(&b)),
+            Err(d) => fail(&mut step, d),
+        },
         Mode::Inject => match read(file.src.as_deref().unwrap_or(Path::new(""))) {
             Ok(b) => {
                 let body = String::from_utf8_lossy(&b)
@@ -122,9 +126,20 @@ pub fn build_step(file: &ResolvedFile, ctx: &FilesCtx) -> FileStep {
 }
 
 /// Observe the on-disk state of a step's destination.
-pub fn observe(step: &FileStep, rec: Option<&Record>) -> FileState {
+pub fn observe(step: &FileStep, rec: Option<&Record>, ctx: &FilesCtx) -> FileState {
     let dst = &step.dst;
     match step.mode {
+        Mode::Terminfo => {
+            let name = dst.file_name().map(|n| n.to_string_lossy().into_owned());
+            let (Some(name), Some(dir), Some(src)) = (name, dst.parent(), step.src.as_deref())
+            else {
+                return FileState::Missing;
+            };
+            let scratch = ctx
+                .state
+                .join(format!("terminfo-check-{}", std::process::id()));
+            crate::terminfo::observe(ctx.tools.as_ref(), dir, &name, src, &scratch)
+        }
         Mode::Dir => {
             if dst.is_dir() {
                 FileState::Ok
@@ -276,7 +291,7 @@ pub fn status(files: &[ResolvedFile], ctx: &FilesCtx) -> Vec<FileStatus> {
                     error: step.error,
                 };
             }
-            let state = observe(&step, rec);
+            let state = observe(&step, rec, ctx);
             let (hint, resolutions) = resolutions(&step, state);
             FileStatus {
                 package: step.package,

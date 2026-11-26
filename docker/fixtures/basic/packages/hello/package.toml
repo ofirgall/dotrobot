@@ -1,0 +1,12 @@
+schema = 1
+name = "hello"
+bin = "hello-dots"
+
+[providers.script]
+check = "test -x $HOME/.local/bin/hello-dots"
+version = "echo 1.0.0"
+install = '''
+mkdir -p "$HOME/.local/bin"
+printf '#!/bin/sh\necho hello from dots\n' > "$HOME/.local/bin/hello-dots"
+chmod +x "$HOME/.local/bin/hello-dots"
+'''

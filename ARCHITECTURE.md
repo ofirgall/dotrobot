@@ -197,7 +197,7 @@ locked = true
 [providers.brew]              # an empty table means "supported, defaults apply"
 ```
 
-A package that supports only some providers lists only those. With no `[providers]` table at all, the package is treated as supported by **every** provider in the priority list, using `name`. Pass `providers_only = true` to forbid that.
+A package that supports only some providers lists only those. With no `[providers]` table at all, the package is treated as supported by **every** provider in the priority list, using `name`. Pass `providers_only = true` to forbid that. A package with no providers and no `bin`/`bins` that carries other content (`[[files]]`, hooks, env, settings, `requires`, a `manual/` dir) and no `version`/`prefer`/`[service]` is a meta package: no provider installs it.
 
 Full surface:
 
@@ -241,6 +241,10 @@ vars = { GHOSTTY_RESOURCES_DIR = "..." }
 [hooks]
 post_install = "scripts/install-plugins.sh"
 post_files   = "touch -h ~/.config/karabiner/karabiner.json"   # e.g. karabiner reload
+# A hook fires only when its trigger changed in the run (install/upgrade for *_install, a file
+# change for *_files; a failed hook fires again). It runs like a script command (bash, package
+# dir as cwd, DOTS_* env, user not root), is logged, journalled and shown by `plan`; a failure
+# fails the run and skips the package's later hooks. `--dry-run` runs none.
 
 # --- Provenance (written by `dots add --copy`, never by hand) ---
 [origin]
@@ -421,10 +425,17 @@ name = "code"
 repo = { url = "https://packages.microsoft.com/repos/code", suite = "stable", components = ["main"],
          key = "https://packages.microsoft.com/keys/microsoft.asc", fingerprint = "BC528686B50D79E339D3721CEB3E94ADBE1229CF" }
 # or: repo = { ppa = "git-core/ppa" }
+# flat repository (`deb https://download.sublimetext.com/ apt/stable/`, a suite path and no components):
+#   repo = { url = "https://download.sublimetext.com/", suite = "apt/stable/", flat = true, key = "…", fingerprint = "…" }
 # optional: pin = { origin = "packages.mozilla.org", priority = 1000 }   # e.g. Firefox from the PPA over the snap
 ```
 
-- **Owned files.** `dots` writes the key to `/etc/apt/keyrings/dots-<name>.asc` (it must match `fingerprint`), the source to `/etc/apt/sources.list.d/dots-<name>.sources` (deb822 with `Signed-By`), and the optional pin to `/etc/apt/preferences.d/dots-<name>`. All three are owned files (§6.4).
+A package that is already installed from the distribution archive (`git` on a fresh Ubuntu) still gets its repository: when a spec declares `repo` and the sources file `dots` would write (`/etc/apt/sources.list.d/dots-<id>.sources`) is absent, the plan upgrades the package, adding the repository first, and notes `repo git-core/ppa not configured`. Once the file exists the plan is empty again. The check is the provider hook `stale_reason(ctx, spec)` (default: none), asked only for installed packages the version rules leave alone; tests point it at a temporary directory with `DOTS_APT_SOURCES_DIR`.
+
+- **Flat repositories.** A repository whose suite is a path with no components is declared with `flat = true` or `components = []`. A suite that ends in `/` with no `components` key is flat too. The sources file then has `Suites: apt/stable/` and no `Components` line (a missing trailing `/` is added). Listing components for a flat repository is an error.
+- **Keys: armored or binary.** The key may be ASCII-armored or a binary (dearmored) OpenPGP key; dots tells them apart by content (an armor header, else an OpenPGP public-key packet), not by the URL's extension (Spotify's `.gpg` is armored). `gpg --show-keys` verifies the fingerprint either way, and the verified bytes reach the root step on stdin as before. An armored key is stored as `dots-<name>.asc`, a binary one as `dots-<name>.gpg`, and `Signed-By` names whichever was written (a key that changes format replaces the other file).
+- **A bad package name fails alone.** `apt-get install` of a batch fails as a whole when one name is unknown. When a batch exits non-zero, the engine retries its packages one by one (the provider's `retry_each`), so only the bad one fails. A batch that succeeds is still one call, and the stale-cache `apt-get update` runs at most once per run.
+- **Owned files.** `dots` writes the key to `/etc/apt/keyrings/dots-<name>.asc` or `.gpg` (it must match `fingerprint`), the source to `/etc/apt/sources.list.d/dots-<name>.sources` (deb822 with `Signed-By`), and the optional pin to `/etc/apt/preferences.d/dots-<name>`. All three are owned files (§6.4).
 - **Updates.** Adding or changing a repository triggers one `apt-get update` before the batched install.
 - **Removal.** The repository is reference-counted: it is removed when the last package that names it goes.
 - **No `apt-key`.** It is never used. A key that doesn't match its fingerprint is `integrity-mismatch` (§6.6).
@@ -433,6 +444,8 @@ repo = { url = "https://packages.microsoft.com/repos/code", suite = "stable", co
 - `[providers.cargo] path = "herdr-last-tab"` is relative to the package dir and runs `cargo install --path`. Its version is the crate version plus the repo rev, so a change in the repo makes it outdated.
 - `git = "…"` with `git_fetch_with_cli = true` sets `CARGO_NET_GIT_FETCH_WITH_CLI` for private ssh repos.
 - `[providers.uv]` accepts the same `path`/`git` keys (`uv tool install <path>`, `git+ssh://…`).
+- `[providers.cargo] locked = false` drops `--locked` (default `true`) for old crates whose lockfile no longer builds with the current rustc (for example `igrep` 1.2.0). When a `--locked` install fails with a compile error, the failure message suggests `locked = false`.
+- `[providers.uv] kind = "lib", python = "system"` installs with `uv pip install --system`. On an externally managed python (PEP 668, detected by an `EXTERNALLY-MANAGED` file in the stdlib dir from `python3 -c 'import sysconfig; print(sysconfig.get_path("stdlib"))'`, as on Ubuntu 24.04) it **fails** with an error that suggests `kind = "venv"` or the opt-in. The opt-in `break_system_packages = true` passes `--break-system-packages` (install, upgrade and remove) and marks the action `needs_root` only when the system site-packages is not writable and `dots` is not root, so the engine's single sudo prompt covers it. It is never the default.
 - These replace the last `pip install --break-system-packages` and `cargo install --path` lines in `install_scripts/`.
 
 `pip` is deliberately **not** a provider in the sense of `pip install --break-system-packages`. Python CLIs go through `uv tool` (each tool gets an isolated venv). For libraries that a script needs (for example `libtmux` for a tmux plugin), declare a `uv` package with `[providers.uv] kind = "lib", python = "system"`. That runs `uv pip install --system`, and it is explicit and greppable. `scripts/requirements.txt` becomes a uv-managed venv at `~/.local/share/dots/venvs/scripts` (a `uv` package with `kind = "venv"`, `requirements = "requirements.txt"`).
@@ -637,13 +650,14 @@ The bundled definitions run the same conformance suite as built-in providers (§
 check     = "test -x ~/.local/bin/kv"                 # REQUIRED. exit 0 = installed
 version   = "kv --version | awk '{print $2}'"         # REQUIRED unless versionless = true
 latest    = "git ls-remote https://github.com/KoalaVim/kv HEAD | cut -c1-12"  # optional, enables `outdated`
-install   = "scripts/install.sh"                      # REQUIRED
+install   = "scripts/install.sh"                      # REQUIRED: a file in the package dir, or shell text
 upgrade   = "scripts/install.sh"                      # default = install
 uninstall = "scripts/uninstall.sh"                    # optional; absent = "cannot uninstall" shown in plan
 shell     = "bash"                                    # bash | sh | pwsh; default per-OS
 needs_root = false
 interactive = false                                    # true = stdin attached, cannot run in parallel
 timeout   = "20m"
+lock      = "pi"                                      # optional: packages with the same key never run at the same time
 fetch     = { url = "https://sh.rustup.rs", sha256 = "…" }   # optional: download this exact file, verify, run it as `install`
 ```
 
@@ -653,11 +667,15 @@ fetch     = { url = "https://sh.rustup.rs", sha256 = "…" }   # optional: downl
 - The installer is shown in the code review (§13) like any script, and a changed hash on `pull` is a review item.
 - An unpinned `curl … | sh` in a script is a lint warning that suggests `fetch`.
 
+**File or shell text.** `check`, `version`, `latest`, `install`, `upgrade`, `uninstall` and the package hooks take either. A value that is **a single token naming an existing file relative to the package dir** (`install = "install.sh"`, `"scripts/install.sh"`) runs that file with the script's shell (`bash ./install.sh`; the file needs no executable bit), cwd = the package dir. Anything else is shell text, run as written: `install = "make -C src install"`, `check = "command -v kv"`, and a one-word command with no such file next to the package (`install = "true"`). A file with arguments is shell text, so it runs as written: write `bash install.sh --fast`. The plan shows the command that will run.
+
+**Serialization (`lock`).** Script installs run in parallel, which breaks packages that rewrite one shared file (three `pi install` calls updating the same `settings.json`). Give such packages the same `lock = "<key>"`: packages with the same key never run at the same time, in any order. Packages without a key (or with another key) are unaffected. The key is only a name; it has no meaning outside the run.
+
 The runtime contract for every script the engine runs:
 
 - cwd = the package dir. `set -euo pipefail` is prepended for bash.
 - Environment: `DOTS_OS`, `DOTS_ARCH`, `DOTS_DISTRO`, `DOTS_WSL`, `DOTS_SUDO`, `DOTS_TAGS` (space-separated), `DOTS_TAG_<NAME>=1`, `DOTS_PKG`, `DOTS_PKG_DIR`, `DOTS_ROOT`, `DOTS_STATE`, `DOTS_BIN=~/.local/bin`, `DOTS_LIB` (shared helpers), `DOTS_VERSION_WANTED`, `DOTS_DRY_RUN`.
-- `PATH` = the generated env (§10) plus resolved provider bins, so scripts never need to `source` anything.
+- `PATH` = the `[env] path` directories of every active package (§10), then the inherited `PATH`, plus resolved provider bins. This holds for `check` and `version` too, so `status` and `plan` find a tool installed into `~/.local/bin` or `~/.bun/bin`, and scripts never need to `source` anything. Hooks, and the `available`/`installed` commands of declarative providers (§5.4), get the same `PATH`.
 - stdout and stderr go to `~/.local/state/dots/logs/<run-id>/<pkg>.<action>.log`. The tail is shown on failure.
 - stdin is `/dev/null` unless `interactive`. This is what makes `newgrp`-style hangs impossible to ship unnoticed.
 - After `install` exits 0, `check` must pass. If it does not, the result is **failure**: "install succeeded but check fails". This one rule catches P4.
@@ -676,6 +694,8 @@ version   = "go version -m ~/go/bin/{bin} | awk '/^\\tmod/{print $3}'"
 install   = "go install {source}@{version|latest}"
 batch     = false
 ```
+
+A provider's `available` is run at plan time, with the `[env] path` directories on `PATH` (§10). If it fails and `bootstrap` names a package, the provider counts as available once that package is installed: the packages that use it are planned after the bootstrap package and its `installed` command is not run until then. Without `bootstrap`, a failing `available` makes the provider unavailable (`no-provider-satisfies`). The `available` command runs once per run.
 
 Placeholders are templated by minijinja with the spec and facts in scope. Filters on `source`: `|repo` (`owner/repo`, dropping any `/subdir`), `|kind` (`github`, `local`, …) and `|path` (for `local:` sources, expanded). If a declarative provider proves popular, promote it to built-in Rust.
 
@@ -854,6 +874,7 @@ app     = "gh-markdown-preview.desktop"
 # or: setting = "default-web-browser", value = "hypr-browser.desktop"
 ```
 
+- **Tool not installed yet.** `xdg-mime` and `xdg-settings` may come from a package of the same run. An `[[xdg]]` entry whose tool cannot be started is a *deferred* step for that entry only (the rest of the plan is unaffected, `status` shows it as unknown); the settings phase runs after the installs, reads it then and applies it. If the tool is still missing, the step is skipped with a note (`skipped: xdg-mime is still not installed`) and the run does not fail.
 - **Read before write.** `plan` reads each value (`defaults read`/`export`, the registry API, `xdg-mime query`) in one batched pass per domain or hive. Only values that differ become steps.
 - **Status vocabulary.** The states are the same as for files (§6.3). `ok` means the value matches. `drift` means someone changed it, with the observed and wanted values shown, plus a `dots adopt` resolution that writes the observed value back into the package.
 - **Ownership and removal.** The original value is recorded the first time `dots` changes a key, in the ownership ledger, the same as a file backup. Removing the declaration restores it (or deletes the key if it didn't exist). `dots restore <run-id>` works for these too.
@@ -1144,7 +1165,7 @@ source = ["~/.cargo/env"]              # last resort for tools that insist
 # <<< dots env <<<
 ```
 
-The executor uses the same env internally, so a package installed earlier in a run is visible on `PATH` to later steps, with no reshelling. `dots which` and `doctor` use it to detect shadowing: `/usr/bin/bat` vs `~/.cargo/bin/bat`.
+The executor uses the same env internally, so a package installed earlier in a run is visible on `PATH` to later steps, with no reshelling. Provider commands are built the same way for `plan`, `status` and `apply`: `PATH` is the `[env] path` directories of all active packages (highest precedence first), prepended to the inherited `PATH`. `dots which` and `dots bins` already resolve against that list. `dots which` and `doctor` use it to detect shadowing: `/usr/bin/bat` vs `~/.cargo/bin/bat`.
 
 ---
 

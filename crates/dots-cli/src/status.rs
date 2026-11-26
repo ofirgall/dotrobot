@@ -24,15 +24,19 @@ use crate::inspect::{LatestCache, Loaded, cached_latest, load, tilde};
 pub enum Area {
     Packages,
     Files,
+    Settings,
+    Services,
     Todos,
     Git,
     Bins,
 }
 
 impl Area {
-    const ALL: [Area; 5] = [
+    const ALL: [Area; 7] = [
         Area::Packages,
         Area::Files,
+        Area::Settings,
+        Area::Services,
         Area::Todos,
         Area::Git,
         Area::Bins,
@@ -42,6 +46,8 @@ impl Area {
         match self {
             Area::Packages => "packages",
             Area::Files => "files",
+            Area::Settings => "settings",
+            Area::Services => "services",
             Area::Todos => "todos",
             Area::Git => "git",
             Area::Bins => "bins",
@@ -52,6 +58,8 @@ impl Area {
         match self {
             Area::Packages => "PACKAGES",
             Area::Files => "FILES",
+            Area::Settings => "SETTINGS",
+            Area::Services => "SERVICES",
             Area::Todos => "TODO",
             Area::Git => "GIT",
             Area::Bins => "BINS",
@@ -74,6 +82,8 @@ pub struct Item {
     pub latest: Option<String>,
     pub detail: String,
     pub hints: Vec<String>,
+    /// Override scopes that change this item (`repo`, `profile`, `machine`).
+    pub overridden: Vec<String>,
 }
 
 impl Item {
@@ -89,6 +99,7 @@ impl Item {
             latest: None,
             detail: String::new(),
             hints: Vec::new(),
+            overridden: Vec::new(),
         }
     }
 
@@ -112,7 +123,7 @@ impl Item {
     }
 
     fn to_json(&self) -> Value {
-        json!({
+        let mut v = json!({
             "area": self.area.key(),
             "name": self.name,
             "package": self.package,
@@ -123,7 +134,12 @@ impl Item {
             "latest": self.latest,
             "detail": self.detail,
             "hints": self.hints,
-        })
+        });
+        // Only customized items carry the key, so plain output stays unchanged.
+        if !self.overridden.is_empty() {
+            v["overridden"] = json!(self.overridden);
+        }
+        v
     }
 }
 
@@ -134,6 +150,7 @@ fn mode_word(m: dots_files::Mode) -> &'static str {
         dots_files::Mode::Render => "render",
         dots_files::Mode::Inject => "inject",
         dots_files::Mode::Dir => "dir",
+        dots_files::Mode::Terminfo => "terminfo",
     }
 }
 
@@ -166,7 +183,11 @@ pub fn file_items(l: &Loaded, dirs: &Dirs) -> Vec<Item> {
         };
         let mut it = Item::new(Area::Files, &name, package, State::Failed);
         it.detail = d.message.clone();
-        it.hints = vec![format!("dots lint  # then fix {package}")];
+        it.hints = if d.code == "setting-required" {
+            vec![d.hint.clone()]
+        } else {
+            vec![format!("dots lint  # then fix {package}")]
+        };
         items.push(it);
     }
     for fs in dots_files::status(&r.files, &ctx) {
@@ -192,6 +213,9 @@ pub fn file_items(l: &Loaded, dirs: &Dirs) -> Vec<Item> {
         }
         if hints.is_empty() {
             match state {
+                State::Missing | State::Stale if fs.package == dots_files::FRAGMENT_OWNER => {
+                    hints.push("dots apply".into())
+                }
                 State::Missing | State::Stale => hints.push(format!("dots apply {}", fs.package)),
                 State::Dangling => hints.push("dots roots".into()),
                 State::ForeignEntries => {
@@ -206,9 +230,91 @@ pub fn file_items(l: &Loaded, dirs: &Dirs) -> Vec<Item> {
     items
 }
 
+// ---------------------------------------------------------------- settings and services
+
+fn setting_state(word: &str) -> State {
+    match word {
+        "ok" => State::Ok,
+        "drift" => State::Drift,
+        "missing" => State::Missing,
+        "n/a" => State::NotApplicable,
+        "unknown" => State::Unknown,
+        _ => State::Failed,
+    }
+}
+
+/// `[[defaults]]`, `[[registry]]` and `[[xdg]]`: one batched read per domain, key or mime type.
+pub fn settings_items(l: &Loaded, dirs: &Dirs) -> Vec<Item> {
+    crate::settings_phase::status_rows(&l.rc, &l.resolution, dirs, &l.pctx)
+        .into_iter()
+        .map(|r| {
+            let mut it = Item::new(Area::Settings, &r.name, &r.package, setting_state(r.state));
+            it.provider = (!r.kind.is_empty()).then(|| r.kind.clone());
+            it.want = (!r.want.is_empty()).then(|| r.want.clone());
+            it.have = r.have.clone();
+            it.detail = r.detail.clone();
+            it.hints = match (&r.adopt, r.state) {
+                (Some(a), _) => vec![a.clone(), format!("dots apply {}", r.package)],
+                (None, "missing" | "drift") => vec![format!("dots apply {}", r.package)],
+                _ => vec![],
+            };
+            it
+        })
+        .collect()
+}
+
+/// `[service]`: `running`, `stopped` or `failed`, one call per manager.
+pub fn service_items(l: &Loaded, dirs: &Dirs) -> Vec<Item> {
+    use dots_services::Health;
+    let (rows, inert, error) =
+        crate::services_phase::status_rows(&l.rc, &l.resolution, dirs, &l.pctx);
+    let mut items = Vec::new();
+    for r in rows {
+        let (state, detail) = match r.health {
+            Health::Ok => (State::Ok, String::new()),
+            Health::NotEnabled => (State::Missing, "not enabled".to_string()),
+            Health::Stopped => (State::Drift, "not running".to_string()),
+            Health::Failed => (State::Failed, "crashed".to_string()),
+        };
+        let mut it = Item::new(Area::Services, &r.name, &r.package, state);
+        it.provider = Some(r.manager.as_str().to_string());
+        it.have = Some(r.state.run.as_str().to_string());
+        it.want = Some("running".into());
+        it.detail = detail;
+        if state != State::Ok {
+            it.hints = vec![format!("dots apply {}", r.package)];
+        }
+        items.push(it);
+    }
+    for package in inert {
+        let mut it = Item::new(Area::Services, &package, &package, State::NotApplicable);
+        it.detail = "n/a on this platform".into();
+        items.push(it);
+    }
+    if let Some(e) = error {
+        let mut it = Item::new(Area::Services, "services", "", State::Failed);
+        it.detail = e;
+        items.push(it);
+    }
+    items
+}
+
 // ---------------------------------------------------------------- packages
 
+/// What `dots.lock` records for `name` on this machine (the row of its chosen provider).
+fn lock_row(
+    lock: &dots_lock::Lock,
+    machine_key: &str,
+    name: &str,
+    provider: &str,
+) -> Option<dots_lock::PkgRow> {
+    lock.pkg(name, &dots_lock::platform_for(provider, machine_key))
+        .cloned()
+}
+
 fn package_items(l: &Loaded, dirs: &Dirs, all: bool) -> Vec<Item> {
+    let lock = dots_lock::Lock::load(&crate::lock_cmd::path(&l.rc.m.root)).unwrap_or_default();
+    let machine_key = crate::lock_cmd::machine_key(&l.rc);
     let cache = LatestCache::new(dirs).load_all();
     let owned = OwnedState::load(&dirs.state_json()).0;
     let mut items = Vec::new();
@@ -279,11 +385,34 @@ fn package_items(l: &Loaded, dirs: &Dirs, all: bool) -> Vec<Item> {
             continue;
         };
         it.have = Some(inst.version.clone());
+        // A declared shim that is missing or dangling is drift on its package.
+        let shim = dots_engine::shim_declared_for(&l.rc.repo, &l.resolution, name, &dirs.home)
+            .and_then(|d| match dots_engine::shim_state(&d.path) {
+                dots_engine::ShimState::Ok => None,
+                dots_engine::ShimState::Missing => Some((d, "is missing")),
+                dots_engine::ShimState::Dangling => Some((d, "points at nothing")),
+                dots_engine::ShimState::Occupied => Some((d, "is occupied by a real file")),
+            });
         let latest = cached_latest(&cache, &choice.id, &choice.native_name);
         it.latest = latest.map(str::to_string);
         match diff(&parse_wanted(wanted.as_deref()), Some(&inst.version)) {
             Change::None => {
-                if let Some(latest) = latest
+                // The provider holds a version the lock does not name, though the spec allows
+                // it: drift (apt and brew cannot install an exact version).
+                let drifted = lock_row(&lock, &machine_key, name, &choice.id).filter(|row| {
+                    let lk = dots_lock::rules::Locked::from(row);
+                    dots_lock::rules::lock_satisfies(&res.wanted, &lk)
+                        && !dots_lock::rules::matches_lock(
+                            &lk,
+                            &inst.version,
+                            inst.source.as_deref(),
+                        )
+                });
+                if let Some(row) = drifted {
+                    it.state = State::Drift;
+                    it.detail = format!("locked {}, installed {}", row.shown(), inst.version);
+                    it.hints = vec![format!("dots apply {name}")];
+                } else if let Some(latest) = latest
                     && crate::inspect::is_outdated(
                         wanted.as_deref(),
                         &inst.version,
@@ -301,8 +430,16 @@ fn package_items(l: &Loaded, dirs: &Dirs, all: bool) -> Vec<Item> {
                 it.hints = vec![format!("dots apply {name}")];
             }
         }
+        if let Some((d, what)) = shim
+            && matches!(it.state, State::Ok | State::Outdated)
+        {
+            it.state = State::Drift;
+            it.detail = format!("shim {} {what}", tilde(&d.path, &dirs.home));
+            it.hints = vec![format!("dots apply {name}")];
+        }
         items.push(it);
     }
+    mark_overridden(l, &mut items);
 
     // Installed by dots, no longer declared.
     for (name, o) in &owned.packages {
@@ -323,6 +460,7 @@ fn package_items(l: &Loaded, dirs: &Dirs, all: bool) -> Vec<Item> {
 
     // Installed by a provider and unknown to dots: only listed with `--all`.
     if all {
+        let deps = crate::bins::dependencies(l);
         for (provider, map) in &l.installed {
             if matches!(provider.as_str(), "script" | "git") {
                 continue;
@@ -334,12 +472,36 @@ fn package_items(l: &Loaded, dirs: &Dirs, all: bool) -> Vec<Item> {
                 let mut it = Item::new(Area::Packages, native, native, State::Unmanaged);
                 it.provider = Some(provider.clone());
                 it.have = Some(inst.version.clone());
-                it.detail = "installed outside dots".into();
+                it.detail = if deps.get(provider).is_some_and(|d| d.contains(native)) {
+                    "installed as a dependency of another package".into()
+                } else {
+                    "installed outside dots".into()
+                };
                 items.push(it);
             }
         }
     }
     items
+}
+
+/// `✎ overridden (repo, machine)`: the scopes whose overrides change a package.
+fn mark_overridden(l: &Loaded, items: &mut [Item]) {
+    let Some(info) = l.rc.repo.effective.as_ref() else {
+        return;
+    };
+    for it in items.iter_mut().filter(|i| i.area == Area::Packages) {
+        let scopes = info.scopes_of(&format!("pkg:{}", it.name));
+        if scopes.is_empty() {
+            continue;
+        }
+        it.overridden = scopes.iter().map(|s| s.short().to_string()).collect();
+        let mark = format!("✎ overridden ({})", it.overridden.join(", "));
+        it.detail = if it.detail.is_empty() {
+            mark
+        } else {
+            format!("{} · {mark}", it.detail)
+        };
+    }
 }
 
 /// A git source with local changes is `modified`, whatever its revision.
@@ -373,11 +535,22 @@ fn git_dirty(l: &Loaded, dirs: &Dirs, items: &mut [Item]) {
     }
 }
 
-fn todo_items(dirs: &Dirs) -> Vec<Item> {
-    OwnedState::load(&dirs.state_json())
-        .0
-        .todos
+/// Pending manual actions. A `logout` / `reboot` action whose setting reads as declared now
+/// is not pending any more (the next `apply` also drops it from the state).
+fn todo_items(l: &Loaded, dirs: &Dirs) -> Vec<Item> {
+    let todos = OwnedState::load(&dirs.state_json()).0.todos;
+    let settled = if todos.is_empty() {
+        Vec::new()
+    } else {
+        crate::settings_phase::settled_todos(&l.rc, &l.resolution, &l.pctx)
+    };
+    todos
         .iter()
+        .filter(|t| {
+            !settled
+                .iter()
+                .any(|(p, r)| *p == t.package && *r == t.reason)
+        })
         .map(|t| {
             let mut it = Item::new(Area::Todos, &t.package, &t.package, State::Pending);
             it.detail = t.reason.clone();
@@ -430,7 +603,9 @@ pub fn compute(l: &Loaded, dirs: &Dirs, all: bool) -> Snapshot {
     let mut items = package_items(l, dirs, all);
     git_dirty(l, dirs, &mut items);
     items.extend(file_items(l, dirs));
-    items.extend(todo_items(dirs));
+    items.extend(settings_items(l, dirs));
+    items.extend(service_items(l, dirs));
+    items.extend(todo_items(l, dirs));
     items.extend(bin_items(l, dirs));
     Snapshot { items }
 }
@@ -934,7 +1109,13 @@ fn deep(l: &Loaded, dirs: &Dirs, snap: &Snapshot, name: &str) -> Result<Report, 
         "versions": {
             "wanted": pkg.version.clone().unwrap_or_else(|| "latest".into()),
             "installed": main.and_then(|i| i.have.clone()),
-            "locked": null,
+            "locked": lock_row(
+                &dots_lock::Lock::load(&crate::lock_cmd::path(&l.rc.m.root)).unwrap_or_default(),
+                &crate::lock_cmd::machine_key(&l.rc),
+                name,
+                res.and_then(|r| r.chosen_provider()).map_or("", |c| c.id.as_str()),
+            )
+            .map(|r| r.shown()),
             "latest": main.and_then(|i| i.latest.clone()),
         },
         "inclusion": bundle.map(|i| i.display()),
@@ -995,7 +1176,19 @@ fn deep(l: &Loaded, dirs: &Dirs, snap: &Snapshot, name: &str) -> Result<Report, 
             "installed".to_string(),
             Cell::from(ver(main.and_then(|i| i.have.as_ref()))),
         ),
-        ("locked".to_string(), Cell::muted("-")),
+        (
+            "locked".to_string(),
+            match lock_row(
+                &dots_lock::Lock::load(&crate::lock_cmd::path(&l.rc.m.root)).unwrap_or_default(),
+                &crate::lock_cmd::machine_key(&l.rc),
+                name,
+                res.and_then(|r| r.chosen_provider())
+                    .map_or("", |c| c.id.as_str()),
+            ) {
+                Some(r) => Cell::from(r.shown()),
+                None => Cell::muted("-"),
+            },
+        ),
         (
             "latest".to_string(),
             Cell::from(ver(main.and_then(|i| i.latest.as_ref()))),

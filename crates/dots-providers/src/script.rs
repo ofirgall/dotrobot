@@ -15,14 +15,29 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use dots_facts::Facts;
+use sha2::{Digest, Sha256};
 
 use crate::{
     Action, Availability, BinEntry, Caps, Cmd, Ctx, DEFAULT_TIMEOUT, Installed, Latest, Op, OpKind,
     Outcome, Output, Provider, ProviderError, Result, Spec, Stdin, Support,
 };
+
+/// `fetch = { url, sha256 }`: a file dots downloads, verifies and hands to `install` as
+/// `{fetched}`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FetchSpec {
+    pub url: String,
+    /// The author's pin (`sha256:` prefix allowed). Without it, the lock's pin or the first
+    /// download decides.
+    pub sha256: Option<String>,
+}
+
+/// The placeholder in `install`/`upgrade` for the verified download.
+pub const FETCHED: &str = "{fetched}";
 
 /// The `[providers.script]` keys.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -45,8 +60,11 @@ pub struct ScriptConfig {
     pub versionless: bool,
     /// `20m`, `30s`, `1h30m`, `500ms`.
     pub timeout: Option<String>,
+    /// Serialization key: script packages with the same key never run concurrently.
+    pub lock: Option<String>,
     /// Declared executables the package puts in `DOTS_BIN`.
     pub bins: Vec<String>,
+    pub fetch: Option<FetchSpec>,
 }
 
 impl ScriptConfig {
@@ -75,6 +93,27 @@ impl ScriptConfig {
             )));
         }
         self.timeout()?;
+        if let Some(f) = &self.fetch {
+            if !crate::fetch::valid_url(&f.url) {
+                return Err(ProviderError::Other(format!(
+                    "script `fetch` url `{}` must be http(s)",
+                    f.url
+                )));
+            }
+            if let Some(h) = &f.sha256
+                && normalize_hash(h).is_none()
+            {
+                return Err(ProviderError::Other(format!(
+                    "script `fetch` sha256 `{h}` is not a 64-digit hex hash"
+                )));
+            }
+            if !self.install.as_deref().unwrap_or("").contains(FETCHED) {
+                return Err(ProviderError::Other(
+                    "script `fetch` needs `{fetched}` in `install` (for example `sh {fetched}`)"
+                        .into(),
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -84,6 +123,47 @@ impl ScriptConfig {
             Some(t) => parse_duration(t),
             None => Ok(DEFAULT_TIMEOUT),
         }
+    }
+}
+
+/// The first line of `text` that pipes a download into a shell (`curl ... | sh`,
+/// `bash -c "$(curl ...)"`, `sh <(curl ...)`), trimmed. These run whatever the server sends
+/// next; `fetch = { url, sha256 }` pins the installer instead.
+pub fn unpinned_curl_pipe(text: &str) -> Option<String> {
+    use std::sync::OnceLock;
+    static RES: OnceLock<[regex::Regex; 3]> = OnceLock::new();
+    let res = RES.get_or_init(|| {
+        [
+            r"\b(curl|wget)\b[^\n]*\|\s*(sudo\s+(-\S+\s+)*)?(env\s+\S+=\S+\s+)*(ba|z|da|k)?sh\b",
+            r#"\b(ba|z|da|k)?sh\s+(-\w+\s+)*-c\s+["']?\$\(\s*(curl|wget)\b"#,
+            r"\b(ba|z|da|k)?sh\s+<\(\s*(curl|wget)\b",
+        ]
+        .map(|r| regex::Regex::new(r).expect("static regex"))
+    });
+    text.lines()
+        .map(str::trim)
+        .filter(|l| !l.starts_with('#'))
+        .find(|l| res.iter().any(|r| r.is_match(l)))
+        .map(str::to_string)
+}
+
+/// Lower-case 64-digit hex of a `sha256:`-optional hash.
+pub fn normalize_hash(h: &str) -> Option<String> {
+    let h = h.trim().strip_prefix("sha256:").unwrap_or(h.trim());
+    (h.len() == 64 && h.chars().all(|c| c.is_ascii_hexdigit())).then(|| h.to_ascii_lowercase())
+}
+
+/// Quote `p` for the script's shell when it needs it.
+fn shell_quote(p: &str, pwsh: bool) -> String {
+    if p.chars()
+        .all(|c| c.is_ascii_alphanumeric() || "/._-+:@".contains(c))
+    {
+        return p.to_string();
+    }
+    if pwsh {
+        format!("'{}'", p.replace('\'', "''"))
+    } else {
+        format!("'{}'", p.replace('\'', "'\\''"))
     }
 }
 
@@ -120,6 +200,10 @@ pub fn parse_duration(s: &str) -> Result<Duration> {
 /// The per-package inputs of the `DOTS_*` variables.
 #[derive(Debug, Clone, Default)]
 pub struct ScriptEnv {
+    /// `HOME` for the script's commands. Scripts act on the user's files, so under
+    /// `--home <dir>` they see that dir as `~`, unlike the package manager providers, which
+    /// keep the real HOME. Empty leaves `HOME` as `ctx.env` has it.
+    pub home: PathBuf,
     pub pkg_dir: PathBuf,
     /// `DOTS_ROOT`: the active repo root.
     pub root: PathBuf,
@@ -153,11 +237,84 @@ fn flag(b: bool) -> String {
     if b { "1" } else { "0" }.to_string()
 }
 
+fn hex_sha256(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// Create a new file; fails if the path exists (so a planted symlink is never followed).
+/// A stale regular file or symlink is unlinked first.
+fn write_exclusive(path: &Path, bytes: &[u8], mode: u32) -> std::io::Result<()> {
+    use std::io::Write;
+    if fs::symlink_metadata(path).is_ok() {
+        fs::remove_file(path)?;
+    }
+    let mut o = fs::OpenOptions::new();
+    o.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        o.mode(mode);
+    }
+    #[cfg(not(unix))]
+    let _ = mode;
+    o.open(path)?.write_all(bytes)
+}
+
+/// A fresh private (0700) directory, created exclusively and removed on drop.
+struct PrivateDir(PathBuf);
+
+impl PrivateDir {
+    fn create() -> std::io::Result<Self> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(0);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        for _ in 0..16 {
+            let name = format!(
+                "dots-fetch-{}-{nanos:x}-{}",
+                std::process::id(),
+                N.fetch_add(1, Ordering::Relaxed)
+            );
+            let dir = std::env::temp_dir().join(name);
+            let mut b = fs::DirBuilder::new();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                b.mode(0o700);
+            }
+            match b.create(&dir) {
+                Ok(()) => return Ok(PrivateDir(dir)),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        Err(std::io::Error::other("no free temporary directory name"))
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for PrivateDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
 pub struct ScriptProvider {
     pkg: String,
     cfg: ScriptConfig,
     env: ScriptEnv,
     facts: Facts,
+    /// The hash `dots.lock` pinned for the `fetch` file, if any.
+    lock_pin: Option<String>,
+    /// The hash of the last verified download (for the lock to record on first use).
+    fetched: Arc<Mutex<Option<String>>>,
 }
 
 impl ScriptProvider {
@@ -169,11 +326,121 @@ impl ScriptProvider {
             cfg,
             env,
             facts: facts.clone(),
+            lock_pin: None,
+            fetched: Arc::default(),
         })
+    }
+
+    /// The lock's hash for the `fetch` file; the download must match it as well as the
+    /// author's pin.
+    pub fn with_lock_pin(mut self, sha256: Option<String>) -> Self {
+        self.lock_pin = sha256.as_deref().and_then(normalize_hash);
+        self
+    }
+
+    /// The sha256 of the file the last install or upgrade fetched. The caller records it in
+    /// the lock when nothing pinned it.
+    pub fn fetched_sha256(&self) -> Option<String> {
+        self.fetched.lock().ok().and_then(|g| g.clone())
+    }
+
+    /// Download the `fetch` file, check it against the author's and the lock's pins, and put
+    /// it in the package's cache. Nothing is run before this passes.
+    fn fetch_verified(&self, ctx: &Ctx, spec: &FetchSpec) -> Result<(PrivateDir, PathBuf)> {
+        if ctx.offline {
+            return Err(ProviderError::Other(format!(
+                "`{}` needs {} downloaded, but dots is offline",
+                self.pkg, spec.url
+            )));
+        }
+        let bytes = ctx.fetcher.fetch(&spec.url)?;
+        let got = hex_sha256(&bytes);
+        let pins = [
+            spec.sha256.as_deref().and_then(normalize_hash),
+            self.lock_pin.clone(),
+        ];
+        for expected in pins.into_iter().flatten() {
+            if expected != got {
+                return Err(ProviderError::Coded {
+                    code: "integrity-mismatch",
+                    message: format!(
+                        "checksum mismatch for `{}`: expected {expected}, got {got}",
+                        spec.url
+                    ),
+                    log: None,
+                });
+            }
+        }
+        let file = spec
+            .url
+            .split(['?', '#'])
+            .next()
+            .and_then(|u| u.rsplit('/').next())
+            .filter(|n| !n.is_empty() && *n != "." && *n != "..")
+            .unwrap_or("installer")
+            .replace(['\\', ':'], "_");
+        // The cache copy is for the user's reference only and is never what runs: it sits
+        // in a user-writable place, so it is written without following symlinks and the
+        // installer runs from a private copy below.
+        if !ctx.cache_dir.as_os_str().is_empty() {
+            let dir = ctx
+                .cache_dir
+                .join("fetch")
+                .join(self.pkg.replace(['/', '\\'], "_"));
+            let path = dir.join(&file);
+            fs::create_dir_all(&dir)
+                .and_then(|()| {
+                    if fs::symlink_metadata(&dir)?.is_dir() {
+                        write_exclusive(&path, &bytes, 0o644)
+                    } else {
+                        Err(std::io::Error::other("cache directory is a symlink"))
+                    }
+                })
+                .map_err(|e| {
+                    ProviderError::Other(format!("cannot write {}: {e}", path.display()))
+                })?;
+        }
+        // The file that runs: a fresh 0700 directory (created exclusively), a copy of the
+        // verified bytes, and a re-hash of that copy.
+        let private = PrivateDir::create()
+            .map_err(|e| ProviderError::Other(format!("cannot create a private directory: {e}")))?;
+        let path = private.path().join(&file);
+        write_exclusive(&path, &bytes, 0o700)
+            .map_err(|e| ProviderError::Other(format!("cannot write {}: {e}", path.display())))?;
+        let again = fs::read(&path)
+            .map_err(|e| ProviderError::Other(format!("cannot read {}: {e}", path.display())))?;
+        if hex_sha256(&again) != got {
+            return Err(ProviderError::Coded {
+                code: "integrity-mismatch",
+                message: format!("`{}` changed after it was verified", spec.url),
+                log: None,
+            });
+        }
+        if let Ok(mut g) = self.fetched.lock() {
+            *g = Some(got);
+        }
+        Ok((private, path))
     }
 
     pub fn package(&self) -> &str {
         &self.pkg
+    }
+
+    /// A command that runs `text` with this provider's runtime contract (the shell and its
+    /// `set` prelude, the package directory as working directory, the `DOTS_*` variables,
+    /// stdin at `/dev/null`, the timeout). Used for package `[hooks]`.
+    pub fn hook_cmd(&self, ctx: &Ctx, text: &str) -> Result<Cmd> {
+        let shell = self
+            .shell_path()
+            .ok_or_else(|| ProviderError::Unavailable {
+                provider: "script".into(),
+                reason: format!("no `{}` found", self.shell_kind()),
+            })?;
+        self.cmd(
+            ctx,
+            &self.shell_argv(&shell, &self.resolve_text(text)),
+            None,
+        )
     }
 
     /// The `DOTS_*` variables plus `PATH`, on top of `ctx.env`.
@@ -192,6 +459,9 @@ impl ScriptProvider {
         set("DOTS_TAGS", self.env.tags.join(" "));
         for t in &self.env.tags {
             set(&format!("DOTS_TAG_{}", env_name(t)), "1".into());
+        }
+        if !self.env.home.as_os_str().is_empty() {
+            set("HOME", p(&self.env.home));
         }
         set("DOTS_PKG", self.pkg.clone());
         set("DOTS_PKG_DIR", p(&self.env.pkg_dir));
@@ -212,6 +482,52 @@ impl ScriptProvider {
             set("PATH", parts.join(":"));
         }
         e
+    }
+
+    /// A root action goes through `sudo -n`, whose `env_reset` drops everything the script
+    /// would get unprivileged: `HOME` becomes `/root` and the `DOTS_*` variables (settings,
+    /// secrets included) and the `[env]` `PATH` directories vanish. The values must not go
+    /// into argv, where any local user can read them (`ps`, `/proc/*/cmdline`), and
+    /// `--preserve-env` is rejected by sudoers without `SETENV`. So they go into a file in a
+    /// private 0700 directory, created with mode 0600, and the script text is prefixed with
+    /// `set -a; . '<file>'; set +a`. Root reads the file whatever its mode. Only `HOME`, `PATH`
+    /// and the `DOTS_*` variables are written. The returned directory removes the file when
+    /// dropped: hold it until the action has finished.
+    fn carry_env(
+        &self,
+        ctx: &Ctx,
+        argv: &mut [String],
+        version_wanted: Option<&str>,
+    ) -> Result<PrivateDir> {
+        if self.shell_kind() == "pwsh" {
+            return Err(ProviderError::Other(format!(
+                "`{}` has needs_root = true with the pwsh shell; root scripts need `shell = \"bash\"` or `\"sh\"`",
+                self.pkg
+            )));
+        }
+        let env = self.script_env(ctx, version_wanted);
+        let mut text = String::new();
+        for (k, v) in &env {
+            let name_ok = k
+                .chars()
+                .enumerate()
+                .all(|(i, c)| c == '_' || c.is_ascii_alphabetic() || (i > 0 && c.is_ascii_digit()));
+            if name_ok && (matches!(k.as_str(), "HOME" | "PATH") || k.starts_with("DOTS_")) {
+                text.push_str(&format!("{k}={}\n", shell_quote(v, false)));
+            }
+        }
+        let io = |e: std::io::Error| ProviderError::Other(format!("cannot write env file: {e}"));
+        let dir = PrivateDir::create().map_err(io)?;
+        let file = dir.path().join("env");
+        write_exclusive(&file, text.as_bytes(), 0o600).map_err(io)?;
+        let prelude = format!(
+            "set -a; . {}; set +a\n",
+            shell_quote(&file.to_string_lossy(), false)
+        );
+        if let Some(t) = argv.last_mut() {
+            *t = format!("{prelude}{t}");
+        }
+        Ok(dir)
     }
 
     fn shell_kind(&self) -> &str {
@@ -249,6 +565,32 @@ impl ScriptProvider {
         })
     }
 
+    /// A value that is one token naming an existing file in the package directory (`install =
+    /// "install.sh"`) runs that file with the script's shell; anything else is shell text, as
+    /// written. Applies to `check`, `version`, `latest`, `install`, `upgrade`, `uninstall` and
+    /// the package hooks.
+    fn resolve_text(&self, text: &str) -> String {
+        let t = text.trim();
+        let single = !t.is_empty()
+            && !t
+                .chars()
+                .any(|c| c.is_whitespace() || "|&;<>()$`\\\"'*?[]{}~#!".contains(c));
+        if !single || !self.env.pkg_dir.join(t).is_file() {
+            return text.to_string();
+        }
+        let path = if t.starts_with('/') || t.starts_with("./") || t.starts_with("../") {
+            t.to_string()
+        } else {
+            format!("./{t}")
+        };
+        let pwsh = self.shell_kind() == "pwsh";
+        let q = shell_quote(&path, pwsh);
+        match self.shell_kind() {
+            "pwsh" => format!("& {q}"),
+            kind => format!("{kind} {q}"),
+        }
+    }
+
     fn shell_argv(&self, shell: &Path, text: &str) -> Vec<String> {
         let (flag, pre) = match self.shell_kind() {
             "pwsh" => (
@@ -278,7 +620,7 @@ impl ScriptProvider {
         Ok(c)
     }
 
-    fn command_for(&self, kind: OpKind) -> Option<&str> {
+    fn command_for(&self, kind: OpKind) -> Option<String> {
         let c = &self.cfg;
         match kind {
             OpKind::Install => c.install.as_deref(),
@@ -286,6 +628,7 @@ impl ScriptProvider {
             OpKind::Remove => c.uninstall.as_deref(),
             OpKind::Pin | OpKind::Unpin => None,
         }
+        .map(|t| self.resolve_text(t))
     }
 
     fn log_path(&self, ctx: &Ctx, kind: OpKind) -> PathBuf {
@@ -304,9 +647,9 @@ impl ScriptProvider {
 
     /// Run `check` (not via `installed`, which also asks for the version).
     fn run_check(&self, ctx: &Ctx, shell: &Path, version_wanted: Option<&str>) -> Result<Output> {
-        let text = self.cfg.check.as_deref().unwrap_or("false");
+        let text = self.resolve_text(self.cfg.check.as_deref().unwrap_or("false"));
         ctx.runner
-            .run(&self.cmd(ctx, &self.shell_argv(shell, text), version_wanted)?)
+            .run(&self.cmd(ctx, &self.shell_argv(shell, &text), version_wanted)?)
     }
 }
 
@@ -332,8 +675,14 @@ fn append_log(path: &Path, header: &str, out: &Output) {
 
 /// Display form of the script text for logs: its first line is the `set` prelude.
 fn short(argv: &[String]) -> String {
+    // `sudo -n <shell> -c <text>` (a root action) or `<shell> -c <text>`.
+    let skip = if argv.first().is_some_and(|a| a.ends_with("/sudo")) {
+        3
+    } else {
+        1
+    };
     argv.iter()
-        .skip(1)
+        .skip(skip)
         .map(String::as_str)
         .collect::<Vec<_>>()
         .join(" ")
@@ -345,6 +694,10 @@ const INSTALLED: &str = "__dots_installed__";
 impl Provider for ScriptProvider {
     fn id(&self) -> &'static str {
         "script"
+    }
+
+    fn lock_key(&self) -> Option<String> {
+        self.cfg.lock.clone().filter(|k| !k.trim().is_empty())
     }
 
     fn caps(&self) -> Caps {
@@ -372,12 +725,14 @@ impl Provider for ScriptProvider {
                 provider: "script".into(),
                 reason: format!("no `{}` found", self.shell_kind()),
             })?;
-        let check = self.cfg.check.as_deref().unwrap_or("false");
+        let check = self.resolve_text(self.cfg.check.as_deref().unwrap_or("false"));
         let version = self
             .cfg
             .version
             .as_deref()
-            .filter(|_| !self.cfg.versionless);
+            .filter(|_| !self.cfg.versionless)
+            .map(|v| self.resolve_text(v));
+        let version = version.as_deref();
         let (installed, version_out) = if self.shell_kind() == "pwsh" {
             let c = self.run_check(ctx, &shell, None)?;
             if c.timed_out {
@@ -440,12 +795,13 @@ impl Provider for ScriptProvider {
         let (Some(cmd), Some(shell)) = (self.cfg.latest.as_deref(), self.shell_path()) else {
             return Ok(map);
         };
+        let cmd = self.resolve_text(cmd);
         if !specs.iter().any(|s| s.name == self.pkg) {
             return Ok(map);
         }
         let out = ctx
             .runner
-            .run(&self.cmd(ctx, &self.shell_argv(&shell, cmd), None)?)?;
+            .run(&self.cmd(ctx, &self.shell_argv(&shell, &cmd), None)?)?;
         if out.timed_out {
             return Err(self.timeout_error(ctx, OpKind::Upgrade));
         }
@@ -489,7 +845,7 @@ impl Provider for ScriptProvider {
                 Ok(Action {
                     kind: op.kind,
                     ops: vec![op.clone()],
-                    argv: self.shell_argv(&shell, text),
+                    argv: self.shell_argv(&shell, &text),
                     needs_root: self.cfg.needs_root,
                 })
             })
@@ -508,6 +864,26 @@ impl Provider for ScriptProvider {
             .map_err(|e| ProviderError::Other(format!("cannot create log dir: {e}")))?;
         let _ = fs::write(&log, "");
         let wanted = action.ops.first().and_then(|o| o.version.as_deref());
+        let mut action = action.clone();
+        // Held until the end of `exec`: dropping it deletes the private copy.
+        let mut _private = None;
+        if let Some(spec) = &self.cfg.fetch
+            && matches!(action.kind, OpKind::Install | OpKind::Upgrade)
+        {
+            let (dir, path) = self.fetch_verified(ctx, spec)?;
+            _private = Some(dir);
+            let quoted = shell_quote(&path.to_string_lossy(), self.shell_kind() == "pwsh");
+            if let Some(text) = action.argv.last_mut() {
+                *text = text.replace(FETCHED, &quoted);
+            }
+        }
+        // Held until the end of `exec`: dropping it deletes the env file.
+        let _env_file = if action.needs_root {
+            Some(self.carry_env(ctx, &mut action.argv, wanted)?)
+        } else {
+            None
+        };
+        let action = &action;
         let cmd = self.cmd(ctx, &action.argv, wanted)?;
         let out = ctx.runner.run(&cmd)?;
         append_log(&log, &short(&action.argv), &out);
@@ -521,7 +897,16 @@ impl Provider for ScriptProvider {
             });
         }
         if matches!(action.kind, OpKind::Install | OpKind::Upgrade) {
-            let shell = PathBuf::from(&action.argv[0]);
+            // The check always runs unprivileged, through this provider's own shell. It must
+            // not take the shell from `argv[0]`: the engine prefixes a `needs_root` action with
+            // `sudo -n`, which made this run `sudo -c <text>` (sudo's usage error, so the
+            // check of every root script failed). `installed()` checks unprivileged too.
+            let shell = self
+                .shell_path()
+                .ok_or_else(|| ProviderError::Unavailable {
+                    provider: "script".into(),
+                    reason: format!("no `{}` found", self.shell_kind()),
+                })?;
             let check = self.run_check(ctx, &shell, wanted)?;
             append_log(
                 &log,

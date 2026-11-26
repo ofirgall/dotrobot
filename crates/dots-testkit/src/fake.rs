@@ -22,6 +22,8 @@ struct State {
     installed_calls: usize,
     /// Package names whose install/upgrade fails.
     failing: Vec<String>,
+    /// Installed packages `stale_reason` reports (until an install or upgrade of them runs).
+    stale: BTreeMap<String, String>,
 }
 
 /// Cloneable handle; clones share state, so tests keep one to inspect after handing another over.
@@ -84,6 +86,7 @@ impl Runner for FakeBackend {
         for (name, version) in targets {
             match kind {
                 OpKind::Install | OpKind::Upgrade => {
+                    st.stale.remove(&name);
                     let version = version
                         .or_else(|| st.latest.get(&name).cloned())
                         .unwrap_or_else(|| "1.0.0".to_string());
@@ -181,6 +184,16 @@ impl FakeProvider {
         self
     }
 
+    /// `stale_reason` answers `reason` for `name` until it is installed or upgraded.
+    pub fn with_stale(self, name: &str, reason: &str) -> Self {
+        self.state
+            .lock()
+            .unwrap()
+            .stale
+            .insert(name.into(), reason.into());
+        self
+    }
+
     pub fn failing_on(self, name: &str) -> Self {
         self.state.lock().unwrap().failing.push(name.into());
         self
@@ -250,6 +263,10 @@ impl Provider for FakeProvider {
                 ))
             })
             .collect())
+    }
+
+    fn stale_reason(&self, _ctx: &Ctx, spec: &Spec) -> Option<String> {
+        self.state.lock().unwrap().stale.get(&spec.name).cloned()
     }
 
     fn latest(&self, _ctx: &Ctx, specs: &[Spec]) -> Result<BTreeMap<String, Latest>> {

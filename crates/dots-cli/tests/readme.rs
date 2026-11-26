@@ -1,4 +1,4 @@
-//! Task 4.12: the README's `console` blocks as golden tests.
+//! Tasks 4.12 and 5.11: the README's `console` blocks as golden tests (v0.1 and v0.2).
 //!
 //! Every ```console block in README.md must be announced by an HTML comment right above it:
 //!
@@ -8,7 +8,8 @@
 //! - `<!-- golden-skip: <name> | v0.x | <reason> -->`: a block of a later milestone. It is
 //!   listed (and the test prints why), never silently ignored.
 //!
-//! A block with neither comment fails the test.
+//! A block with neither comment fails the test. A block that shows only `$` commands and no
+//! output (`config-set`, v0.2) runs every command in order and requires exit 0.
 //!
 //! Normalizations (applied to the README text and to the output alike, so each is symmetric):
 //!
@@ -226,9 +227,39 @@ fn dashboard() -> Fx {
     fx
 }
 
+/// `config-set`: `delta` declares the `side_by_side` setting; everything is installed, so the
+/// block's `dots apply` has nothing to do.
+fn config_set() -> Fx {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let root = home.join("dotfiles");
+    write(&root.join("dots.toml"), "schema = 1\nname = \"dotfiles\"\n");
+    script_pkg(&root, &home, "delta", "1.0.0", &[]);
+    let pkg = root.join("packages/delta/package.toml");
+    let mut body = std::fs::read_to_string(&pkg).unwrap();
+    body.push_str("[settings.side_by_side]\ntype = \"bool\"\ndefault = false\n");
+    write(&pkg, &body);
+    write(
+        &root.join("bundles/all.toml"),
+        "schema = 1\npackages = [\"delta\"]\n",
+    );
+    write(
+        &home.join(".config/dots/machine.toml"),
+        "schema = 1\nbundles = [\"all\"]\n",
+    );
+    git(&root, &["init", "-q", "-b", "main"]);
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-q", "-m", "init"]);
+    let fx = Fx { _tmp: tmp, home };
+    let (code, out, err) = fx.run(&["apply", "--yes"]);
+    assert_eq!(code, 0, "{out}{err}");
+    fx
+}
+
 fn fixture(name: &str) -> Fx {
     match name {
         "dashboard" => dashboard(),
+        "config-set" => config_set(),
         other => panic!("README block `{other}` has no fixture in tests/readme.rs"),
     }
 }
@@ -316,6 +347,21 @@ fn readme_console_blocks_are_goldens_or_explicitly_skipped() {
             });
         let fx = fixture(name);
         assert!(b.lines[0].starts_with("$ "), "{name}");
+        // A block that shows only commands (no output) must run clean, one after the other.
+        if b.lines
+            .iter()
+            .filter(|l| !l.trim().is_empty())
+            .all(|l| l.starts_with("$ "))
+        {
+            for line in b.lines.iter().filter(|l| l.starts_with("$ ")) {
+                let args = command_args(line);
+                let args: Vec<&str> = args.iter().map(String::as_str).collect();
+                let (code, stdout, stderr) = fx.run(&args);
+                assert_eq!(code, 0, "{name}: `{line}` exited {code}:\n{stdout}{stderr}");
+            }
+            passed.push(name.to_string());
+            continue;
+        }
         let args = command_args(&b.lines[0]);
         let args: Vec<&str> = args
             .iter()
@@ -345,7 +391,12 @@ fn readme_console_blocks_are_goldens_or_explicitly_skipped() {
     println!("README goldens passed: {passed:?}; skipped: {skipped:?}");
     assert_eq!(
         passed,
-        ["dashboard"],
-        "the v0.1 blocks changed: update this test"
+        ["config-set", "dashboard"],
+        "the golden blocks changed: update this test"
+    );
+    assert_eq!(
+        skipped,
+        ["add-bundle (v0.3)", "pull (v0.3)"],
+        "the skipped blocks changed: update this test"
     );
 }

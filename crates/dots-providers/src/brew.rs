@@ -294,6 +294,31 @@ fn parse_installed(doc: &Value) -> BTreeMap<String, Installed> {
     map
 }
 
+/// Names installed on request: every cask, and each formula brew did not install only as a
+/// dependency. A formula whose JSON lacks the flag counts as a root.
+fn parse_roots(doc: &Value) -> BTreeSet<String> {
+    let mut roots = BTreeSet::new();
+    for f in arr(doc, "formulae") {
+        let Some(name) = s(f, "name") else { continue };
+        let kegs = arr(f, "installed");
+        let on_request = kegs.is_empty()
+            || kegs.iter().any(|k| {
+                k.get("installed_on_request")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true)
+            });
+        if on_request {
+            roots.insert(name.to_string());
+        }
+    }
+    for c in arr(doc, "casks") {
+        if let Some(token) = s(c, "token") {
+            roots.insert(token.to_string());
+        }
+    }
+    roots
+}
+
 /// brew's own version string for a formula: `stable` plus `_<revision>`.
 fn formula_latest_version(f: &Value) -> Option<String> {
     let stable = f.get("versions").and_then(|v| s(v, "stable"))?;
@@ -345,6 +370,15 @@ impl Provider for BrewProvider {
     fn installed(&self, ctx: &Ctx) -> Result<BTreeMap<String, Installed>> {
         let bin = self.require(ctx)?;
         Ok(parse_installed(&self.info(ctx, &bin, &["--installed"])?))
+    }
+
+    fn roots(&self, ctx: &Ctx) -> Result<Option<BTreeSet<String>>> {
+        let bin = self.require(ctx)?;
+        Ok(Some(parse_roots(&self.info(
+            ctx,
+            &bin,
+            &["--installed"],
+        )?)))
     }
 
     fn latest(&self, ctx: &Ctx, specs: &[Spec]) -> Result<BTreeMap<String, Latest>> {

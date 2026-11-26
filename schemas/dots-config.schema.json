@@ -3,6 +3,364 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "properties": {
     "data": {
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "const": "list"
+              }
+            },
+            "required": [
+              "action"
+            ]
+          },
+          "then": {
+            "required": [
+              "settings"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "const": "explain"
+              }
+            },
+            "required": [
+              "action"
+            ]
+          },
+          "then": {
+            "required": [
+              "id",
+              "scopes",
+              "winner",
+              "value",
+              "redacted",
+              "secret"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "const": "get"
+              }
+            },
+            "required": [
+              "action"
+            ]
+          },
+          "then": {
+            "required": [
+              "id",
+              "value",
+              "scope",
+              "redacted",
+              "secret"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "const": "set"
+              }
+            },
+            "required": [
+              "action"
+            ]
+          },
+          "then": {
+            "required": [
+              "id",
+              "scope",
+              "file",
+              "value",
+              "redacted",
+              "committed"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "const": "unset"
+              }
+            },
+            "required": [
+              "action"
+            ]
+          },
+          "then": {
+            "required": [
+              "id",
+              "scope",
+              "removed"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "redacted": {
+                "const": true
+              }
+            },
+            "required": [
+              "redacted"
+            ]
+          },
+          "then": {
+            "properties": {
+              "value": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ],
+      "properties": {
+        "action": {
+          "enum": [
+            "list",
+            "get",
+            "set",
+            "unset",
+            "explain"
+          ]
+        },
+        "committed": {
+          "type": "boolean"
+        },
+        "effective_scope": {
+          "enum": [
+            "default",
+            "bundle",
+            "upstream",
+            "repo",
+            "profile",
+            "machine",
+            null
+          ],
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "effective_value": {},
+        "file": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "redacted": {
+          "type": "boolean"
+        },
+        "removed": {
+          "type": "boolean"
+        },
+        "scope": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "scopes": {
+          "items": {
+            "properties": {
+              "error": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "line": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "scope": {
+                "enum": [
+                  "default",
+                  "bundle",
+                  "upstream",
+                  "repo",
+                  "profile",
+                  "machine"
+                ]
+              },
+              "set": {
+                "type": "boolean"
+              },
+              "source": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "valid": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "value": {},
+              "winner": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "scope",
+              "set",
+              "value",
+              "source",
+              "winner"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "secret": {
+          "type": "boolean"
+        },
+        "settings": {
+          "items": {
+            "if": {
+              "properties": {
+                "secret": {
+                  "const": true
+                }
+              },
+              "required": [
+                "secret"
+              ]
+            },
+            "properties": {
+              "active": {
+                "type": "boolean"
+              },
+              "applies": {
+                "type": "boolean"
+              },
+              "ask": {
+                "type": "boolean"
+              },
+              "default": {},
+              "description": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "id": {
+                "type": "string"
+              },
+              "key": {
+                "type": "string"
+              },
+              "missing": {
+                "type": "boolean"
+              },
+              "package": {
+                "type": "string"
+              },
+              "redacted": {
+                "type": "boolean"
+              },
+              "required": {
+                "type": "boolean"
+              },
+              "scope": {
+                "enum": [
+                  "default",
+                  "bundle",
+                  "upstream",
+                  "repo",
+                  "profile",
+                  "machine",
+                  null
+                ],
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "secret": {
+                "type": "boolean"
+              },
+              "type": {
+                "enum": [
+                  "bool",
+                  "int",
+                  "float",
+                  "string",
+                  "enum",
+                  "list<string>",
+                  "path"
+                ]
+              },
+              "value": {},
+              "values": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "id",
+              "package",
+              "key",
+              "type",
+              "value",
+              "scope",
+              "default",
+              "required",
+              "ask",
+              "secret",
+              "redacted",
+              "applies",
+              "missing"
+            ],
+            "then": {
+              "properties": {
+                "default": {
+                  "type": "null"
+                },
+                "value": {
+                  "type": "null"
+                }
+              }
+            },
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "value": {},
+        "winner": {
+          "enum": [
+            "default",
+            "bundle",
+            "upstream",
+            "repo",
+            "profile",
+            "machine",
+            null
+          ],
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
       "type": "object"
     },
     "errors": {

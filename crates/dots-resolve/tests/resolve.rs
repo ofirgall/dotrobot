@@ -463,6 +463,54 @@ fn package_with_only_files_and_no_providers_or_bin_raises_no_error() {
     assert!(p.is_active() && p.chosen_provider().is_none());
 }
 
+/// A package with no providers/bin but other content (a `manual/` dir, hooks, ...) is a meta
+/// package: no provider installs it (it used to become `apt install <name>`). A bare
+/// `schema` + `name` package still gets the default provider chain.
+#[test]
+fn meta_package_without_install_target_is_not_installed_by_every_provider() {
+    let dir = tempfile::tempdir().unwrap();
+    let w = |rel: &str, text: &str| {
+        let p = dir.path().join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, text).unwrap();
+    };
+    w("dots.toml", "schema = 1\n[priority]\nany = [\"apt\"]\n");
+    w(
+        "bundles/b.toml",
+        "schema = 1\npackages = [\"serial-access\", \"hooked\", \"ripgrep\"]\n",
+    );
+    w(
+        "packages/serial-access/package.toml",
+        "schema = 1\nname = \"serial-access\"\n",
+    );
+    w(
+        "packages/serial-access/manual/dialout.md",
+        "# add yourself to dialout\n",
+    );
+    w(
+        "packages/hooked/package.toml",
+        "schema = 1\nname = \"hooked\"\n[hooks]\npost_files = \"true\"\n",
+    );
+    w(
+        "packages/ripgrep/package.toml",
+        "schema = 1\nname = \"ripgrep\"\n",
+    );
+    let c = Case {
+        repo: Repo::load(dir.path()).unwrap().value,
+        machine: machine(&["b"]),
+        facts: debian(true),
+        registry: registry(),
+        installed: BTreeMap::new(),
+    };
+    let r = c.run();
+    assert!(r.is_ok(), "{:#?}", r.errors);
+    for meta in ["serial-access", "hooked"] {
+        let p = r.get(meta).unwrap();
+        assert!(p.is_active() && p.chosen_provider().is_none(), "{meta}");
+    }
+    assert!(r.get("ripgrep").unwrap().chosen_provider().is_some());
+}
+
 // ------------------------------------------------------------------ 2.8
 
 #[test]

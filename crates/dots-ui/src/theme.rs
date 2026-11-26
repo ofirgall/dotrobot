@@ -89,6 +89,7 @@ pub fn state_symbol(icons: IconSet, s: State) -> &'static str {
         State::ForeignEntries => ("↯", "\u{f0e7}", "[!!]"),
         State::Tampered => ("‼", "\u{f071}", "[TAMP]"),
         State::Auto => ("↺", "\u{f021}", "[auto]"),
+        State::Unknown => ("?", "\u{f128}", "[?]"),
     };
     pick(icons, u, n, a)
 }
