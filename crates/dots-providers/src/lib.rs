@@ -21,7 +21,7 @@ pub mod script;
 pub mod uv;
 pub use fetch::{CurlFetcher, Fetcher};
 pub use runner::{
-    Cmd, DEFAULT_TIMEOUT, LineSink, Output, RealRunner, Runner, Stdin, with_line_sink,
+    Cmd, DEFAULT_TIMEOUT, LineSink, Output, RealRunner, Runner, Stdin, with_line_sink, with_tty,
 };
 
 /// Default timeout of the read-only questions asked while planning (a package's `check`,

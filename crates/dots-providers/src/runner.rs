@@ -40,6 +40,25 @@ pub fn with_line_sink<R>(sink: Option<LineSink>, f: impl FnOnce() -> R) -> R {
     f()
 }
 
+thread_local! {
+    static KEEP_TTY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Run `f` with every command [`RealRunner`] runs on this thread keeping the user's terminal
+/// (when `on`). For steps that need sudo without being run through it: a cask whose installer
+/// calls `sudo` itself would otherwise be detached from the terminal its sudo ticket is keyed
+/// by, and fail with "a terminal is required". The previous setting is restored afterwards.
+pub fn with_tty<R>(on: bool, f: impl FnOnce() -> R) -> R {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            KEEP_TTY.with(|k| k.set(self.0));
+        }
+    }
+    let _restore = Restore(KEEP_TTY.with(|k| k.replace(on)));
+    f()
+}
+
 fn current_line_sink() -> Option<LineSink> {
     LINE_SINK.with(|s| s.borrow().clone())
 }
@@ -203,9 +222,12 @@ pub trait Runner: Send + Sync + fmt::Debug {
 
 /// Does this command need the user's terminal? An interactive command (inherited stdin) does,
 /// and so does `sudo`: its credential cache is keyed by the controlling terminal, so a
-/// detached `sudo -n` would not see the ticket `sudo -v` just primed.
+/// detached `sudo -n` would not see the ticket `sudo -v` just primed. So does anything run
+/// inside [`with_tty`] (a sudo step whose tool calls sudo itself).
 fn keeps_tty(cmd: &Cmd) -> bool {
-    cmd.stdin == Stdin::Inherit || cmd.program.file_name().is_some_and(|n| n == "sudo")
+    cmd.stdin == Stdin::Inherit
+        || cmd.program.file_name().is_some_and(|n| n == "sudo")
+        || KEEP_TTY.with(|k| k.get())
 }
 
 /// Make git and ssh fail instead of asking. Only variables the user (or the package) has not
@@ -379,6 +401,18 @@ mod tests {
             .unwrap();
         assert!(o.timed_out && !o.success());
         assert!(r.run(&Cmd::new("/nonexistent/x")).is_err());
+    }
+
+    #[test]
+    fn with_tty_keeps_the_terminal_and_restores_after() {
+        let plain = Cmd::new("/bin/echo");
+        assert!(!keeps_tty(&plain));
+        with_tty(true, || {
+            assert!(keeps_tty(&plain));
+            with_tty(false, || assert!(!keeps_tty(&plain)));
+            assert!(keeps_tty(&plain));
+        });
+        assert!(!keeps_tty(&plain));
     }
 
     #[test]

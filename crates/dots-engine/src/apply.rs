@@ -9,7 +9,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use dots_core::Diagnostic;
 use dots_providers::{
-    Action, Cmd, Ctx, Installed, LineSink, Provider, ProviderError, Stdin, with_line_sink,
+    Action, Cmd, Ctx, Installed, LineSink, Provider, ProviderError, Stdin, with_line_sink, with_tty,
 };
 
 use crate::files::{FileStep, FileStepResult, FilesRequest};
@@ -1327,17 +1327,23 @@ fn execute(
                         .collect();
                     let hooks_phase = inp.hooks;
                     let sink = obs.output_sink(StepRef::Batch(b));
+                    // A sudo step run with `--with-sudo` keeps the terminal: its tool may call
+                    // sudo itself (a cask's .pkg installer), and the ticket primed above is
+                    // keyed by the terminal.
+                    let keep_tty = b.sudo && use_sudo;
                     scope.spawn(move || {
                         let out = with_line_sink(sink, || {
-                            run_batch(
-                                provider,
-                                &bctx,
-                                b,
-                                stop,
-                                use_sudo,
-                                sudo_ok,
-                                (hooks_phase, &pre_hooks),
-                            )
+                            with_tty(keep_tty, || {
+                                run_batch(
+                                    provider,
+                                    &bctx,
+                                    b,
+                                    stop,
+                                    use_sudo,
+                                    sudo_ok,
+                                    (hooks_phase, &pre_hooks),
+                                )
+                            })
                         });
                         let _ = tx.send(out);
                     });
