@@ -34,7 +34,20 @@ impl RunLock {
                     ],
                 )
             })?;
-        match file.try_lock() {
+        // A child that another thread is starting holds a copy of this file's descriptor
+        // between fork and exec (close-on-exec only closes it at exec), so a lock just released
+        // can read as held for a moment. Retry briefly before calling it busy.
+        let mut tries = 0;
+        let locked = loop {
+            match file.try_lock() {
+                Err(TryLockError::WouldBlock) if tries < 25 => {
+                    tries += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                other => break other,
+            }
+        };
+        match locked {
             Ok(()) => {
                 let _ = file.set_len(0);
                 let _ = file.rewind();
