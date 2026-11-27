@@ -987,3 +987,58 @@ fn the_lock_key_is_exposed_to_the_engine() {
     c.lock = Some("pi".into());
     assert_eq!(provider(&sb, c).lock_key().as_deref(), Some("pi"));
 }
+
+fn short_queries(mut sb: Sandbox) -> Sandbox {
+    sb.ctx.query_timeout = Duration::from_millis(300);
+    sb
+}
+
+#[test]
+fn a_hung_check_is_an_error_for_that_package_within_the_query_timeout() {
+    let sb = short_queries(sandbox());
+    let p = provider(&sb, cfg("true", "sleep 30"));
+    let start = Instant::now();
+    let r = p.installed(&sb.ctx);
+    assert!(start.elapsed() < Duration::from_secs(10));
+    match r {
+        Err(ProviderError::Coded { code, message, .. }) => {
+            assert_eq!(code, "query-timeout");
+            assert!(
+                message.contains("`kv`")
+                    && message.contains("300ms")
+                    && message.contains("sleep 30"),
+                "{message}"
+            );
+        }
+        other => panic!("expected query-timeout, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_hung_version_is_unknown_with_a_warning_not_an_error() {
+    let sb = short_queries(sandbox());
+    let mut c = cfg("true", "true");
+    c.version = Some("sleep 30".into());
+    let p = provider(&sb, c);
+    let start = Instant::now();
+    let m = p.installed(&sb.ctx).unwrap();
+    assert!(start.elapsed() < Duration::from_secs(10));
+    assert_eq!(m["kv"].version, "unknown");
+    let t = dots_providers::take_query_timeouts();
+    assert!(
+        t.iter().any(|t| t.package == "kv" && t.what == "version"),
+        "{t:?}"
+    );
+}
+
+#[test]
+fn a_hung_latest_is_no_answer_with_a_warning() {
+    let sb = short_queries(sandbox());
+    let mut c = cfg("true", "true");
+    c.latest = Some("sleep 30".into());
+    let p = provider(&sb, c);
+    let m = p.latest(&sb.ctx, &[Spec::new("kv")]).unwrap();
+    assert!(m.is_empty());
+    let t = dots_providers::take_query_timeouts();
+    assert!(t.iter().any(|t| t.what == "latest"), "{t:?}");
+}

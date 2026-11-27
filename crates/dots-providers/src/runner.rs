@@ -201,6 +201,30 @@ pub trait Runner: Send + Sync + fmt::Debug {
     }
 }
 
+/// Does this command need the user's terminal? An interactive command (inherited stdin) does,
+/// and so does `sudo`: its credential cache is keyed by the controlling terminal, so a
+/// detached `sudo -n` would not see the ticket `sudo -v` just primed.
+fn keeps_tty(cmd: &Cmd) -> bool {
+    cmd.stdin == Stdin::Inherit || cmd.program.file_name().is_some_and(|n| n == "sudo")
+}
+
+/// Make git and ssh fail instead of asking. Only variables the user (or the package) has not
+/// set themselves, so their own ssh wrapper wins.
+///
+/// `GIT_SSH_COMMAND` replaces a `core.sshCommand` from the git config, so a user who relies
+/// on that must set `GIT_SSH_COMMAND` themselves; `~/.ssh/config` is untouched (`BatchMode`
+/// only turns the prompts off).
+fn no_prompt_env(c: &mut Command, cmd: &Cmd) {
+    let set =
+        |k: &str| cmd.env.contains_key(k) || (!cmd.clear_env && std::env::var_os(k).is_some());
+    if !set("GIT_TERMINAL_PROMPT") {
+        c.env("GIT_TERMINAL_PROMPT", "0");
+    }
+    if !set("GIT_SSH_COMMAND") && !set("GIT_SSH") {
+        c.env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes");
+    }
+}
+
 /// Kill the command's process group (the child leads its own group, see `run`), so a
 /// timed-out script does not leave orphans holding its output open.
 fn kill_tree(child: &std::process::Child, cmd: &Cmd) {
@@ -216,6 +240,22 @@ fn kill_tree(child: &std::process::Child, cmd: &Cmd) {
     }
     #[cfg(not(unix))]
     let _ = (child, cmd);
+}
+
+/// Run `setsid()` in the child between fork and exec.
+#[cfg(unix)]
+#[allow(unsafe_code)]
+fn detach_from_tty(c: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    // SAFETY: the closure only calls `setsid(2)`, which is async-signal-safe, and allocates
+    // nothing (the error path builds an `io::Error` from an errno, no heap).
+    unsafe {
+        c.pre_exec(|| {
+            rustix::process::setsid()
+                .map(|_| ())
+                .map_err(std::io::Error::from)
+        });
+    }
 }
 
 /// Spawns real processes.
@@ -236,6 +276,9 @@ impl Runner for RealRunner {
             c.env_clear();
         }
         c.envs(&cmd.env);
+        if !keeps_tty(cmd) {
+            no_prompt_env(&mut c, cmd);
+        }
         if let Some(d) = &cmd.cwd {
             c.current_dir(d);
         }
@@ -245,10 +288,17 @@ impl Runner for RealRunner {
             Stdin::Bytes(_) => Stdio::piped(),
         });
         c.stdout(Stdio::piped()).stderr(Stdio::piped());
-        // Own process group so a timeout can kill the whole tree. Not for interactive
-        // commands: a background group reading the terminal would be stopped.
+        // A command that is not interactive gets no terminal at all: ssh and git prompt on
+        // `/dev/tty`, not stdin, so `/dev/null` as stdin does not stop a host-key or
+        // passphrase prompt nobody can see. A new session has no controlling terminal, so
+        // opening `/dev/tty` fails at once. It is also its own process group, which is what
+        // lets a timeout kill the whole tree. Sudo (terminal-keyed credentials) only gets the
+        // process group; an interactive command keeps both (a background group reading the
+        // terminal would be stopped).
         #[cfg(unix)]
-        if cmd.stdin != Stdin::Inherit {
+        if !keeps_tty(cmd) {
+            detach_from_tty(&mut c);
+        } else if cmd.stdin != Stdin::Inherit {
             use std::os::unix::process::CommandExt;
             c.process_group(0);
         }
@@ -355,6 +405,59 @@ mod tests {
         }
         // Outside the scope there is no sink.
         assert!(current_line_sink().is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_command_cannot_prompt_on_the_terminal() {
+        // ssh and git read /dev/tty, not stdin. Detached, opening it fails at once (when the
+        // test itself has no terminal the open fails either way).
+        let t = Instant::now();
+        let o = RealRunner
+            .run(
+                &Cmd::new("/bin/sh")
+                    .arg("-c")
+                    .arg("read x < /dev/tty")
+                    .timeout(Some(Duration::from_secs(10))),
+            )
+            .unwrap();
+        assert!(!o.timed_out && !o.success(), "{o:?}");
+        assert!(t.elapsed() < Duration::from_secs(5));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_timeout_still_kills_a_detached_tree() {
+        let t = Instant::now();
+        let o = RealRunner
+            .run(
+                &Cmd::new("/bin/sh")
+                    .arg("-c")
+                    .arg("sleep 30 & sleep 30")
+                    .timeout(Some(Duration::from_millis(100))),
+            )
+            .unwrap();
+        assert!(o.timed_out);
+        assert!(t.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn prompts_are_off_unless_the_user_chose_otherwise() {
+        let probe = |mut cmd: Cmd| {
+            // `clear_env` makes the process environment irrelevant to the test.
+            cmd.clear_env = true;
+            let o = RealRunner
+                .run(&cmd.arg("echo \"$GIT_TERMINAL_PROMPT|$GIT_SSH_COMMAND\""))
+                .unwrap();
+            o.stdout.trim().to_string()
+        };
+        let sh = || Cmd::new("/bin/sh").arg("-c");
+        assert_eq!(probe(sh()), "0|ssh -o BatchMode=yes");
+        let c = sh()
+            .env("GIT_SSH_COMMAND", "ssh -i k")
+            .env("GIT_TERMINAL_PROMPT", "1");
+        assert_eq!(probe(c), "1|ssh -i k");
+        assert_eq!(probe(sh().env("GIT_SSH", "/x/ssh")), "0|");
     }
 
     #[test]

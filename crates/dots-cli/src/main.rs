@@ -27,6 +27,7 @@ mod settings_phase;
 mod show;
 mod status;
 mod stream;
+mod sudo_guard;
 mod todo;
 mod upgrade;
 mod views;

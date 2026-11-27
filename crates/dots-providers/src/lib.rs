@@ -3,7 +3,8 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use dots_facts::Facts;
 
@@ -22,6 +23,39 @@ pub use fetch::{CurlFetcher, Fetcher};
 pub use runner::{
     Cmd, DEFAULT_TIMEOUT, LineSink, Output, RealRunner, Runner, Stdin, with_line_sink,
 };
+
+/// Default timeout of the read-only questions asked while planning (a package's `check`,
+/// `version` and `latest`): they should answer in moments, and one stuck on something nobody
+/// can answer (a network that does not respond) must not hold the whole plan.
+pub const DEFAULT_QUERY_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// A read-only question that ran out of time and was treated as unanswered (a `version`
+/// that printed nothing in time, a `latest` that did not answer) instead of failing the plan.
+/// Recorded by the provider, collected by the command that planned and shown as a warning.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueryTimeout {
+    pub package: String,
+    /// `version` or `latest`.
+    pub what: &'static str,
+    /// The limit that was hit, e.g. `60s`.
+    pub timeout: String,
+}
+
+static QUERY_TIMEOUTS: Mutex<Vec<QueryTimeout>> = Mutex::new(Vec::new());
+
+pub(crate) fn record_query_timeout(t: QueryTimeout) {
+    if let Ok(mut v) = QUERY_TIMEOUTS.lock() {
+        v.push(t);
+    }
+}
+
+/// Take the [`QueryTimeout`]s recorded since the last call.
+pub fn take_query_timeouts() -> Vec<QueryTimeout> {
+    QUERY_TIMEOUTS
+        .lock()
+        .map(|mut v| std::mem::take(&mut *v))
+        .unwrap_or_default()
+}
 
 pub type Result<T> = std::result::Result<T, ProviderError>;
 
@@ -93,6 +127,9 @@ pub struct Ctx {
     pub log_dir: PathBuf,
     /// Downloads (apt keys, script `fetch` files) go through this (default: `curl`).
     pub fetcher: Arc<dyn Fetcher>,
+    /// How long a read-only question (script `check`, `version`, `latest`) may take. Shorter
+    /// than a script's install `timeout`, which it never exceeds.
+    pub query_timeout: Duration,
 }
 
 impl Default for Ctx {
@@ -106,6 +143,7 @@ impl Default for Ctx {
             cache_dir: PathBuf::new(),
             log_dir: PathBuf::new(),
             fetcher: Arc::new(CurlFetcher),
+            query_timeout: DEFAULT_QUERY_TIMEOUT,
         }
     }
 }

@@ -48,9 +48,16 @@ fn exec_ctx_from(
             dirs.home.clone()
         }
     };
+    // Seconds, or a duration like `90s`, `5m`; anything else keeps the default.
+    let query_timeout = env
+        .get("DOTS_QUERY_TIMEOUT")
+        .and_then(|v| dots_providers::script::parse_duration(v).ok())
+        .filter(|d| !d.is_zero())
+        .unwrap_or(dots_providers::DEFAULT_QUERY_TIMEOUT);
     Ctx {
         dry_run,
         offline,
+        query_timeout,
         env,
         home,
         cache_dir: dirs.cache.clone(),
@@ -440,6 +447,49 @@ pub fn fetch_item(pkg: &str) -> String {
 /// One batched `installed()` call per provider instance; a failing provider contributes
 /// nothing (the status commands report provider problems themselves).
 pub fn installed(registry: &Registry, ctx: &Ctx) -> InstalledMap {
+    installed_with_problems(registry, ctx).0
+}
+
+/// What the provider queries of one planning pass reported besides the answers.
+#[derive(Default)]
+pub struct QueryProblems {
+    /// A `check` that ran out of time (`query-timeout`): errors for those packages only.
+    pub errors: Vec<dots_core::report::Diagnostic>,
+    /// A `version` or `latest` that ran out of time: unknown, the plan goes on.
+    pub warnings: Vec<dots_core::report::Diagnostic>,
+}
+
+impl QueryProblems {
+    fn take(errors: Vec<dots_core::report::Diagnostic>) -> Self {
+        QueryProblems {
+            errors,
+            warnings: take_query_warnings(),
+        }
+    }
+}
+
+/// The `version` / `latest` queries that timed out since the last call, as warnings.
+pub fn take_query_warnings() -> Vec<dots_core::report::Diagnostic> {
+    dots_providers::take_query_timeouts()
+        .into_iter()
+        .map(|t| {
+            dots_core::report::Diagnostic::from_code(
+                "version-query-timeout",
+                &[
+                    ("package", &t.package),
+                    ("what", t.what),
+                    ("timeout", &t.timeout),
+                ],
+            )
+        })
+        .collect()
+}
+
+/// [`installed`], also returning the queries that timed out. A hung `check` is not the same
+/// as a package that is missing, so it is an error for that package instead of silently
+/// planning its install.
+pub fn installed_with_problems(registry: &Registry, ctx: &Ctx) -> (InstalledMap, QueryProblems) {
+    let mut errors = Vec::new();
     let mut out = InstalledMap::new();
     let ids: Vec<&str> = registry.ids().collect();
     for (i, id) in ids.iter().enumerate() {
@@ -456,12 +506,22 @@ pub fn installed(registry: &Registry, ctx: &Ctx) -> InstalledMap {
                     ids.len()
                 )
             });
-            if let Ok(m) = p.installed(ctx) {
-                out.entry(id.to_string()).or_default().extend(m);
+            match p.installed(ctx) {
+                Ok(m) => out.entry(id.to_string()).or_default().extend(m),
+                Err(dots_providers::ProviderError::Coded {
+                    code: "query-timeout",
+                    message,
+                    ..
+                }) => {
+                    let mut d = dots_core::report::Diagnostic::from_code("query-timeout", &[]);
+                    d.message = message;
+                    errors.push(d);
+                }
+                Err(_) => {}
             }
         }
     }
-    out
+    (out, QueryProblems::take(errors))
 }
 
 /// One (provider, package) the resolver, planner or upgrade may ask `offered()` about.

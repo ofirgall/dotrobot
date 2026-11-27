@@ -206,6 +206,21 @@ Every error dots reports carries one of these stable codes (`errors[].code` in `
 - Message: `{package}` {action} exceeded its timeout of {timeout}
 - Hint: Raise `timeout` in the package, or investigate the hang in {log}.
 
+## `query-timeout`
+
+- Message: the check of `{package}` did not finish within {timeout}: `{command}`
+- Hint: Something in the command is waiting (a prompt, a dead network). Fix it, or raise the limit with DOTS_QUERY_TIMEOUT (e.g. `DOTS_QUERY_TIMEOUT=5m`). Other packages are unaffected.
+
+## `version-query-timeout`
+
+- Message: the {what} query of `{package}` did not finish within {timeout}; its version is unknown
+- Hint: Raise the limit with DOTS_QUERY_TIMEOUT (e.g. `DOTS_QUERY_TIMEOUT=5m`), or fix the command in the package's `{what}`.
+
+## `run-as-root`
+
+- Message: dots is running under sudo (as root, for {user})
+- Hint: Run `dots apply --with-sudo` without sudo: dots asks for the password itself and runs only the steps that need root as root. To run as root anyway, set DOTS_ALLOW_SUDO=1.
+
 ## `skipped-due-to-dep`
 
 - Message: `{package}` skipped because `{dependency}` failed

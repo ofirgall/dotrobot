@@ -34,6 +34,19 @@ pub fn run(args: Vec<OsString>) -> i32 {
     let opts = cli.global.to_options();
     let dirs = Dirs::resolve(opts.home.as_deref(), &env);
     let ctx = Context { opts, dirs };
+    // After parsing, so `--help` and `--version` still work under sudo.
+    if let Some(user) = crate::sudo_guard::refuse_for(&crate::sudo_guard::Started {
+        root: crate::settings_phase::running_as_root(),
+        env: &env,
+    }) {
+        let name = cli.command.as_ref().map_or("status", cli::Cmd::name);
+        let report = Report::failure(
+            name,
+            ExitCode::Error,
+            vec![Diagnostic::from_code("run-as-root", &[("user", &user)])],
+        );
+        return dots_ui::emit(&report, &ctx.opts, &env, &ctx.dirs);
+    }
     let report = handlers::dispatch(cli.command.as_ref(), &ctx);
 
     // Resolves flags > env > ui.toml > detection, pages long output, writes stdout/stderr.

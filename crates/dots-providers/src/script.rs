@@ -620,6 +620,49 @@ impl ScriptProvider {
         Ok(c)
     }
 
+    /// Like [`Self::cmd`] for a read-only question: the timeout is the shorter of the script's
+    /// own and `ctx.query_timeout`.
+    fn query_cmd(&self, ctx: &Ctx, argv: &[String], version_wanted: Option<&str>) -> Result<Cmd> {
+        let mut c = self.cmd(ctx, argv, version_wanted)?;
+        c.timeout = Some(
+            c.timeout
+                .map_or(ctx.query_timeout, |t| t.min(ctx.query_timeout)),
+        );
+        Ok(c)
+    }
+
+    /// The limit a question hit, as the user would write it.
+    fn query_limit(&self, ctx: &Ctx) -> Duration {
+        self.cfg
+            .timeout()
+            .map_or(ctx.query_timeout, |t| t.min(ctx.query_timeout))
+    }
+
+    /// `check` ran out of time: an error for this package only. Names the command, since
+    /// what hung is usually something the command waits for.
+    fn check_timeout_error(&self, ctx: &Ctx) -> ProviderError {
+        let limit = fmt_limit(self.query_limit(ctx));
+        let text = self.cfg.check.as_deref().unwrap_or("false");
+        ProviderError::Coded {
+            code: "query-timeout",
+            message: format!(
+                "the check of `{}` did not finish within {limit}: `{}`",
+                self.pkg,
+                one_line(text)
+            ),
+            log: None,
+        }
+    }
+
+    /// `version` or `latest` ran out of time: the answer is unknown, the plan goes on.
+    fn query_timed_out(&self, ctx: &Ctx, what: &'static str) {
+        crate::record_query_timeout(crate::QueryTimeout {
+            package: self.pkg.clone(),
+            what,
+            timeout: fmt_limit(self.query_limit(ctx)),
+        });
+    }
+
     fn command_for(&self, kind: OpKind) -> Option<String> {
         let c = &self.cfg;
         match kind {
@@ -649,7 +692,25 @@ impl ScriptProvider {
     fn run_check(&self, ctx: &Ctx, shell: &Path, version_wanted: Option<&str>) -> Result<Output> {
         let text = self.resolve_text(self.cfg.check.as_deref().unwrap_or("false"));
         ctx.runner
-            .run(&self.cmd(ctx, &self.shell_argv(shell, &text), version_wanted)?)
+            .run(&self.query_cmd(ctx, &self.shell_argv(shell, &text), version_wanted)?)
+    }
+}
+
+/// `60s`, `500ms`.
+fn fmt_limit(d: Duration) -> String {
+    if !d.as_millis().is_multiple_of(1000) {
+        format!("{}ms", d.as_millis())
+    } else {
+        format!("{}s", d.as_secs())
+    }
+}
+
+/// A command text on one line, cut to a length that fits a message.
+fn one_line(text: &str) -> String {
+    let t = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    match t.char_indices().nth(100) {
+        Some((i, _)) => format!("{}...", &t[..i]),
+        None => t,
     }
 }
 
@@ -736,14 +797,20 @@ impl Provider for ScriptProvider {
         let (installed, version_out) = if self.shell_kind() == "pwsh" {
             let c = self.run_check(ctx, &shell, None)?;
             if c.timed_out {
-                return Err(self.timeout_error(ctx, OpKind::Install));
+                return Err(self.check_timeout_error(ctx));
             }
             let v = match (c.success(), version) {
-                (true, Some(v)) => Some(
-                    ctx.runner
-                        .run(&self.cmd(ctx, &self.shell_argv(&shell, v), None)?)?
-                        .stdout,
-                ),
+                (true, Some(v)) => {
+                    let o = ctx.runner.run(&self.query_cmd(
+                        ctx,
+                        &self.shell_argv(&shell, v),
+                        None,
+                    )?)?;
+                    if o.timed_out {
+                        self.query_timed_out(ctx, "version");
+                    }
+                    Some(o.stdout)
+                }
                 _ => None,
             };
             (c.success(), v.unwrap_or_default())
@@ -756,11 +823,16 @@ impl Provider for ScriptProvider {
             }
             text.push_str("fi\n");
             let argv = vec![shell.to_string_lossy().into_owned(), "-c".to_string(), text];
-            let out = ctx.runner.run(&self.cmd(ctx, &argv, None)?)?;
+            let out = ctx.runner.run(&self.query_cmd(ctx, &argv, None)?)?;
             if out.timed_out {
-                return Err(self.timeout_error(ctx, OpKind::Install));
-            }
-            if !out.success() {
+                // The marker is printed once `check` passed: without it `check` itself hung
+                // (an error for this package); with it only `version` did (installed, version
+                // unknown).
+                if !out.stdout.lines().any(|l| l.trim() == INSTALLED) {
+                    return Err(self.check_timeout_error(ctx));
+                }
+                self.query_timed_out(ctx, "version");
+            } else if !out.success() {
                 return Err(ProviderError::CommandFailed {
                     command: format!("script check for `{}`", self.pkg),
                     status: out.status,
@@ -801,9 +873,10 @@ impl Provider for ScriptProvider {
         }
         let out = ctx
             .runner
-            .run(&self.cmd(ctx, &self.shell_argv(&shell, &cmd), None)?)?;
+            .run(&self.query_cmd(ctx, &self.shell_argv(&shell, &cmd), None)?)?;
         if out.timed_out {
-            return Err(self.timeout_error(ctx, OpKind::Upgrade));
+            self.query_timed_out(ctx, "latest");
+            return Ok(map);
         }
         if out.success()
             && let Some(v) = out.stdout.lines().map(str::trim).find(|l| !l.is_empty())
@@ -914,7 +987,7 @@ impl Provider for ScriptProvider {
                 &check,
             );
             if check.timed_out {
-                return Err(self.timeout_error(ctx, action.kind));
+                return Err(self.check_timeout_error(ctx));
             }
             if !check.success() {
                 return Err(ProviderError::Coded {

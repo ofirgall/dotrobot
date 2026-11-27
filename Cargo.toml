@@ -50,4 +50,6 @@ tempfile = "3"
 thiserror = "2"
 
 [workspace.lints.rust]
-unsafe_code = "forbid"
+# `deny`, not `forbid`: one `#[allow]` in `dots-providers/src/runner.rs` (the `setsid` call in
+# `pre_exec`, which std only offers as an unsafe hook). Everything else stays free of unsafe.
+unsafe_code = "deny"

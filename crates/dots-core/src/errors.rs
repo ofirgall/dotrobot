@@ -229,6 +229,24 @@ pub static REGISTRY: &[ErrorDef] = &[
         []
     ),
     def!(
+        "query-timeout",
+        "the check of `{package}` did not finish within {timeout}: `{command}`",
+        "Something in the command is waiting (a prompt, a dead network). Fix it, or raise the limit with DOTS_QUERY_TIMEOUT (e.g. `DOTS_QUERY_TIMEOUT=5m`). Other packages are unaffected.",
+        []
+    ),
+    def!(
+        "version-query-timeout",
+        "the {what} query of `{package}` did not finish within {timeout}; its version is unknown",
+        "Raise the limit with DOTS_QUERY_TIMEOUT (e.g. `DOTS_QUERY_TIMEOUT=5m`), or fix the command in the package's `{what}`.",
+        []
+    ),
+    def!(
+        "run-as-root",
+        "dots is running under sudo (as root, for {user})",
+        "Run `dots apply --with-sudo` without sudo: dots asks for the password itself and runs only the steps that need root as root. To run as root anyway, set DOTS_ALLOW_SUDO=1.",
+        []
+    ),
+    def!(
         "skipped-due-to-dep",
         "`{package}` skipped because `{dependency}` failed",
         "Fix `{dependency}` and re-run `dots apply {package}`.",

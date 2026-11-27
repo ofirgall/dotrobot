@@ -146,6 +146,8 @@ pub(crate) struct Prepared {
     pub(crate) machine_key: String,
     /// The script provider instances, for the hashes of what they downloaded.
     pub(crate) scripts: providers::ScriptHandles,
+    /// Queries that timed out while reading installed state.
+    pub(crate) problems: providers::QueryProblems,
 }
 
 pub(crate) fn prepare(
@@ -171,7 +173,7 @@ pub(crate) fn prepare(
             settings: &settings,
         },
     );
-    let installed = providers::installed(&registry, &pctx);
+    let (installed, problems) = providers::installed_with_problems(&registry, &pctx);
     let lock = dots_lock::Lock::load(&crate::lock_cmd::path(&rc.m.root))
         .map_err(|d| (vec![d], rc.m.warnings.clone()))?;
     let machine_key = crate::lock_cmd::machine_key(&rc);
@@ -200,6 +202,7 @@ pub(crate) fn prepare(
         lock,
         machine_key,
         scripts,
+        problems,
     })
 }
 
@@ -261,10 +264,11 @@ pub fn plan_cmd(ctx: &Context, args: &Args, check: bool) -> Report {
         Err((e, w)) => return failure("plan", ExitCode::Error, e, w),
     };
     dots_ui::phase::note("Working out what to change");
-    let (errors, warnings) = split(&p.rc, &p.resolution);
+    let (errors, mut warnings) = split(&p.rc, &p.resolution);
     if !errors.is_empty() {
         return failure("plan", ExitCode::Error, errors, warnings);
     }
+    warnings.extend(p.problems.warnings.iter().cloned());
     let files = files_phase(&p, &ctx.dirs);
     let settings = settings_phase(&p, &p.pctx);
     let services = services_phase(&p, &p.pctx);
@@ -304,6 +308,14 @@ pub fn plan_cmd(ctx: &Context, args: &Args, check: bool) -> Report {
                 &backup_dir(ctx),
             );
             r.warnings = warnings;
+            // Version lookups that timed out while planning (`latest`, asked lazily).
+            r.warnings.extend(providers::take_query_warnings());
+            // A check that hung is an error for its package; the plan above is still the
+            // answer for every other one.
+            if !p.problems.errors.is_empty() {
+                r.errors.extend(p.problems.errors.iter().cloned());
+                r.exit = ExitCode::Error;
+            }
             let manual = crate::todo::pending_for(&p.rc, &p.resolution, &p.installed, &ctx.dirs);
             crate::todo::plan_heads_up(&mut r, &manual.iter().collect::<Vec<_>>());
             if check && !pl.is_empty() {
@@ -426,10 +438,22 @@ pub(crate) fn apply_inner(
         Err((e, w)) => return none(failure(command, ExitCode::Error, e, w)),
     };
     dots_ui::phase::note("Working out what to change");
-    let (errors, warnings) = split(&p.rc, &p.resolution);
+    let (errors, mut warnings) = split(&p.rc, &p.resolution);
     if !errors.is_empty() {
         return none(failure(command, ExitCode::Error, errors, warnings));
     }
+    // A package whose check hung has unknown state: acting on a guess (an install over what
+    // may be there) is worse than stopping, so nothing is applied until it answers.
+    if !p.problems.errors.is_empty() {
+        warnings.extend(p.problems.warnings.iter().cloned());
+        return none(failure(
+            command,
+            ExitCode::Error,
+            p.problems.errors.clone(),
+            warnings,
+        ));
+    }
+    warnings.extend(p.problems.warnings.iter().cloned());
     let files = files_phase(&p, &ctx.dirs);
     let upgrade = match planner {
         Some(f) => match f(&p) {
@@ -520,7 +544,7 @@ pub(crate) fn apply_inner(
         Some(env),
     );
     drop(progress);
-    let mut warnings = warnings;
+    warnings.extend(providers::take_query_warnings());
     let hashes = crate::lock_cmd::first_use_hashes(&p.scripts, &p.rc.repo, &p.lock, &report);
     let written = match crate::lock_cmd::write_updates(
         &p.rc.m.root,

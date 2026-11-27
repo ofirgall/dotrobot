@@ -90,6 +90,16 @@ With `--sudo-only`, a sudo step whose ordinary dependency is not installed yet i
 
 `--json` (`dots/apply@1`, and `dots/upgrade@1` for `dots upgrade`) carries `sudo: { mode: "skip"|"with"|"only", skipped: [{ name, kind, provider, reason }], not_applied_ordinary }`; skipped package steps appear in `results` with status `skipped-sudo` (or `skipped-due-to-dep`, `not-selected` for `--sudo-only`). `dots plan --json` marks each step with `sudo` (the reason, or null) and counts them in `summary.sudo_steps`; the plan's "Heads up" says that N steps need sudo and a plain apply skips them.
 
+### Do not run dots with `sudo`
+
+`sudo dots apply --with-sudo` is refused with `error[run-as-root]`: under sudo every command (each package's `check`, `version`, `git` over ssh) would run as root with your `HOME`, and state, logs and installed files would end up root-owned. Run `dots apply --with-sudo` as yourself; dots asks for the password once and runs only the steps that need root as root. `--help` and `--version` still work. A real root login (a container or CI job as root, no `SUDO_USER`) is not sudo and works as before. To run under sudo anyway, set `DOTS_ALLOW_SUDO=1`.
+
+### Commands never prompt, and queries time out
+
+Every command dots runs for a package that is not `interactive` runs detached from your terminal (its own session, stdin at `/dev/null`), with `GIT_TERMINAL_PROMPT=0` and `GIT_SSH_COMMAND="ssh -o BatchMode=yes"` (unless you set `GIT_TERMINAL_PROMPT`, `GIT_SSH_COMMAND` or `GIT_SSH` yourself). ssh and git prompt on the terminal, not stdin, so a host-key or passphrase question that nobody could see used to hang a plan; now it fails at once. This also covers installs: a `git+ssh` fetch with an encrypted key and no ssh-agent fails instead of waiting invisibly (add the key to the agent, or run the command yourself once). `GIT_SSH_COMMAND` takes precedence over `core.sshCommand` in your git config; if you rely on that, set `GIT_SSH_COMMAND` yourself. `~/.ssh/config` still applies. `sudo` and `interactive` commands keep the terminal.
+
+The read-only questions a plan asks (a script's `check`, `version` and `latest`) have a 60 second limit (`DOTS_QUERY_TIMEOUT`, e.g. `90s` or `5m`; never longer than the script's own `timeout`). A `version` or `latest` that times out is unknown, with a `version-query-timeout` warning; the plan goes on. A `check` that times out is `error[query-timeout]` naming the command, for that package only: `dots plan` still shows the rest of the plan and exits 1, and `dots apply` stops before changing anything, since the state of that package is unknown.
+
 ## `dots todo`: manual actions
 
 Steps software cannot do for you (granting a permission, clicking an enable button, changing the

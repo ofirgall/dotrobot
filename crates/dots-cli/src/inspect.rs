@@ -190,7 +190,8 @@ pub fn assemble(
         &providers::CachedOffers::new(&pctx.cache_dir),
         &crate::config_cmd::settings_for(&rc),
     );
-    let (errors, warnings) = split(&resolution, rc.m.warnings.clone());
+    let (errors, mut warnings) = split(&resolution, rc.m.warnings.clone());
+    warnings.extend(providers::take_query_warnings());
     if !errors.is_empty() {
         return Err((errors, warnings));
     }
