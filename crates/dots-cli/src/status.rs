@@ -10,9 +10,10 @@ use dots_core::blocks::plural;
 use dots_core::{
     Block, Cell, Diagnostic, Dirs, ExitCode, Report, Row, Section, State, Style, Table, Tone,
 };
-use dots_engine::{Change, State as OwnedState, diff, parse_wanted};
+use dots_engine::State as OwnedState;
 use dots_facts::suggest;
 use dots_files::FileState;
+use dots_lock::rules::{self, Exact, Facts, Locked};
 use serde_json::{Map, Value, json};
 
 use crate::app::Context;
@@ -82,6 +83,9 @@ pub struct Item {
     pub latest: Option<String>,
     pub detail: String,
     pub hints: Vec<String>,
+    /// Why applying this item needs sudo (`requires_sudo`, `needs_root`, `root`). A plain
+    /// `dots apply` skips such an item, so it waits until `--with-sudo` / `--sudo-only`.
+    pub sudo: Option<String>,
     /// Override scopes that change this item (`repo`, `profile`, `machine`).
     pub overridden: Vec<String>,
 }
@@ -99,8 +103,30 @@ impl Item {
             latest: None,
             detail: String::new(),
             hints: Vec::new(),
+            sudo: None,
             overridden: Vec::new(),
         }
+    }
+
+    /// Mark the item as waiting on sudo: a plain `dots apply` would skip it, so the note says
+    /// so and the `dots apply <pkg>` hint becomes the one that runs it.
+    fn wait_on_sudo(&mut self, reason: &str) {
+        self.sudo = Some(reason.to_string());
+        let plain = format!("dots apply {}", self.package);
+        let sudo = format!("dots apply --with-sudo {}", self.package);
+        for h in self.hints.iter_mut().filter(|h| **h == plain) {
+            *h = sudo.clone();
+        }
+        if !self.hints.contains(&sudo) && !self.hints.iter().any(|h| h.starts_with("dots apply")) {
+            self.hints.push(sudo);
+        }
+        self.detail = if self.detail.is_empty() {
+            "needs sudo".to_string()
+        } else if self.detail.starts_with("needs sudo") {
+            self.detail.clone()
+        } else {
+            format!("needs sudo \u{b7} {}", self.detail)
+        };
     }
 
     /// Warn and error states need the user; muted ones (n/a, excluded, orphan, ...) do not.
@@ -135,6 +161,10 @@ impl Item {
             "detail": self.detail,
             "hints": self.hints,
         });
+        // Only items that wait on sudo carry the key, like `overridden`.
+        if let Some(why) = &self.sudo {
+            v["sudo"] = json!(why);
+        }
         // Only customized items carry the key, so plain output stays unchanged.
         if !self.overridden.is_empty() {
             v["overridden"] = json!(self.overridden);
@@ -258,6 +288,11 @@ pub fn settings_items(l: &Loaded, dirs: &Dirs) -> Vec<Item> {
                 (None, "missing" | "drift") => vec![format!("dots apply {}", r.package)],
                 _ => vec![],
             };
+            // An entry that cannot be read without sudo is not in a known state, but it still
+            // waits on a sudo apply.
+            if r.sudo && matches!(r.state, "missing" | "drift" | "unknown") {
+                it.wait_on_sudo("root");
+            }
             it
         })
         .collect()
@@ -377,10 +412,18 @@ fn package_items(l: &Loaded, dirs: &Dirs, all: bool) -> Vec<Item> {
             .installed
             .get(&choice.id)
             .and_then(|m| m.get(&choice.native_name));
+        let cfg = pkg.and_then(|p| p.providers.get(&choice.id));
+        // Only a step that runs a provider command needs root; the sudo reason is the one the
+        // plan gives the step.
+        let sudo = dots_engine::sudo_reason(&l.registry, pkg, cfg, &choice.id, &choice.native_name)
+            .filter(|_| !crate::settings_phase::running_as_root());
         let Some(inst) = inst else {
             it.state = State::Missing;
             it.detail = "not installed".into();
             it.hints = vec![format!("dots apply {name}")];
+            if let Some(why) = &sudo {
+                it.wait_on_sudo(why);
+            }
             items.push(it);
             continue;
         };
@@ -395,40 +438,83 @@ fn package_items(l: &Loaded, dirs: &Dirs, all: bool) -> Vec<Item> {
             });
         let latest = cached_latest(&cache, &choice.id, &choice.native_name);
         it.latest = latest.map(str::to_string);
-        match diff(&parse_wanted(wanted.as_deref()), Some(&inst.version)) {
-            Change::None => {
-                // The provider holds a version the lock does not name, though the spec allows
-                // it: drift (apt and brew cannot install an exact version).
-                let drifted = lock_row(&lock, &machine_key, name, &choice.id).filter(|row| {
-                    let lk = dots_lock::rules::Locked::from(row);
-                    dots_lock::rules::lock_satisfies(&res.wanted, &lk)
-                        && !dots_lock::rules::matches_lock(
-                            &lk,
-                            &inst.version,
-                            inst.source.as_deref(),
-                        )
-                });
-                if let Some(row) = drifted {
-                    it.state = State::Drift;
-                    it.detail = format!("locked {}, installed {}", row.shown(), inst.version);
-                    it.hints = vec![format!("dots apply {name}")];
-                } else if let Some(latest) = latest
-                    && crate::inspect::is_outdated(
-                        wanted.as_deref(),
-                        &inst.version,
-                        latest,
-                        inst.pinned,
-                    )
-                {
-                    it.state = State::Outdated;
-                    it.hints = vec![format!("dots upgrade {name}")];
+        // The same question `apply` asks (offers are not read here: they only name what a step
+        // installs), so a drift shown here is one that `dots apply <pkg>` acts on.
+        let spec =
+            dots_resolve::spec_for_in(&choice.native_name, cfg, pkg.map(|p| p.dir.as_path()));
+        let exact = l
+            .registry
+            .get_for(&choice.id, name)
+            .map_or(Exact::Limited, |p| match p.caps().exact_version {
+                dots_providers::Support::Yes => Exact::Yes,
+                dots_providers::Support::Limited => Exact::Limited,
+                dots_providers::Support::No => Exact::No,
+            });
+        let row =
+            lock_row(&lock, &machine_key, name, &choice.id).filter(|r| r.provider == choice.id);
+        let locked = row.as_ref().map(Locked::from);
+        let decision = dots_engine::decide_package(
+            &Facts {
+                spec: &res.wanted,
+                locked,
+                installed: Some(&inst.version),
+                installed_rev: inst.source.as_deref(),
+                owned: owned
+                    .packages
+                    .get(name)
+                    .is_some_and(|o| o.provider == choice.id),
+                offered: None,
+                exact,
+            },
+            &spec,
+        );
+        // The row names another version than the one installed, though the spec allows it.
+        let stale_row = row.as_ref().filter(|r| {
+            let lk = Locked::from(*r);
+            rules::lock_satisfies(&res.wanted, &lk)
+                && !rules::matches_lock(&lk, &inst.version, inst.source.as_deref())
+        });
+        if let Some(step) = &decision.step {
+            it.state = State::Drift;
+            it.detail = match stale_row {
+                Some(r) if step.kind != rules::Kind::Install => {
+                    format!("locked {}, installed {}", r.shown(), inst.version)
                 }
+                _ => format!("wants {}", wanted.as_deref().unwrap_or("latest")),
+            };
+            it.hints = vec![format!("dots apply {name}")];
+            if let Some(why) = &sudo {
+                it.wait_on_sudo(why);
             }
-            _ => {
-                it.state = State::Drift;
-                it.detail = format!("wants {}", wanted.as_deref().unwrap_or("latest"));
-                it.hints = vec![format!("dots apply {name}")];
-            }
+        } else if let Some(r) = stale_row
+            && (decision.rewrite || decision.adopt)
+        {
+            // No package step: `apply` records what is installed in `dots.lock` (or adopts it).
+            it.state = State::Drift;
+            it.detail = if decision.adopt {
+                format!(
+                    "locked {}, installed {} outside dots; apply adopts it",
+                    r.shown(),
+                    inst.version
+                )
+            } else {
+                format!(
+                    "locked {}, installed {}; apply updates the lock",
+                    r.shown(),
+                    inst.version
+                )
+            };
+            it.hints = vec![format!("dots apply {name}")];
+        } else if let Some(why) = &decision.drift {
+            // Out of spec and `apply` cannot change that (the provider cannot install an older
+            // version): the drift is real, but there is no command that resolves it.
+            it.state = State::Drift;
+            it.detail = why.clone();
+        } else if let Some(latest) = latest
+            && crate::inspect::is_outdated(wanted.as_deref(), &inst.version, latest, inst.pinned)
+        {
+            it.state = State::Outdated;
+            it.hints = vec![format!("dots upgrade {name}")];
         }
         if let Some((d, what)) = shim
             && matches!(it.state, State::Ok | State::Outdated)
@@ -672,6 +758,27 @@ impl Snapshot {
         self.items.iter().filter(|i| i.needs_attention()).count()
     }
 
+    /// How many of the things that need attention wait on sudo (a plain `dots apply` skips them).
+    fn sudo_waiting(&self) -> usize {
+        self.items
+            .iter()
+            .filter(|i| i.sudo.is_some() && (i.needs_attention() || i.state == State::Unknown))
+            .count()
+    }
+
+    /// `N things need attention`, and how many of them only a sudo apply can resolve.
+    fn attention_text(&self) -> String {
+        let text = plural(
+            self.attention(),
+            "thing needs attention",
+            "things need attention",
+        );
+        match self.sudo_waiting() {
+            0 => text,
+            n => format!("{text} ({n} wait on sudo)"),
+        }
+    }
+
     fn counts(&self, area: Area) -> Vec<(State, usize)> {
         State::ALL
             .iter()
@@ -892,6 +999,13 @@ fn attention_lines(snap: &Snapshot) -> Vec<AttentionLine> {
                     _ => i.name.clone(),
                 })
                 .collect();
+            // A group that only a sudo apply can resolve says so, instead of the plain `apply`
+            // that skips it.
+            let stem = if items.iter().all(|i| i.sudo.is_some()) {
+                "dots apply --sudo-only"
+            } else {
+                stem
+            };
             let hint = match items[0].hints.first() {
                 Some(h) if n == 1 => h.clone(),
                 _ => stem.to_string(),
@@ -960,11 +1074,21 @@ fn dashboard(l: &Loaded, dirs: &Dirs, snap: &Snapshot) -> Report {
         },
         Block::headline(
             Tone::Warn,
-            plural(
-                lines.len(),
-                "thing needs attention",
-                "things need attention",
-            ),
+            match snap.sudo_waiting() {
+                0 => plural(
+                    lines.len(),
+                    "thing needs attention",
+                    "things need attention",
+                ),
+                n => format!(
+                    "{} ({n} wait on sudo)",
+                    plural(
+                        lines.len(),
+                        "thing needs attention",
+                        "things need attention"
+                    )
+                ),
+            },
         ),
         Block::Attention(lines),
     ];
@@ -1024,17 +1148,22 @@ fn summary(l: &Loaded, dirs: &Dirs, snap: &Snapshot, all: bool) -> Report {
                 bits.push(plural(n, one, many));
             }
         }
-        let text = if bits.is_empty() {
+        let mut text = if bits.is_empty() {
             "Nothing declared yet.".to_string()
         } else {
             format!("All good. {}", bits.join(" \u{b7} "))
         };
+        // Entries that could not be read without sudo are not problems, but not "good" either.
+        match snap.sudo_waiting() {
+            0 => {}
+            n => text.push_str(&format!(
+                " \u{b7} {}",
+                plural(n, "waits on sudo", "wait on sudo")
+            )),
+        }
         report = report.with_headline(Tone::Ok, text);
     } else {
-        report = report.with_headline(
-            Tone::Warn,
-            plural(attention, "thing needs attention", "things need attention"),
-        );
+        report = report.with_headline(Tone::Warn, snap.attention_text());
     }
     report.blocks.insert(
         0,

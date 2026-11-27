@@ -34,7 +34,10 @@ pub use phases::{
     NoServicesPhase, NoSettingsPhase, PlanError, RestartResult, ServiceStep, ServiceStepResult,
     ServicesPhase, ServicesRequest, SettingStep, SettingStepResult, SettingsPhase, SettingsRequest,
 };
-pub use plan::{Batch, Inputs, PkgStep, Plan, Scope, StepKind, SudoItem, Switch, plan, select};
+pub use plan::{
+    Batch, Inputs, PkgStep, Plan, Scope, StepKind, SudoItem, Switch, decide_package, plan, select,
+    sudo_reason,
+};
 pub use render::{plan_json, plan_text};
 pub use shims::{OwnedShim, ShimDecl, ShimState, ShimStep, ShimStepResult};
 pub use shims::{declared_for as shim_declared_for, state_of as shim_state};

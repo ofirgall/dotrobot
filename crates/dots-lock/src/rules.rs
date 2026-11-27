@@ -11,7 +11,7 @@
 //! | installed differs from the lock, installed outside dots | adopt, leave the lock row, `status` shows drift |
 //! | installed older than the lock | upgrade to the locked version |
 //! | installed newer than the lock, exact-capable provider | downgrade to the locked version (`⚠ downgrade`, always confirmed) |
-//! | installed newer than the lock, limited provider (brew, apt) | nothing to do; `status` shows drift |
+//! | installed newer than the lock, limited provider (brew, apt) | no step; the row is rewritten to what is installed (`dots_engine::decide_package`), so `status`'s drift clears with one `apply` |
 //! | installed does not satisfy the spec | upgrade or downgrade into the spec; the row is rewritten |
 
 use std::cmp::Ordering;

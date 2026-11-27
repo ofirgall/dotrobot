@@ -36,6 +36,9 @@ pub struct StatusRow {
     pub have: Option<String>,
     pub detail: String,
     pub adopt: Option<String>,
+    /// A `root = true` entry on a machine where dots is not root: a plain `dots apply` leaves
+    /// it alone (its sudo step is skipped), so `status` says it waits on sudo.
+    pub sudo: bool,
 }
 
 /// Is dots running as root already (then root entries need no sudo)?
@@ -211,6 +214,7 @@ pub fn status_rows(
                 have: None,
                 detail: e,
                 adopt: None,
+                sudo: false,
             }];
         }
     };
@@ -242,7 +246,8 @@ pub fn status_rows(
                 Health::Failed => ("failed", r.error.clone().unwrap_or_default(), None),
                 Health::Unknown => (
                     "unknown",
-                    "needs sudo to read; run `sudo -v` or `dots apply`".to_string(),
+                    "needs sudo to read; run `sudo -v` first, or `dots apply --with-sudo`"
+                        .to_string(),
                     None,
                 ),
             };
@@ -255,6 +260,7 @@ pub fn status_rows(
                 have: r.observed,
                 detail,
                 adopt,
+                sudo: r.setting.root() && !running_as_root(),
             }
         })
         .collect();
@@ -268,6 +274,7 @@ pub fn status_rows(
             have: None,
             detail: "n/a on this platform".into(),
             adopt: None,
+            sudo: false,
         });
     }
     rows

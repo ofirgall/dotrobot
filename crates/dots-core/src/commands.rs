@@ -862,7 +862,11 @@ fn status_data_schema() -> Value {
             "have": nullable_str,
             "latest": nullable_str,
             "detail": { "type": "string" },
-            "hints": { "type": "array", "items": { "type": "string" } }
+            "hints": { "type": "array", "items": { "type": "string" } },
+            "sudo": {
+                "description": "Present when a plain `dots apply` skips the item because applying it needs sudo: why (`requires_sudo`, `needs_root`, `root`).",
+                "type": "string"
+            }
         }
     });
     let counts =

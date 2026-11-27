@@ -57,6 +57,14 @@ Progress goes to stderr, so stdout (and `--json`) stay clean; `--quiet` drops it
 - Without a terminal (ssh without a tty, a pipe, CI) or with `DOTS_REDUCE_MOTION`, the same events are plain ASCII lines (`[..] Installing kv (cargo)`, `[x] Installed kv  3m 05s`), and a step that runs longer than 30 s adds `[..] still running: Installing kv (cargo) (1m 30s)` every 30 s. Set `DOTS_HEARTBEAT_SECS` to change the interval, or `0` to turn it off. The lines are also appended to the run log (`~/.local/state/dots/logs/<run-id>/run.log`).
 - Ctrl-C clears the live region; the first press stops after the running steps, the second ends the process at once.
 
+## `dots status`: what it promises
+
+`status` asks the same question `apply` asks (`dots_engine::decide_package` for versions, the plan's sudo rule for root), so a row with a `dots apply <pkg>` hint is one that `apply` acts on:
+
+- **Package drift** is a package step (install, upgrade, downgrade), or a lock row that `apply` rewrites without any step: `locked 2.104.0, installed 2.105.0; apply updates the lock`. That happens when the installed version is newer than the row and the provider cannot install an older one (brew, apt), and for packages built from a git or `path` source (their version comes from the source, so the row cannot be restored by reinstalling). A version installed outside dots is adopted by the next `apply`. A package outside its version spec that the provider cannot move (it cannot install an older version) is drift with no hint: edit the spec.
+- **Sudo.** A package, provider entry or setting that needs root (`requires_sudo`, `needs_root`, `root = true`) is badged `needs sudo` in its note (`"sudo": "<reason>"` in `--json` items), with the hint `dots apply --with-sudo <pkg>` (a plain apply skips it; per-package selection works with the flag). The headline counts them: `3 things need attention (2 wait on sudo)`, and a group of them on the bare `dots` screen says `dots apply --sudo-only`. A root setting that cannot be read without a cached sudo credential is `unknown` (root's preferences are a different plist from the user's), also badged.
+- **Settings** read a key (or a whole domain) nobody wrote as `unset`: it differs from the declared value, so it is `missing`, not `unknown`. `unknown` and `failed` are for reads that really could not happen (no sudo credential, a tool that is missing, a permission error).
+
 ## `dots apply`, `dots upgrade` and sudo steps
 
 `dots apply` has three modes for the steps that need root (see "Sudo steps" in `providers.md`):

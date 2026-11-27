@@ -402,6 +402,83 @@ fn strict_makes_version_drift_an_error() {
     assert_eq!(run(&b, &["status", "--strict"]).code, 1);
 }
 
+/// Bug 34: a lock row older than what is installed (a provider that cannot install an older
+/// version, so the plan has no step) is shown with a hint that works: `dots apply` records the
+/// installed version, and the drift is gone. Status and plan agree throughout.
+#[test]
+fn a_stale_lock_row_is_drift_that_one_apply_clears() {
+    let b = sandbox(&[script("tool", "1.0.0", "")], "");
+    assert_eq!(run(&b, &["apply", "--yes"]).code, 0);
+    let lock = b.root.join("dots.lock");
+    let text = std::fs::read_to_string(&lock).unwrap();
+    assert!(text.contains("1.0.0"), "{text}");
+    std::fs::write(&lock, text.replace("1.0.0", "0.9.0")).unwrap();
+
+    let o = run(&b, &["status"]);
+    assert_eq!(o.code, 2, "{}{}", o.stdout, o.stderr);
+    assert!(o.stdout.contains("dots apply tool"), "{}", o.stdout);
+    let d = json(&run(&b, &["status", "--json"]));
+    let detail = d["data"]["items"][0]["detail"].as_str().unwrap();
+    assert!(
+        detail.contains("locked 0.9.0, installed 1.0.0") && detail.contains("updates the lock"),
+        "{detail}"
+    );
+    // the plan has no package step, but it is not blind to the row: apply acts on it
+    let plan = json(&run(&b, &["plan", "--json"]));
+    assert_eq!(plan["data"]["summary"]["packages"], 0, "{plan}");
+    assert_eq!(plan["data"]["lock"][0]["rewrite"], true, "{plan}");
+    assert_eq!(plan["data"]["lock"][0]["to"], "1.0.0", "{plan}");
+    assert_eq!(run(&b, &["apply", "--yes"]).code, 0);
+    assert!(
+        std::fs::read_to_string(&lock).unwrap().contains("1.0.0"),
+        "the row follows what is installed"
+    );
+    let after = run(&b, &["status"]);
+    assert_eq!(after.code, 0, "{}{}", after.stdout, after.stderr);
+}
+
+/// Bug 35: a package that waits on sudo says so, and hints the command that runs it (a plain
+/// `dots apply` skips it).
+#[test]
+fn a_package_waiting_on_sudo_is_badged_and_hints_with_sudo() {
+    let b = sandbox(
+        &[
+            script("warp", "1.0.0", "requires_sudo = true"),
+            script("plain", "1.0.0", ""),
+        ],
+        "",
+    );
+    let o = run(&b, &["status", "--color", "never"]);
+    assert_eq!(o.code, 2, "{}{}", o.stdout, o.stderr);
+    assert!(
+        o.stdout.contains("needs sudo") && o.stdout.contains("dots apply --with-sudo warp"),
+        "{}",
+        o.stdout
+    );
+    assert!(
+        o.stdout
+            .contains("2 things need attention (1 wait on sudo)"),
+        "{}",
+        o.stdout
+    );
+    // the ordinary one keeps the plain hint
+    assert!(o.stdout.contains("dots apply plain"), "{}", o.stdout);
+    assert!(!o.stdout.contains("--with-sudo plain"), "{}", o.stdout);
+
+    let d = json(&run(&b, &["status", "--json"]));
+    validate("status", &d);
+    let items = d["data"]["items"].as_array().unwrap();
+    let warp = items.iter().find(|i| i["name"] == "warp").unwrap();
+    assert_eq!(warp["sudo"], "requires_sudo", "{d}");
+    let plain = items.iter().find(|i| i["name"] == "plain").unwrap();
+    assert!(plain.get("sudo").is_none(), "{d}");
+
+    // the hint is real: it is the command that installs it
+    let w = run(&b, &["apply", "--with-sudo", "warp", "--yes", "--dry-run"]);
+    assert_eq!(w.code, 0, "{}{}", w.stdout, w.stderr);
+    assert!(w.stdout.contains("warp"), "{}", w.stdout);
+}
+
 // ------------------------------------------------------------------ the network
 
 /// A package whose `latest` leaves a marker file when it runs.

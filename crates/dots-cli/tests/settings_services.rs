@@ -1130,8 +1130,20 @@ fn status_of_a_root_setting_without_a_cached_sudo_is_unknown_with_a_hint() {
         detail.contains("needs sudo to read") && detail.contains("sudo -v"),
         "{detail}"
     );
+    // Bug 35: it waits on sudo, and the hint is the command that runs it (a plain apply skips it)
+    assert_eq!(s[0]["sudo"], "root", "{doc}");
+    assert_eq!(
+        s[0]["hints"],
+        serde_json::json!(["dots apply --with-sudo ua"]),
+        "{doc}"
+    );
     let plain = run(&b, &["status", "--all", "--color", "never"]);
     assert!(plain.stdout.contains("unknown"), "{}", plain.stdout);
+    assert!(
+        plain.stdout.contains("1 waits on sudo"),
+        "the summary says so: {}",
+        plain.stdout
+    );
 }
 
 #[test]

@@ -530,6 +530,68 @@ fn plan_hooks(inp: &Inputs<'_>, plan: &Plan) -> Vec<HookStep> {
     out
 }
 
+/// A package built from a git or local source takes its version from the source.
+fn is_source_bound(spec: &dots_providers::Spec) -> bool {
+    spec.opts.contains_key("git") || spec.opts.contains_key("path")
+}
+
+/// What `apply` does about one package's version: the lock rules ([`rules::decide`]) plus the
+/// two corrections that depend on the provider and the source. `status` asks this same
+/// question, so it can never report a drift that `apply` would not act on.
+///
+/// - A package built from a git or local source cannot be restored to a lock row by
+///   reinstalling (the install builds whatever the source holds now, and the plan could only
+///   say "-> ?"), so moving "down" to the row is never offered. It used to raise a spurious,
+///   confirmed downgrade to an unknown version after every upgrade. A pinned `rev` is the way
+///   to hold a git source, and `stale_reason` still catches a real source mismatch.
+/// - When no step follows (that, or a provider that cannot install an older version) and what
+///   is installed is acceptable but not what the row says, the row is stale: it is rewritten
+///   to what is installed, so one `apply` clears the difference instead of leaving a drift that
+///   nothing resolves. An install outside dots is only adopted; the row stays until dots owns it.
+pub fn decide_package(f: &Facts<'_>, spec: &dots_providers::Spec) -> rules::Decision {
+    let mut d = rules::decide(f);
+    if is_source_bound(spec)
+        && !spec.opts.contains_key("rev")
+        && d.step.as_ref().is_some_and(|s| s.kind == Kind::Downgrade)
+    {
+        d.step = None;
+    }
+    if d.step.is_none()
+        && !d.adopt
+        && !d.rewrite
+        && d.drift.is_none()
+        && let (Some(l), Some(inst)) = (f.locked.as_ref(), f.installed)
+        && rules::lock_satisfies(f.spec, l)
+        && !rules::matches_lock(l, inst, f.installed_rev)
+    {
+        d.rewrite = true;
+        d.expected = Some(inst.to_string());
+    }
+    d
+}
+
+/// Why a step for this package needs root: `requires_sudo` (the package or its provider
+/// entry), or the provider (or its script) runs as root. `None` for an ordinary package.
+pub fn sudo_reason(
+    registry: &Registry,
+    pkg: Option<&dots_model::Package>,
+    cfg: Option<&ProviderConfig>,
+    provider: &str,
+    name: &str,
+) -> Option<String> {
+    let needs_root_cfg = matches!(cfg, Some(ProviderConfig::Script(s)) if s.needs_root);
+    let caps_root = registry
+        .get_for(provider, name)
+        .is_some_and(|p| p.caps().needs_root);
+    if pkg.is_some_and(|p| p.requires_sudo) || cfg.is_some_and(|c| c.common().requires_sudo) {
+        Some("requires_sudo".to_string())
+    } else if needs_root_cfg || caps_root {
+        Some("needs_root".to_string())
+    } else {
+        None
+    }
+}
+
 struct Draft {
     step: PkgStep,
     op: Op,
@@ -603,7 +665,7 @@ fn plan_packages(
             })
             .flatten()
         });
-        let mut decision = match inp.locks.and_then(|l| l.upgrade.get(name)) {
+        let decision = match inp.locks.and_then(|l| l.upgrade.get(name)) {
             Some(t) => rules::Decision {
                 step: Some(rules::Step {
                     kind: if installed_v.is_some() {
@@ -617,36 +679,23 @@ fn plan_packages(
                 expected: t.to.clone(),
                 ..Default::default()
             },
-            None => rules::decide(&Facts {
-                spec: &pr.wanted,
-                locked,
-                installed: installed_v,
-                installed_rev: installed.and_then(|i| i.source.as_deref()),
-                owned: owned
-                    .packages
-                    .get(name)
-                    .is_some_and(|o| o.provider == choice.id),
-                offered: offered.as_deref(),
-                exact,
-            }),
+            None => decide_package(
+                &Facts {
+                    spec: &pr.wanted,
+                    locked,
+                    installed: installed_v,
+                    installed_rev: installed.and_then(|i| i.source.as_deref()),
+                    owned: owned
+                        .packages
+                        .get(name)
+                        .is_some_and(|o| o.provider == choice.id),
+                    offered: offered.as_deref(),
+                    exact,
+                },
+                &spec,
+            ),
         };
-        // A package built from a git or local source takes its version from the source, so a
-        // lock row cannot be restored by reinstalling: the install would build whatever the
-        // source holds now, and the plan could only say "-> ?". Moving "down" to the row is
-        // therefore never offered (it used to raise a spurious, confirmed downgrade to an
-        // unknown version after every upgrade); a pinned `rev` is the way to hold a git
-        // source, and `stale_reason` below still catches a real source mismatch.
-        let source_bound = spec.opts.contains_key("git") || spec.opts.contains_key("path");
-        if source_bound
-            && !spec.opts.contains_key("rev")
-            && !inp.locks.is_some_and(|l| l.upgrade.contains_key(name))
-            && decision
-                .step
-                .as_ref()
-                .is_some_and(|s| s.kind == Kind::Downgrade)
-        {
-            decision.step = None;
-        }
+        let source_bound = is_source_bound(&spec);
         if decision.rewrite || decision.adopt || decision.drift.is_some() {
             plan.lock.push(LockStep {
                 package: name.clone(),
@@ -700,25 +749,13 @@ fn plan_packages(
         let always_confirm = (is_script && inp.unreviewed.contains(name))
             .then(|| format!("`{name}` runs a script from a source you have not reviewed"));
         let switch = plan_switch(inp, &owned, name, &choice.id);
-        let provider_caps_root = inp
-            .registry
-            .get_for(&choice.id, name)
-            .is_some_and(|p| p.caps().needs_root);
         let uv_system = matches!(cfg, Some(ProviderConfig::Uv(u)) if u.break_system_packages);
-        let sudo = if pkg.is_some_and(|p| p.requires_sudo)
-            || cfg.is_some_and(|c| c.common().requires_sudo)
-        {
-            Some("requires_sudo".to_string())
-        } else if needs_root_cfg || provider_caps_root {
-            Some("needs_root".to_string())
-        } else if switch
-            .as_ref()
-            .is_some_and(|w| w.remove.iter().any(|a| a.needs_root))
-        {
-            Some("removes the old copy as root".to_string())
-        } else {
-            None
-        };
+        let sudo = sudo_reason(inp.registry, pkg, cfg, &choice.id, name).or_else(|| {
+            switch
+                .as_ref()
+                .is_some_and(|w| w.remove.iter().any(|a| a.needs_root))
+                .then(|| "removes the old copy as root".to_string())
+        });
         // Known only once the provider planned its actions (uv checks the target directory);
         // until then it keeps such a package apart from the ordinary ones.
         let sudo_hint = sudo.is_some() || uv_system;
