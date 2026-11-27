@@ -27,6 +27,7 @@ mod settings_phase;
 mod show;
 mod status;
 mod stream;
+mod todo;
 mod upgrade;
 mod views;
 mod why;

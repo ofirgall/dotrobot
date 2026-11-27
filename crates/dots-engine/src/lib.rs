@@ -12,6 +12,7 @@ mod hooks;
 mod journal;
 mod lock;
 mod locks;
+mod manual;
 mod phases;
 mod plan;
 mod render;
@@ -28,6 +29,7 @@ pub use hooks::{HookRequest, HookStep, HookStepResult, HooksPhase, NoHooksPhase}
 pub use journal::{Entry as JournalEntry, Journal, JournalMeta, new_run_id, rfc3339};
 pub use lock::RunLock;
 pub use locks::{LockInputs, LockStep, LockUpdate, UpgradeTarget, source_of, version_and_rev};
+pub use manual::{ManualRecord, ManualStatus};
 pub use phases::{
     NoServicesPhase, NoSettingsPhase, PlanError, RestartResult, ServiceStep, ServiceStepResult,
     ServicesPhase, ServicesRequest, SettingStep, SettingStepResult, SettingsPhase, SettingsRequest,

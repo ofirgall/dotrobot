@@ -372,6 +372,13 @@ impl Linter<'_> {
                     self.condition(w, (&file, at(format!("settings.{k}.when"))), &src, cur);
                 }
             }
+            // `manual/*.md` front matter: its `when` is the same condition language.
+            for m in &p.manual {
+                if let Some(w) = &m.when {
+                    let mfile = format!("packages/{pn}/manual/{}.md", m.id);
+                    self.condition(w, (&mfile, None), &src, cur);
+                }
+            }
         }
     }
 

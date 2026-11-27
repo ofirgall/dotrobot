@@ -541,13 +541,33 @@ fn git_dirty(l: &Loaded, dirs: &Dirs, items: &mut [Item]) {
 /// Pending manual actions. A `logout` / `reboot` action whose setting reads as declared now
 /// is not pending any more (the next `apply` also drops it from the state).
 fn todo_items(l: &Loaded, dirs: &Dirs) -> Vec<Item> {
-    let todos = OwnedState::load(&dirs.state_json()).0.todos;
+    let state = OwnedState::load(&dirs.state_json()).0;
+    let todos = state.todos.clone();
+    // Declared manual actions (`manual/*.md`), from the per-machine record: no checks run here.
+    let manual: Vec<Item> = crate::todo::entries(&l.rc, &l.resolution, &l.installed, &state)
+        .into_iter()
+        .map(|e| {
+            let a = e.action;
+            let st = match e.status {
+                dots_engine::ManualStatus::Pending => State::Pending,
+                dots_engine::ManualStatus::Done => State::Done,
+                dots_engine::ManualStatus::Skipped => State::Skipped,
+                dots_engine::ManualStatus::Auto => State::Auto,
+            };
+            let mut it = Item::new(Area::Todos, &a.full_id(), &a.package, st);
+            it.detail = a.title.clone();
+            if st == State::Pending {
+                it.hints = vec![format!("dots todo show {}", a.full_id())];
+            }
+            it
+        })
+        .collect();
     let settled = if todos.is_empty() {
         Vec::new()
     } else {
         crate::settings_phase::settled_todos(&l.rc, &l.resolution, &l.pctx)
     };
-    todos
+    let settings = todos
         .iter()
         .filter(|t| {
             !settled
@@ -559,8 +579,41 @@ fn todo_items(l: &Loaded, dirs: &Dirs) -> Vec<Item> {
             it.detail = t.reason.clone();
             it.hints = vec!["dots todo".into()];
             it
-        })
-        .collect()
+        });
+    manual.into_iter().chain(settings).collect()
+}
+
+/// `post_install` hooks that still owe a run: the package was adopted (dots never ran its
+/// setup), the hook was skipped, or it failed last time. `apply` runs them.
+fn hook_items(l: &Loaded, dirs: &Dirs) -> Vec<Item> {
+    let state = OwnedState::load(&dirs.state_json()).0;
+    let active: BTreeSet<&str> = l.resolution.active().map(|r| r.name.as_str()).collect();
+    let mut out = Vec::new();
+    let keys = state.hooks_pending.iter().chain(&state.hooks_failed);
+    let mut seen = BTreeSet::new();
+    for key in keys {
+        let Some((pkg, event)) = key.split_once(':') else {
+            continue;
+        };
+        let declared =
+            l.rc.repo
+                .packages
+                .get(pkg)
+                .is_some_and(|p| p.hooks.post_install.is_some());
+        if event != "post_install" || !active.contains(pkg) || !declared || !seen.insert(key) {
+            continue;
+        }
+        let failed = state.hooks_failed.contains(key);
+        let mut it = Item::new(Area::Packages, key, pkg, State::Pending);
+        it.detail = if failed {
+            "setup hook failed last time".into()
+        } else {
+            "setup hook has not run yet".into()
+        };
+        it.hints = vec![format!("dots apply {pkg}")];
+        out.push(it);
+    }
+    out
 }
 
 /// Declared executables of installed packages: cheap, static checks against PATH.
@@ -609,6 +662,7 @@ pub fn compute(l: &Loaded, dirs: &Dirs, all: bool) -> Snapshot {
     items.extend(settings_items(l, dirs));
     items.extend(service_items(l, dirs));
     items.extend(todo_items(l, dirs));
+    items.extend(hook_items(l, dirs));
     items.extend(bin_items(l, dirs));
     Snapshot { items }
 }
@@ -816,6 +870,10 @@ fn attention_lines(snap: &Snapshot) -> Vec<AttentionLine> {
                 (_, State::Modified) if area == Area::Files => (
                     plural(n, "config changed by app", "configs changed by app"),
                     "dots adopt",
+                ),
+                (Area::Packages, State::Pending) => (
+                    plural(n, "setup hook pending", "setup hooks pending"),
+                    "dots apply",
                 ),
                 (_, State::Pending) => (
                     plural(n, "manual step left", "manual steps left"),

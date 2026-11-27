@@ -355,6 +355,24 @@ pub static REGISTRY: &[ErrorDef] = &[
         ["file", "line"]
     ),
     def!(
+        "manual-invalid",
+        "{file}: {detail}",
+        "Fix the front matter (`id`, `title`, `when`, `after`, `check`, `requires`, `revision`, `interactive`).",
+        ["file", "line"]
+    ),
+    def!(
+        "manual-unknown",
+        "no manual action `{id}`",
+        "Run `dots todo` to see the ids; they look like `<package>/<id>`.",
+        []
+    ),
+    def!(
+        "manual-duplicate-id",
+        "two manual actions of one package share the id `{id}` (the other is {other})",
+        "Give each file under manual/ its own `id`.",
+        ["file"]
+    ),
+    def!(
         "package-missing-manifest",
         "{file} has no package.toml; the directory is skipped",
         "Add a package.toml (`schema = 1` and `name`), or delete the directory.",

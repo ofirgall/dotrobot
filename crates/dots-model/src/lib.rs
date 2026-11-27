@@ -10,6 +10,7 @@ mod effective;
 mod explain;
 mod load;
 mod machine;
+pub mod manual;
 mod merge;
 mod repo;
 mod schema;
@@ -29,6 +30,7 @@ pub use effective::{
 pub use explain::{Change, Origin, RenderLine, Rendered};
 pub use load::SUPPORTED_SCHEMA;
 pub use machine::MachineConfig;
+pub use manual::{After, ManualAction, Requires};
 pub use repo::{LoadErrors, Loaded, Repo};
 pub use schema::escapes_package;
 pub use setting::DeclProblem;

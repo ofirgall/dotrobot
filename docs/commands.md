@@ -73,6 +73,76 @@ With `--sudo-only`, a sudo step whose ordinary dependency is not installed yet i
 
 `--json` (`dots/apply@1`, and `dots/upgrade@1` for `dots upgrade`) carries `sudo: { mode: "skip"|"with"|"only", skipped: [{ name, kind, provider, reason }], not_applied_ordinary }`; skipped package steps appear in `results` with status `skipped-sudo` (or `skipped-due-to-dep`, `not-selected` for `--sudo-only`). `dots plan --json` marks each step with `sudo` (the reason, or null) and counts them in `summary.sudo_steps`; the plan's "Heads up" says that N steps need sudo and a plain apply skips them.
 
+## `dots todo`: manual actions
+
+Steps software cannot do for you (granting a permission, clicking an enable button, changing the
+login shell) are one markdown file each, `packages/<pkg>/manual/<id>.md`:
+
+```markdown
+---
+id: tailscale                 # optional, defaults to the file name; full id is <pkg>/<id>
+title: Tailscale CLI with HTTPS certificates
+when: 'os = "macos"'          # optional platform condition
+after: always                 # install (default) | files | always
+check: 'tailscale status --json | grep -q CertDomains'   # optional; exit 0 means done
+requires: [logout]            # logout | reboot | restart-app:<name>; shown as badges
+revision: 1                   # bump when the steps change: pending again on every machine
+interactive: false            # needs a terminal (parsed and badged; apply does not walk them yet)
+---
+
+1. Install the CLI from the Tailscale app.
+2. Enable HTTPS certificates at https://login.tailscale.com/admin/dns.
+```
+
+Unknown front matter keys are errors (`dots lint` reports `manual-invalid`, and
+`manual-duplicate-id` for two files with one id; `when` is checked like every other condition).
+
+```
+dots todo                          # pending actions, with requires badges
+dots todo show <pkg>/<id>          # the markdown, plain text
+dots todo done <pkg>/<id> [--note <text>]
+dots todo skip <pkg>/<id>          # not listed again until its revision increases
+dots todo check                    # run the checks, close what passes
+```
+
+An id is `<pkg>/<id>` or the address `pkg:<pkg>/manual:<id>`.
+
+- **When an action exists.** Its package is active, its `when` holds and, for `after: install`,
+  the package is installed (or dots owns it). `after: files` and `after: always` need only the
+  active package.
+- **Per machine.** The record (`status` pending/done/skipped/auto, `revision`, `at`, `repo_rev`,
+  `note`) is in `state.json` under `manual`, so doing it on the laptop says nothing about the
+  desktop. A record counts only for the revision it was made against: raising `revision` reopens
+  the action everywhere, including where it was skipped.
+- **Checks** run in two places only: at the end of `dots apply` and on `dots todo check`, each
+  through `/bin/sh -c` in the package directory with a 10 second timeout (a timeout is "not
+  yet"). A passing check closes the action as `auto`. An `after: always` action closed by its
+  check opens again when the check stops passing (login shell, group membership). `status`,
+  `plan` and a bare `dots todo` only read the record, so they never run your commands.
+- **Where they show.** `dots status` lists them under TODO (`dots status --all` includes the
+  closed ones), `dots plan` adds "N manual actions pending, 1 requires logout" to Heads up, and
+  `dots apply` ends with the same line (`data.manual` in `--json`).
+- The logout / reboot requirements settings raise are listed by `dots todo` too, marked
+  `[from a setting]`; they close themselves once the setting reads as declared.
+
+Not done yet: `interactive` actions are not run one by one at the end of `apply`, `show` does
+not render the markdown with termimad or offer to open links, and a hook cannot wait on a
+manual action.
+
+### Pending `post_install` hooks
+
+`[hooks] post_install` runs when dots installs or upgrades the package. A package dots only
+*adopted* (it was already installed) never had its setup run, so that hook is owed:
+
+- `state.json` records `hooks_pending` for an adopted package that declares `post_install`, and
+  for a `post_install` that was skipped (an earlier hook of the package failed). `hooks_failed`
+  already covered a hook that ran and failed.
+- `dots plan` lists the hook (`adopted, never ran` / `failed last run`), `dots apply` runs it and
+  clears the entry, `dots status` shows `<pkg>:post_install` as pending.
+- A package dots installed before this record existed has no entry and is assumed done: only
+  adoptions and failures from now on are owed, so nothing re-runs after an upgrade of dots.
+- The hook script is not hashed, so editing it does not run it again.
+
 ## `dots why <pkg>`
 
 Explain why a package is (or is not) on this machine: every inclusion path as a tree from the

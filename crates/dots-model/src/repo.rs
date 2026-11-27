@@ -202,11 +202,50 @@ fn load_packages(
         if !check_setting_decls(&pkg, &src, diags) {
             continue;
         }
+        pkg.manual = load_manual(&pkg.name, &dir, diags);
         pkg.dir = dir.clone();
         pkg.escape_hatch_paths = l.escape_hatch;
         pkg.spans = l.spans;
         keys.extend(l.platform_keys);
         out.insert(dirname.to_string(), pkg);
+    }
+    out
+}
+
+/// The package's `manual/*.md` files. A bad file is an error (`manual-invalid`) that does not
+/// hide the package's other problems; two files with the same id are `manual-duplicate-id`.
+fn load_manual(name: &str, dir: &Path, diags: &mut Diags) -> Vec<crate::manual::ManualAction> {
+    let mut out: Vec<crate::manual::ManualAction> = Vec::new();
+    for path in sorted_entries(&dir.join("manual")) {
+        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let display = format!("packages/{name}/manual/{stem}.md");
+        let Some(src) = read_source(&path, display, format!("package:{name}"), diags) else {
+            continue;
+        };
+        match crate::manual::parse(name, stem, &path, &src.text) {
+            Err(p) => {
+                let at = p.line.and_then(|l| line_span(&src, l));
+                diags.error("manual-invalid", &[("detail", &p.detail)], &src, at);
+            }
+            Ok(a) => {
+                if let Some(first) = out.iter().find(|o| o.id == a.id) {
+                    let (id, other) = (a.full_id(), first.path.display().to_string());
+                    diags.error(
+                        "manual-duplicate-id",
+                        &[("id", &id), ("other", &other)],
+                        &src,
+                        None,
+                    );
+                } else {
+                    out.push(a);
+                }
+            }
+        }
     }
     out
 }

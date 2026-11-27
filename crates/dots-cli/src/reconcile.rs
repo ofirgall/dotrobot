@@ -293,6 +293,8 @@ pub fn plan_cmd(ctx: &Context, args: &Args, check: bool) -> Report {
                 &backup_dir(ctx),
             );
             r.warnings = warnings;
+            let manual = crate::todo::pending_for(&p.rc, &p.resolution, &p.installed, &ctx.dirs);
+            crate::todo::plan_heads_up(&mut r, &manual.iter().collect::<Vec<_>>());
             if check && !pl.is_empty() {
                 r.exit = ExitCode::PlanNonEmpty;
             }
@@ -515,10 +517,18 @@ pub(crate) fn apply_inner(
             Vec::new()
         }
     };
-    (
-        to_report(command, report, warnings, &backup_dir(ctx)),
-        written,
-    )
+    // A real `apply` ends with the manual actions still open (their checks run first).
+    let live = !a.dry_run
+        && command == "apply"
+        && matches!(
+            report.status,
+            Status::Done | Status::Failed | Status::Interrupted
+        );
+    let mut out = to_report(command, report, warnings, &backup_dir(ctx));
+    if live {
+        crate::todo::after_apply(ctx, &p.rc, &p.resolution, &p.installed, &pctx, &mut out);
+    }
+    (out, written)
 }
 
 fn backup_dir(ctx: &Context) -> String {

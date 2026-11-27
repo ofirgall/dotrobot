@@ -464,7 +464,7 @@ fn plan_shims(inp: &Inputs<'_>, plan: &Plan) -> Vec<ShimStep> {
 }
 
 /// The hooks that fire in this run (see the `hooks` module): per package in plan order, those
-/// whose trigger changed, plus any that failed last time.
+/// whose trigger changed, plus any that failed last time or never ran (adopted package).
 fn plan_hooks(inp: &Inputs<'_>, plan: &Plan) -> Vec<HookStep> {
     let (state, _) = crate::state::State::load(&inp.dirs.state_json());
     let mut out = Vec::new();
@@ -494,8 +494,15 @@ fn plan_hooks(inp: &Inputs<'_>, plan: &Plan) -> Vec<HookStep> {
             } else {
                 files
             };
-            let failed = state.hooks_failed.contains(&format!("{name}:{event}"));
-            if !in_scope || !(changed || failed) {
+            let key = format!("{name}:{event}");
+            let failed = state.hooks_failed.contains(&key);
+            // `post_install` of a package dots only adopted has never run: recorded in the
+            // state once the adoption is journalled, and seen here already when this very run
+            // adopts it.
+            let adopting =
+                event == "post_install" && plan.lock.iter().any(|l| l.package == *name && l.adopt);
+            let pending = state.hooks_pending.contains(&key) || adopting;
+            if !in_scope || !(changed || failed || pending) {
                 continue;
             }
             out.push(HookStep {
@@ -509,8 +516,10 @@ fn plan_hooks(inp: &Inputs<'_>, plan: &Plan) -> Vec<HookStep> {
                     } else {
                         "files change".into()
                     }
-                } else {
+                } else if failed {
                     "failed last run".into()
+                } else {
+                    "adopted, never ran".into()
                 },
                 always_confirm: inp.unreviewed.contains(name).then(|| {
                     format!("`{name}` runs a `{event}` hook from a source you have not reviewed")

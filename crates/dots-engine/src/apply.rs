@@ -664,6 +664,7 @@ impl Run<'_> {
         });
         if r.ok {
             self.state.hooks_failed.remove(&r.step.key());
+            self.state.hooks_pending.remove(&r.step.key());
         } else {
             self.state.hooks_failed.insert(r.step.key());
             self.hook_failed.insert(r.step.package.clone());
@@ -985,8 +986,15 @@ pub fn apply_observed(
         let mut report = ApplyReport::bare(Status::Done, &cfg.run_id, plan_v);
         if !updates.is_empty() {
             let journal = Journal::new(&inp.dirs.journal(), &cfg.run_id, cfg.journal.clone());
+            let state_path = inp.dirs.state_json();
+            let (mut state, _) = State::load(&state_path);
+            let mut marked = false;
             for u in updates.iter().filter(|u| u.adopt) {
                 let _ = journal.append(&adopt_entry(u));
+                marked |= mark_adopted_hook(inp, &u.package, &mut state);
+            }
+            if marked {
+                let _ = state.save(&state_path);
             }
             report.lock_updates = updates;
         }
@@ -1056,11 +1064,16 @@ fn execute(
         hooks_skipped: Vec::new(),
         hook_failed: BTreeSet::new(),
     };
+    let mut marked = false;
     for u in crate::locks::recorded_without_step(&plan_v.lock) {
         if u.adopt {
             run.journal(adopt_entry(&u));
+            marked |= mark_adopted_hook(inp, &u.package, &mut run.state);
         }
         run.lock_updates.push(u);
+    }
+    if marked {
+        run.save();
     }
     if let Some(w) = state_warn {
         run.warnings.push(Diagnostic::from_code(
@@ -1461,6 +1474,11 @@ fn execute(
                 return;
             }
             if let Some(why) = skip(h, run) {
+                // A skipped setup hook is still owed: the next run offers it again.
+                if h.event == "post_install" {
+                    run.state.hooks_pending.insert(h.key());
+                    run.save();
+                }
                 run.hooks_skipped.push((h.clone(), why));
                 continue;
             }
@@ -2156,6 +2174,18 @@ fn close_settled_todos(inp: &Inputs<'_>, req: &SettingsRequest<'_>, state: &mut 
         .todos
         .retain(|t| !done.iter().any(|(p, r)| *p == t.package && *r == t.reason));
     state.todos.len() != before
+}
+
+/// An adopted package's `post_install` never ran (dots did not install it): record it as
+/// pending so it survives an interrupted run, a `--files-only` run or a failure.
+fn mark_adopted_hook(inp: &Inputs<'_>, package: &str, state: &mut State) -> bool {
+    inp.repo
+        .packages
+        .get(package)
+        .is_some_and(|p| p.hooks.post_install.is_some())
+        && state
+            .hooks_pending
+            .insert(format!("{package}:post_install"))
 }
 
 fn adopt_entry(u: &crate::locks::LockUpdate) -> Entry {

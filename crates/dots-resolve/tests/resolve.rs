@@ -485,7 +485,7 @@ fn meta_package_without_install_target_is_not_installed_by_every_provider() {
     );
     w(
         "packages/serial-access/manual/dialout.md",
-        "# add yourself to dialout\n",
+        "---\ntitle: add yourself to dialout\n---\n",
     );
     w(
         "packages/hooked/package.toml",

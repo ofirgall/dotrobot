@@ -245,6 +245,13 @@ post_files   = "touch -h ~/.config/karabiner/karabiner.json"   # e.g. karabiner 
 # change for *_files; a failed hook fires again). It runs like a script command (bash, package
 # dir as cwd, DOTS_* env, user not root), is logged, journalled and shown by `plan`; a failure
 # fails the run and skips the package's later hooks. `--dry-run` runs none.
+# `post_install` is also owed to a package dots *adopted* (found already installed: dots never ran
+# its setup) and to one whose `post_install` failed or was skipped. `state.json` keeps those as
+# `hooks_pending` / `hooks_failed`; `plan` lists them ("adopted, never ran", "failed last run"),
+# `apply` runs them and clears the entry, `status` reports them. A package dots installed before
+# this record existed has no entry and is assumed done, so an upgrade of dots re-runs nothing. The
+# hook script is not hashed: editing it does not re-run it (bump nothing, run `dots apply` after
+# removing the `hooks_pending` entry, or write the hook idempotently and trigger it with an upgrade).
 
 # --- Provenance (written by `dots add --copy`, never by hand) ---
 [origin]

@@ -158,6 +158,7 @@ pub fn dispatch(cmd: Option<&Cmd>, ctx: &Context) -> Report {
         ),
         Some(Cmd::Config { action }) => crate::config_cmd::run(ctx, action),
         Some(Cmd::Questions) => crate::questions::run(ctx),
+        Some(Cmd::Todo { action }) => crate::todo::run(ctx, action.as_ref()),
         Some(Cmd::Migrate { pkg, to, from, yes }) => crate::migrate::run(
             ctx,
             &crate::migrate::MigrateArgs {

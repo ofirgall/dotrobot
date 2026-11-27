@@ -325,6 +325,23 @@ Every error dots reports carries one of these stable codes (`errors[].code` in `
 - Hint: Move the file into the package directory; a package with a `//` path cannot be copied with `dots add --copy`.
 - Provenance: `file`, `line`
 
+## `manual-invalid`
+
+- Message: {file}: {detail}
+- Hint: Fix the front matter (`id`, `title`, `when`, `after`, `check`, `requires`, `revision`, `interactive`).
+- Provenance: `file`, `line`
+
+## `manual-unknown`
+
+- Message: no manual action `{id}`
+- Hint: Run `dots todo` to see the ids; they look like `<package>/<id>`.
+
+## `manual-duplicate-id`
+
+- Message: two manual actions of one package share the id `{id}` (the other is {other})
+- Hint: Give each file under manual/ its own `id`.
+- Provenance: `file`
+
 ## `package-missing-manifest`
 
 - Message: {file} has no package.toml; the directory is skipped

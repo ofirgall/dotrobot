@@ -2511,7 +2511,8 @@ mod hooks {
     #[test]
     fn hooks_fire_only_when_their_trigger_changed() {
         let (sb, order) = hooked(ALL);
-        // Already installed, no file changes: nothing fires.
+        // Installed by dots, no file changes: nothing fires.
+        own(&sb, "x", "brew", "1.0.0");
         let brew = FakeProvider::new("brew").with_installed("x", "1.0.0");
         let reg = registry(&[&brew]);
         let case = Case::new(&sb, &reg, &NoFiles);
@@ -2598,6 +2599,69 @@ mod hooks {
         let r = case.apply(true);
         assert_eq!(r.status, Status::Done, "{:?}", r.errors);
         assert!(read_state(&sb).get("hooks_failed").is_none());
+    }
+
+    #[test]
+    fn an_adopted_package_runs_its_post_install_once() {
+        let (sb, order) = hooked(&[("post_install", "echo setup >> {order}")]);
+        // Installed outside dots: adopted, never installed by dots.
+        let brew = FakeProvider::new("brew").with_installed("x", "1.0.0");
+        let reg = registry(&[&brew]);
+        let case = Case::new(&sb, &reg, &NoFiles);
+        let plan = case.plan();
+        assert!(plan.steps.is_empty());
+        assert_eq!(plan.hooks.len(), 1);
+        assert_eq!(plan.hooks[0].why, "adopted, never ran");
+        let r = case.apply(true);
+        assert_eq!(r.status, Status::Done, "{:?}", r.errors);
+        assert_eq!(lines(&order), ["setup"]);
+        assert!(read_state(&sb).get("hooks_pending").is_none());
+        // Done (the lock now records it): the next run has nothing to do.
+        let mut case = case;
+        case.lock.upsert(lock_row("x", "brew", "1.0.0"));
+        let r = case.apply(true);
+        assert_eq!(r.status, Status::Done);
+        assert_eq!(lines(&order), ["setup"]);
+        assert!(case.plan().hooks.is_empty());
+    }
+
+    #[test]
+    fn a_skipped_post_install_of_an_adopted_package_stays_pending() {
+        let (sb, order) = hooked(&[
+            ("pre_files", "exit 3"),
+            ("post_install", "echo setup >> {order}"),
+        ]);
+        let brew = FakeProvider::new("brew").with_installed("x", "1.0.0");
+        let reg = registry(&[&brew]);
+        let files = files_for_x();
+        let case = Case::new(&sb, &reg, &files);
+        let r = case.apply(true);
+        assert_eq!(r.status, Status::Failed);
+        assert!(lines(&order).is_empty());
+        assert_eq!(r.hooks_skipped[0].0.event, "post_install");
+        assert_eq!(read_state(&sb)["hooks_pending"][0], "x:post_install");
+        // The adoption is in the lock now; the hook is still owed on a later run.
+        let mut later = Case::new(&sb, &reg, &NoFiles);
+        later.lock.upsert(lock_row("x", "brew", "1.0.0"));
+        assert_eq!(later.plan().hooks[0].why, "adopted, never ran");
+        write(
+            &sb.root.join("packages/x/package.toml"),
+            "schema = 1\nname = \"x\"\n[providers.brew]\n[hooks]\npost_install = \"echo setup >> order.txt\"\n",
+        );
+        assert_eq!(later.apply(true).status, Status::Done);
+        assert!(read_state(&sb).get("hooks_pending").is_none());
+    }
+
+    #[test]
+    fn a_package_dots_installed_before_the_record_existed_is_assumed_done() {
+        let (sb, order) = hooked(&[("post_install", "echo setup >> {order}")]);
+        own(&sb, "x", "brew", "1.0.0");
+        let brew = FakeProvider::new("brew").with_installed("x", "1.0.0");
+        let reg = registry(&[&brew]);
+        let case = Case::new(&sb, &reg, &NoFiles);
+        assert!(case.plan().hooks.is_empty());
+        assert_eq!(case.apply(true).status, Status::Done);
+        assert!(lines(&order).is_empty());
     }
 
     #[test]

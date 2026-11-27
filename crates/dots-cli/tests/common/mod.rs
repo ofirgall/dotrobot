@@ -78,6 +78,7 @@ pub const IMPLEMENTED: &[&str] = &[
     "override",
     "migrate",
     "adopt",
+    "todo",
 ];
 
 /// Valid invocations of the commands that are still stubs.

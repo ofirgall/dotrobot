@@ -179,6 +179,9 @@ pub struct Package {
     /// Written by `dots add --copy`; never by hand.
     pub origin: Option<Origin>,
     pub platform: PlatformTables,
+    /// `manual/*.md`, read by the loader (not part of `package.toml`).
+    #[serde(skip)]
+    pub manual: Vec<crate::manual::ManualAction>,
 
     /// The package directory (set by the loader).
     #[serde(skip)]

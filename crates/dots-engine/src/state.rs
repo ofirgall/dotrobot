@@ -49,6 +49,16 @@ pub struct State {
     /// their trigger no longer changed.
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
     pub hooks_failed: std::collections::BTreeSet<String>,
+    /// `post_install` hooks (`<pkg>:post_install`) that still have to run although their
+    /// package needs no install step: the package was *adopted* (found already installed, so
+    /// dots never ran its setup), or the hook was skipped. A hook succeeding clears the entry.
+    /// A package dots installed before this record existed has no entry and is assumed done:
+    /// re-running every old setup hook on upgrade would be worse than missing a rare one.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub hooks_pending: std::collections::BTreeSet<String>,
+    /// Manual actions closed on this machine, keyed by `<pkg>/<id>` (see the `manual` module).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub manual: BTreeMap<String, crate::manual::ManualRecord>,
     /// Provider shims dots created, keyed by path.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub shims: BTreeMap<String, crate::shims::OwnedShim>,
@@ -62,6 +72,8 @@ impl Default for State {
             files: BTreeMap::new(),
             todos: Vec::new(),
             hooks_failed: Default::default(),
+            hooks_pending: Default::default(),
+            manual: BTreeMap::new(),
             shims: BTreeMap::new(),
         }
     }
