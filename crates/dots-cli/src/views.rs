@@ -54,6 +54,10 @@ pub fn plan_summary(plan: &Plan) -> String {
     if !plan.hooks.is_empty() {
         parts.push(plural(plan.hooks.len(), "hook", "hooks"));
     }
+    let locks = plan.lock.iter().filter(|l| l.shown() && l.rewrite).count();
+    if locks > 0 && parts.is_empty() {
+        parts.push(plural(locks, "lock update", "lock updates"));
+    }
     parts.join(" \u{b7} ")
 }
 
@@ -259,11 +263,7 @@ pub fn plan_blocks(plan: &Plan, backup_dir: &str) -> Vec<Block> {
     }
 
     // dots.lock rows that change, and what a provider cannot hold to.
-    let shown: Vec<_> = plan
-        .lock
-        .iter()
-        .filter(|l| (l.rewrite && (l.from.is_some() || l.has_step)) || l.drift.is_some())
-        .collect();
+    let shown: Vec<_> = plan.lock.iter().filter(|l| l.shown()).collect();
     if !shown.is_empty() {
         let mut t = Table::new()
             .styled_column("platform", 3, dots_core::Style::Muted)
@@ -430,7 +430,7 @@ fn sudo_skipped_blocks(r: &ApplyReport, command: &str) -> Vec<Block> {
 
 /// `dots plan`.
 pub fn plan_report(mut report: Report, plan: &Plan, backup_dir: &str) -> Report {
-    if plan.is_empty() {
+    if plan.is_empty() && !plan.has_lock_changes() {
         report = report.with_headline(
             Tone::Ok,
             "Nothing to do: the machine already matches the repo.",
@@ -469,7 +469,7 @@ pub fn apply_report(
         Status::DryRun => {
             report = plan_report(report, plan, backup_dir);
             report.push(Block::text("Dry run: nothing was changed."));
-            if !plan.is_empty() {
+            if !plan.is_empty() || plan.has_lock_changes() {
                 report.blocks.retain(|b| !matches!(b, Block::Hint(_)));
                 report.push(Block::hint("run without --dry-run to apply"));
             }
@@ -489,6 +489,13 @@ pub fn apply_report(
         && r.sudo_skipped.is_empty()
         && r.status == Status::Done
     {
+        if plan.has_lock_changes() {
+            let n = plan.lock.iter().filter(|l| l.shown() && l.rewrite).count();
+            return report.with_headline(
+                Tone::Ok,
+                format!("Applied   dots.lock updated ({})", plural(n, "row", "rows")),
+            );
+        }
         return report.with_headline(
             Tone::Ok,
             "Nothing to do: the machine already matches the repo.",

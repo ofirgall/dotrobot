@@ -471,7 +471,8 @@ fn package_items(l: &Loaded, dirs: &Dirs, all: bool) -> Vec<Item> {
         // The row names another version than the one installed, though the spec allows it.
         let stale_row = row.as_ref().filter(|r| {
             let lk = Locked::from(*r);
-            rules::lock_satisfies(&res.wanted, &lk)
+            !rules::version_unknown(&inst.version)
+                && rules::lock_satisfies(&res.wanted, &lk)
                 && !rules::matches_lock(&lk, &inst.version, inst.source.as_deref())
         });
         if let Some(step) = &decision.step {
@@ -515,6 +516,9 @@ fn package_items(l: &Loaded, dirs: &Dirs, all: bool) -> Vec<Item> {
         {
             it.state = State::Outdated;
             it.hints = vec![format!("dots upgrade {name}")];
+        }
+        if it.state == State::Ok && it.detail.is_empty() && rules::version_unknown(&inst.version) {
+            it.detail = "installed version unknown".into();
         }
         if let Some((d, what)) = shim
             && matches!(it.state, State::Ok | State::Outdated)

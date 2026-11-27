@@ -56,6 +56,15 @@ pub struct LockStep {
     pub spec: Option<Spec>,
 }
 
+impl LockStep {
+    /// Does the plan list this row (the Lock section of the text, table and JSON views)? A row
+    /// recorded for the first time is bookkeeping and stays out; a changed row, a row a step
+    /// rewrites and a drift note are shown.
+    pub fn shown(&self) -> bool {
+        (self.rewrite && (self.from.is_some() || self.has_step)) || self.drift.is_some()
+    }
+}
+
 /// A row for the caller to write into `dots.lock` after a run.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LockUpdate {

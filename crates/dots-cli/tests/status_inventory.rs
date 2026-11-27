@@ -437,6 +437,80 @@ fn a_stale_lock_row_is_drift_that_one_apply_clears() {
     assert_eq!(after.code, 0, "{}{}", after.stdout, after.stderr);
 }
 
+/// Bug 39: a package adopted from outside dots whose lock row lags (the newer version is what is
+/// installed and satisfies `latest`) was drift with a hint that did nothing: the plan said
+/// "Nothing to do" and apply left the row. The plan now lists a lock-only update and apply
+/// rewrites `dots.lock` without installing anything.
+#[test]
+fn a_stale_lock_row_of_an_adopted_package_is_a_lock_only_update() {
+    let b = sandbox(&[script("tool", "1.0.0", "")], "");
+    installed(&b, &["tool"]);
+    assert_eq!(run(&b, &["apply", "--yes"]).code, 0);
+    let lock = b.root.join("dots.lock");
+    let text = std::fs::read_to_string(&lock).unwrap();
+    assert!(text.contains("1.0.0"), "{text}");
+    std::fs::write(&lock, text.replace("1.0.0", "0.9.0")).unwrap();
+
+    let st = json(&run(&b, &["status", "--json"]));
+    let item = &st["data"]["items"][0];
+    assert_eq!(item["state"], "drift", "{st}");
+    assert_eq!(item["hints"][0], "dots apply tool", "{st}");
+
+    let plan = run(&b, &["plan"]);
+    assert!(
+        plan.stdout.contains("Lock") && !plan.stdout.contains("Nothing to do"),
+        "{}",
+        plan.stdout
+    );
+    let pj = json(&run(&b, &["plan", "--json"]));
+    assert_eq!(pj["data"]["empty"], false, "{pj}");
+    assert_eq!(pj["data"]["summary"]["packages"], 0, "{pj}");
+    assert_eq!(pj["data"]["lock"][0]["to"], "1.0.0", "{pj}");
+
+    let o = run(&b, &["apply", "--yes"]);
+    assert_eq!(o.code, 0, "{}{}", o.stdout, o.stderr);
+    assert!(std::fs::read_to_string(&lock).unwrap().contains("1.0.0"));
+    let after = run(&b, &["status"]);
+    assert_eq!(after.code, 0, "{}{}", after.stdout, after.stderr);
+    assert!(run(&b, &["plan"]).stdout.contains("Nothing to do"));
+}
+
+/// Bug 39: a package whose version the provider cannot read (a script with no `version`
+/// command) is ok when nothing else is wrong, whatever its lock row says; plan and apply leave
+/// the row alone.
+#[test]
+fn an_unknown_installed_version_is_not_drift() {
+    let b = sandbox(&[script("tool", "1.0.0", "")], "");
+    installed(&b, &["tool"]);
+    assert_eq!(run(&b, &["apply", "--yes"]).code, 0);
+    let lock = b.root.join("dots.lock");
+    let text = std::fs::read_to_string(&lock).unwrap();
+    let locked = text.replace("1.0.0", "2026.11.22-e9042b2");
+    std::fs::write(&lock, &locked).unwrap();
+    let pkg = b.root.join("packages/tool/package.toml");
+    let body = std::fs::read_to_string(&pkg).unwrap();
+    std::fs::write(
+        &pkg,
+        body.replace("version = \"echo 1.0.0\"", "version = \"true\""),
+    )
+    .unwrap();
+
+    let st = json(&run(&b, &["status", "--all", "--json"]));
+    let item = &st["data"]["items"][0];
+    assert_eq!(item["have"], "unknown", "{st}");
+    assert_eq!(item["state"], "ok", "{st}");
+    assert!(
+        item["detail"].as_str().unwrap().contains("version unknown"),
+        "{st}"
+    );
+    assert!(
+        run(&b, &["plan"]).stdout.contains("Nothing to do"),
+        "plan agrees"
+    );
+    assert_eq!(run(&b, &["apply", "--yes"]).code, 0);
+    assert_eq!(std::fs::read_to_string(&lock).unwrap(), locked);
+}
+
 /// Bug 35: a package that waits on sudo says so, and hints the command that runs it (a plain
 /// `dots apply` skips it).
 #[test]

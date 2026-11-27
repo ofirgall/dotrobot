@@ -8,10 +8,11 @@
 //! | not installed, no row, or the spec moved away from the row | install the newest version that satisfies the spec; the row is rewritten |
 //! | installed satisfies the spec, no row (or a row the spec no longer admits) | keep it, record it in the lock; adopt it if dots did not install it |
 //! | installed equals the locked version | nothing |
-//! | installed differs from the lock, installed outside dots | adopt, leave the lock row, `status` shows drift |
+//! | installed differs from the lock, installed outside dots | adopt; `decide_package` also rewrites the row to what is installed (a lock-only update) |
 //! | installed older than the lock | upgrade to the locked version |
 //! | installed newer than the lock, exact-capable provider | downgrade to the locked version (`⚠ downgrade`, always confirmed) |
 //! | installed newer than the lock, limited provider (brew, apt) | no step; the row is rewritten to what is installed (`dots_engine::decide_package`), so `status`'s drift clears with one `apply` |
+//! | installed version unknown (script without a version command), nothing else to do | nothing: the row is left alone and `status` shows ok |
 //! | installed does not satisfy the spec | upgrade or downgrade into the spec; the row is rewritten |
 
 use std::cmp::Ordering;
@@ -19,6 +20,15 @@ use std::cmp::Ordering;
 use dots_model::vspec::{self, Spec, compare, same};
 
 use crate::PkgRow;
+
+/// What a provider reports when it cannot tell the installed version (a script with no
+/// `version` command).
+pub const UNKNOWN_VERSION: &str = "unknown";
+
+/// Is this the placeholder for a version the provider could not read?
+pub fn version_unknown(installed: &str) -> bool {
+    installed == UNKNOWN_VERSION
+}
 
 /// How well a provider installs an exact version (`Support` in the provider contract).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

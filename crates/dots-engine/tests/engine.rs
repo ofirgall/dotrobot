@@ -2079,6 +2079,68 @@ fn a_newer_brew_install_rewrites_its_stale_lock_row() {
     assert!(case2.plan().lock.is_empty());
 }
 
+/// Bug 39: brew holds a newer version than the row, and dots did not install it (so it is
+/// adopted): the plan lists a lock-only update and apply rewrites the row, with no reinstall.
+#[test]
+fn a_newer_brew_install_outside_dots_rewrites_its_stale_lock_row() {
+    let sb = sandbox(&[("gh", "[providers.brew]")], &[]);
+    let brew = FakeProvider::new("brew")
+        .with_caps(limited_caps())
+        .with_installed("gh", "2.105.0");
+    let reg = registry(&[&brew]);
+    let mut case = Case::new(&sb, &reg, &NoFiles);
+    case.lock.upsert(lock_row("gh", "brew", "2.97.0"));
+    let p = case.plan();
+    assert!(p.steps.is_empty());
+    assert!(p.lock[0].adopt && p.lock[0].rewrite);
+    assert_eq!(p.lock[0].from.as_deref(), Some("2.97.0"));
+    assert_eq!(p.lock[0].to.as_deref(), Some("2.105.0"));
+    assert!(p.has_lock_changes());
+    let text = dots_engine::plan_text(&p);
+    assert!(
+        text.contains("Lock (1)") && text.contains("2.97.0 -> 2.105.0"),
+        "{text}"
+    );
+    let r = case.apply(true);
+    assert_eq!(r.status, Status::Done, "{:#?}", r.errors);
+    assert!(brew.executed().is_empty());
+    assert_eq!(r.lock_updates[0].version.as_deref(), Some("2.105.0"));
+    assert!(r.lock_updates[0].adopt);
+    // once recorded, the plan has nothing left to say
+    let mut after = Case::new(&sb, &reg, &NoFiles);
+    after.lock.upsert(lock_row("gh", "brew", "2.105.0"));
+    let p2 = after.plan();
+    assert!(p2.lock.is_empty() && !p2.has_lock_changes());
+}
+
+/// Bug 39: a provider that cannot read the installed version (`unknown`) has nothing to record:
+/// the row is left alone, owned or not.
+#[test]
+fn an_unknown_installed_version_leaves_the_lock_row_alone() {
+    for owned in [true, false] {
+        let sb = sandbox(&[("cursor-agent", "[providers.brew]")], &[]);
+        if owned {
+            own(&sb, "cursor-agent", "brew", "unknown");
+        }
+        let brew = FakeProvider::new("brew")
+            .with_caps(limited_caps())
+            .with_installed("cursor-agent", "unknown");
+        let reg = registry(&[&brew]);
+        let mut case = Case::new(&sb, &reg, &NoFiles);
+        case.lock
+            .upsert(lock_row("cursor-agent", "brew", "2026.11.22-e9042b2"));
+        let p = case.plan();
+        assert!(p.steps.is_empty(), "owned={owned}");
+        assert!(!p.has_lock_changes(), "owned={owned}");
+        let r = case.apply(true);
+        assert!(
+            r.lock_updates.is_empty(),
+            "owned={owned}: {:?}",
+            r.lock_updates
+        );
+    }
+}
+
 #[test]
 fn a_version_installed_outside_dots_is_adopted_not_reinstalled() {
     let sb = sandbox(&[("fd", "version = \"1.2\"\n[providers.brew]")], &[]);

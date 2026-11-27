@@ -16,7 +16,7 @@ fn arrow(from: &Option<String>, to: &Option<String>) -> String {
 
 /// The plan as the user reads it before confirming: steps, the exact commands, and files.
 pub fn plan_text(plan: &Plan) -> String {
-    if plan.is_empty() {
+    if plan.is_empty() && !plan.has_lock_changes() {
         return "Nothing to do: the machine already matches the repo.".to_string();
     }
     let mut out = String::new();
@@ -85,11 +85,7 @@ pub fn plan_text(plan: &Plan) -> String {
             arrow(&s.from, &s.to)
         ));
     }
-    let lock: Vec<_> = plan
-        .lock
-        .iter()
-        .filter(|l| (l.rewrite && (l.from.is_some() || l.has_step)) || l.drift.is_some())
-        .collect();
+    let lock: Vec<_> = plan.lock.iter().filter(|l| l.shown()).collect();
     if !lock.is_empty() {
         out.push_str(&format!("Lock ({})\n", lock.len()));
         for l in lock {
@@ -178,7 +174,7 @@ pub fn plan_json(plan: &Plan) -> Value {
     let lock: Vec<Value> = plan
         .lock
         .iter()
-        .filter(|l| (l.rewrite && (l.from.is_some() || l.has_step)) || l.drift.is_some())
+        .filter(|l| l.shown())
         .map(|l| {
             json!({
                 "package": l.package,
@@ -199,7 +195,7 @@ pub fn plan_json(plan: &Plan) -> Value {
 
 fn plan_json_base(plan: &Plan) -> Value {
     json!({
-        "empty": plan.is_empty(),
+        "empty": plan.is_empty() && !plan.has_lock_changes(),
         "steps": plan.steps.iter().map(|s| {
             let mut v = json!({
                 "package": s.package,

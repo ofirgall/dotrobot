@@ -168,7 +168,8 @@ pub struct Plan {
     /// Packages left out because no provider could install them, with the reason.
     pub unplanned: Vec<(String, String)>,
     /// Lock rows that change or are recorded, and drift notes. Bookkeeping: it does not make
-    /// an otherwise empty plan non-empty.
+    /// an otherwise empty plan non-empty ([`Plan::is_empty`]); a lock-only update is still
+    /// listed and applied ([`Plan::has_lock_changes`]).
     pub lock: Vec<LockStep>,
 }
 
@@ -180,6 +181,13 @@ impl Plan {
             && self.services.is_empty()
             && self.shims.is_empty()
             && self.hooks.is_empty()
+    }
+
+    /// Does `apply` rewrite a `dots.lock` row that is listed in the Lock section? A plan with
+    /// only this still has something to say (and `apply` something to do), though
+    /// [`Plan::is_empty`] counts only the machine's changes.
+    pub fn has_lock_changes(&self) -> bool {
+        self.lock.iter().any(|l| l.shown() && l.rewrite)
     }
 
     /// Does anything need root: a provider action, or a `root = true` setting? One sudo prompt
@@ -547,7 +555,10 @@ fn is_source_bound(spec: &dots_providers::Spec) -> bool {
 /// - When no step follows (that, or a provider that cannot install an older version) and what
 ///   is installed is acceptable but not what the row says, the row is stale: it is rewritten
 ///   to what is installed, so one `apply` clears the difference instead of leaving a drift that
-///   nothing resolves. An install outside dots is only adopted; the row stays until dots owns it.
+///   nothing resolves. An install outside dots is adopted and the row is rewritten the same way
+///   (it used to stay, which left status showing a drift that `apply` never cleared).
+/// - A version the provider cannot report ([`rules::UNKNOWN_VERSION`]) is never recorded and
+///   never a drift on its own.
 pub fn decide_package(f: &Facts<'_>, spec: &dots_providers::Spec) -> rules::Decision {
     let mut d = rules::decide(f);
     if is_source_bound(spec)
@@ -556,11 +567,18 @@ pub fn decide_package(f: &Facts<'_>, spec: &dots_providers::Spec) -> rules::Deci
     {
         d.step = None;
     }
+    let Some(inst) = f.installed else { return d };
+    if d.step.is_none() && rules::version_unknown(inst) {
+        // The provider cannot say what is installed (a script with no version command): there
+        // is nothing to record, and the row it holds is no stale claim to correct.
+        d.rewrite = false;
+        d.expected = None;
+        return d;
+    }
     if d.step.is_none()
-        && !d.adopt
         && !d.rewrite
         && d.drift.is_none()
-        && let (Some(l), Some(inst)) = (f.locked.as_ref(), f.installed)
+        && let Some(l) = f.locked.as_ref()
         && rules::lock_satisfies(f.spec, l)
         && !rules::matches_lock(l, inst, f.installed_rev)
     {
