@@ -35,7 +35,7 @@ Each provider declares `Caps`:
 
 Behavior that depends on a capability is visible to the user.
 
-A provider may also implement `stale_reason(ctx, spec)`: for an installed package the version rules leave alone, it returns why the package must be upgraded anyway (apt: its declared `repo` is not configured yet, so it still comes from the distribution archive). The plan shows the reason and upgrades the package; the default is no reason. It must read local state only.
+A provider may also implement `stale_reason(ctx, spec)`: for an installed package the version rules leave alone, it returns why the package must be upgraded anyway (apt: its declared `repo` is not configured yet, so it still comes from the distribution archive; cargo: the crate was installed from a different source than the declared `git` or `path`, such as a local build when the repo wants a fork). The plan shows the reason and upgrades the package; the default is no reason. It must read local state only.
 
 A provider may also implement `retry_each(action)`: when a batched install or upgrade of several packages exits non-zero, it returns the per-package actions to run instead (apt and brew do). The engine first asks `installed()` which packages of the failed batch are present and marks those ok (`brew install --cask a b c` stops at the first failure and leaves the packages before it installed and the ones after it untried), then runs the retries for the rest one at a time. Only the packages that still fail are failures, each with its own log. Without `retry_each` the packages the failed command did install are still kept, and the rest fail together with the batch. Packages that fail with the same error are reported once in the summary, listed under it.
 

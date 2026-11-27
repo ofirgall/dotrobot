@@ -536,6 +536,159 @@ fn locked_compile_failure_hints_locked_false() {
     assert!(!out.success, "no hint and no error without --locked");
 }
 
+// ------------------------------------------------------- install source mismatch
+
+const FORK: &str = "https://github.com/ofirgall/herdr";
+const FORK_REV: &str = "6644000aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+/// A cargo home whose `.crates2.json` has one install of `herdr` from `source`.
+fn home_with_install(source: &str) -> (tempfile::TempDir, Ctx) {
+    let tmp = tempfile::tempdir().unwrap();
+    let ch = tmp.path().join(".cargo");
+    std::fs::create_dir_all(&ch).unwrap();
+    std::fs::write(
+        ch.join(".crates2.json"),
+        format!(
+            "{{\"installs\":{{\"herdr 0.8.2 ({source})\":{{\"bins\":[\"herdr\"],\"features\":[]}}}}}}"
+        ),
+    )
+    .unwrap();
+    let ctx = Ctx {
+        home: tmp.path().into(),
+        ..Ctx::default()
+    };
+    (tmp, ctx)
+}
+
+fn stale(ctx: &Ctx, spec: &Spec) -> Option<String> {
+    CargoProvider::with_bin("/c/cargo").stale_reason(ctx, spec)
+}
+
+fn git_spec(url: &str, rev: Option<&str>) -> Spec {
+    let s = Spec::new("herdr").opt("git", url);
+    match rev {
+        Some(r) => s.opt("rev", r),
+        None => s,
+    }
+}
+
+#[test]
+fn a_local_path_build_is_stale_when_the_repo_wants_a_git_fork() {
+    let (_t, ctx) = home_with_install("path+file:///Users/x/workspace/personal/herdr");
+    let note = stale(&ctx, &git_spec(FORK, Some(FORK_REV))).expect("stale");
+    assert_eq!(
+        note,
+        "installed from path+file:///Users/x/workspace/personal/herdr, \
+         repo wants git ofirgall/herdr@6644000"
+    );
+    // Without a pinned rev the note names just the repo.
+    let note = stale(&ctx, &git_spec(FORK, None)).unwrap();
+    assert!(note.ends_with("repo wants git ofirgall/herdr"), "{note}");
+}
+
+#[test]
+fn a_registry_install_is_stale_when_the_repo_wants_git_or_a_path() {
+    let (_t, ctx) = home_with_install("registry+https://github.com/rust-lang/crates.io-index");
+    assert!(stale(&ctx, &git_spec(FORK, None)).is_some());
+    assert!(stale(&ctx, &Spec::new("herdr").opt("path", "/src/herdr")).is_some());
+    // No git or path declared: a registry crate is never stale on this account.
+    assert_eq!(stale(&ctx, &Spec::new("herdr")), None);
+}
+
+#[test]
+fn the_same_git_repo_is_not_stale_whatever_its_spelling() {
+    let (_t, ctx) = home_with_install(&format!("git+{FORK}?rev=6644000#{FORK_REV}"));
+    for url in [
+        FORK,
+        "https://github.com/ofirgall/herdr.git",
+        "https://github.com/OfirGall/Herdr/",
+        "git@github.com:ofirgall/herdr.git",
+        "ssh://git@github.com/ofirgall/herdr",
+    ] {
+        assert_eq!(stale(&ctx, &git_spec(url, Some("6644000"))), None, "{url}");
+        assert_eq!(stale(&ctx, &git_spec(url, None)), None, "{url}");
+    }
+    // The ssh spelling on the installed side matches an https declaration, too.
+    let (_t, ctx) = home_with_install(&format!(
+        "git+ssh://git@github.com/ofirgall/herdr.git#{FORK_REV}"
+    ));
+    assert_eq!(stale(&ctx, &git_spec(FORK, Some(FORK_REV))), None);
+}
+
+#[test]
+fn a_different_git_repo_or_pinned_rev_is_stale() {
+    let (_t, ctx) = home_with_install(&format!("git+{FORK}#{FORK_REV}"));
+    // Another repo.
+    let note = stale(&ctx, &git_spec("https://github.com/upstream/herdr", None)).unwrap();
+    assert!(note.contains("repo wants git upstream/herdr"), "{note}");
+    // A different pinned rev; an unpinned spec accepts any rev.
+    assert!(stale(&ctx, &git_spec(FORK, Some("1234567"))).is_some());
+    assert_eq!(stale(&ctx, &git_spec(FORK, None)), None);
+    assert_eq!(stale(&ctx, &git_spec(FORK, Some("6644000"))), None);
+}
+
+#[test]
+fn a_path_install_from_another_directory_or_kind_is_stale() {
+    let (_t, ctx) = home_with_install("path+file:///src/herdr");
+    let want = |p: &str| Spec::new("herdr").opt("path", p);
+    assert_eq!(stale(&ctx, &want("/src/herdr")), None);
+    assert_eq!(stale(&ctx, &want("/src/herdr/")), None);
+    assert!(stale(&ctx, &want("/other/herdr")).is_some());
+    // Relative to the package directory, like the plan resolves it.
+    assert_eq!(stale(&ctx, &want("herdr").opt("pkg_dir", "/src")), None);
+    let (_t, ctx) = home_with_install(&format!("git+{FORK}#{FORK_REV}"));
+    assert!(stale(&ctx, &want("/src/herdr")).is_some());
+}
+
+#[test]
+fn the_source_falls_back_to_crates_toml_and_unknown_is_not_stale() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ch = tmp.path().join(".cargo");
+    std::fs::create_dir_all(&ch).unwrap();
+    std::fs::write(
+        ch.join(".crates.toml"),
+        "[v1]\n\"herdr 0.8.2 (path+file:///Users/x/herdr)\" = [\"herdr\"]\n",
+    )
+    .unwrap();
+    let ctx = Ctx {
+        home: tmp.path().into(),
+        ..Ctx::default()
+    };
+    assert!(stale(&ctx, &git_spec(FORK, None)).is_some());
+    // Another crate's record says nothing about this one.
+    let other = Spec::new("other").opt("git", FORK);
+    assert_eq!(stale(&ctx, &other), None);
+    // No cargo records at all: nothing to compare with.
+    let empty = Ctx {
+        home: tempfile::tempdir().unwrap().path().into(),
+        ..Ctx::default()
+    };
+    assert_eq!(stale(&empty, &git_spec(FORK, None)), None);
+}
+
+#[test]
+fn a_git_upgrade_replaces_the_install_with_force() {
+    let p = CargoProvider::with_bin("/c/cargo");
+    let spec = "git=https://github.com/ofirgall/herdr;rev=6644000";
+    let up = argv(&p, op(OpKind::Upgrade, "herdr", Some(spec), None));
+    assert_eq!(
+        up,
+        [
+            "/c/cargo",
+            "install",
+            "--locked",
+            "--force",
+            "--git",
+            "https://github.com/ofirgall/herdr",
+            "--rev",
+            "6644000",
+            "herdr"
+        ]
+    );
+    let first = argv(&p, op(OpKind::Install, "herdr", Some(spec), None));
+    assert!(!first.contains(&"--force".to_string()));
+}
+
 // ------------------------------------------------------- git fetch with the CLI
 
 fn ctx_in(tmp: &std::path::Path, rec: Arc<RecordingRunner>) -> Ctx {
