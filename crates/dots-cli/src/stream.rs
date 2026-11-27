@@ -12,7 +12,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use dots_core::State;
 use dots_engine::{Batch, Observer, Plan, StepResult, StepStatus};
@@ -24,7 +24,9 @@ const MAX_NAMES: usize = 6;
 pub struct LiveProgress {
     p: Progress,
     log_path: PathBuf,
-    batches: Mutex<BTreeMap<usize, TaskId>>,
+    /// A running batch: its line and when it started (its duration is wall clock, not the sum
+    /// of its packages, which share one command's time).
+    batches: Mutex<BTreeMap<usize, (TaskId, Instant)>>,
 }
 
 impl LiveProgress {
@@ -150,28 +152,47 @@ impl Observer for LiveProgress {
 
     fn batch_started(&self, b: &Batch) {
         let id = self.p.start(&names(&b.packages), &what(b));
-        self.batches.lock().unwrap().insert(b.id, id);
+        self.batches
+            .lock()
+            .unwrap()
+            .insert(b.id, (id, Instant::now()));
     }
 
     fn batch_finished(&self, b: &Batch, results: &[StepResult]) {
-        let Some(id) = self.batches.lock().unwrap().remove(&b.id) else {
+        let Some((id, started)) = self.batches.lock().unwrap().remove(&b.id) else {
             return;
         };
         let failed: Vec<&StepResult> = results
             .iter()
             .filter(|r| r.status == StepStatus::Failed)
             .collect();
-        let dur = Duration::from_millis(results.iter().map(|r| r.dur_ms).sum());
+        let dur = started.elapsed();
         let (state, detail) = if !failed.is_empty() {
-            let detail = match failed.as_slice() {
-                [one] => one
-                    .error
-                    .as_deref()
-                    .and_then(|e| e.lines().next())
-                    .unwrap_or("failed")
-                    .to_string(),
+            let mut detail = match failed.as_slice() {
+                [one] => format!(
+                    "{}: {}",
+                    one.package,
+                    one.error
+                        .as_deref()
+                        .and_then(|e| e.lines().next())
+                        .unwrap_or("failed")
+                ),
                 _ => format!("{} of {} failed", failed.len(), results.len()),
             };
+            // A partial failure: say which packages did go through, so a batch line naming
+            // them all does not read as all of them failing.
+            let ok: Vec<String> = results
+                .iter()
+                .filter(|r| r.status == StepStatus::Ok)
+                .map(|r| r.package.clone())
+                .collect();
+            if !ok.is_empty() {
+                let action = results
+                    .iter()
+                    .find(|r| r.status == StepStatus::Ok)
+                    .map_or("install", |r| r.action.as_str());
+                detail.push_str(&format!(" ({} {})", past(action), names(&ok)));
+            }
             (State::Failed, detail)
         } else if results.iter().all(|r| r.status == StepStatus::Ok) {
             let action = results.first().map_or("install", |r| r.action.as_str());
