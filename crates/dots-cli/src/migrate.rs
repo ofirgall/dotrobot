@@ -34,6 +34,10 @@ use crate::reconcile::{Prepared, prepare};
 pub struct MigrateArgs<'a> {
     pub pkg: &'a str,
     pub to: &'a str,
+    /// Remove this provider's copy (the package may no longer list it as a provider).
+    pub from: Option<&'a str>,
+    /// `--yes`: do not ask before removing the `--from` copy.
+    pub yes: bool,
 }
 
 fn fail(d: Diagnostic) -> Report {
@@ -464,13 +468,57 @@ fn migrate(ctx: &Context, p: &Prepared, a: &MigrateArgs<'_>, run_id: &str) -> Re
         .installed
         .get(to)
         .is_some_and(|m| m.contains_key(&new_native));
-    // Every other candidate that has it installed.
-    let olds: Vec<(String, String)> = selection
-        .candidates
-        .iter()
-        .filter(|c| c.id != to && c.installed.is_some())
-        .map(|c| (c.id.clone(), native_of(&c.id)))
-        .collect();
+    // Every other candidate that has it installed, or the one `--from` names.
+    let olds: Vec<(String, String)> = match a.from {
+        Some(from) => {
+            if from == to {
+                return fail(plan_failed(
+                    pkg_name,
+                    "`--from` and `--to` are the same provider",
+                ));
+            }
+            let native = native_of(from);
+            if !p
+                .installed
+                .get(from)
+                .is_some_and(|m| m.contains_key(&native))
+            {
+                return fail(plan_failed(
+                    pkg_name,
+                    format!("`{from}` has no `{native}` installed, so there is nothing to remove"),
+                ));
+            }
+            vec![(from.to_string(), native)]
+        }
+        None => selection
+            .candidates
+            .iter()
+            .filter(|c| c.id != to && c.installed.is_some())
+            .map(|c| (c.id.clone(), native_of(&c.id)))
+            .collect(),
+    };
+    if a.from.is_some() && !a.yes {
+        let interactive = !ctx.opts.no_input
+            && !ctx.opts.json
+            && std::io::IsTerminal::is_terminal(&std::io::stdin())
+            && std::io::IsTerminal::is_terminal(&std::io::stderr());
+        if interactive {
+            let (id, native) = &olds[0];
+            eprint!(
+                "Remove `{native}` from `{id}` (keeping the `{to}` copy of {pkg_name})? [y/N] "
+            );
+            let mut line = String::new();
+            let yes = std::io::stdin().read_line(&mut line).is_ok()
+                && matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes");
+            if !yes {
+                return Report::failure(
+                    "migrate",
+                    ExitCode::Error,
+                    vec![Diagnostic::from_code("declined", &[])],
+                );
+            }
+        }
+    }
     if olds.is_empty() && !have_new {
         return fail(plan_failed(
             pkg_name,
@@ -709,11 +757,8 @@ fn migrate(ctx: &Context, p: &Prepared, a: &MigrateArgs<'_>, run_id: &str) -> Re
         0,
     );
 
-    let from_shown = if old_ids.is_empty() {
-        "(already installed)".to_string()
-    } else {
-        old_ids.join(", ")
-    };
+    let nothing = old_ids.is_empty() && have_new && !file_changed && !lock_changed;
+    let from_shown = old_ids.join(", ");
     let mut report = Report::ok(
         "migrate",
         json!({
@@ -730,11 +775,19 @@ fn migrate(ctx: &Context, p: &Prepared, a: &MigrateArgs<'_>, run_id: &str) -> Re
         }),
     )
     .with_headline(
-        Tone::Ok,
-        format!(
-            "Migrated {pkg_name} from {from_shown} to {to} ({})",
-            inst.version
-        ),
+        if nothing { Tone::Info } else { Tone::Ok },
+        if nothing {
+            format!(
+                "Nothing to migrate: {pkg_name} is already installed with {to} and no other provider's copy is known; to remove one, run `dots migrate {pkg_name} --from <provider> --to {to}`"
+            )
+        } else if old_ids.is_empty() {
+            format!("Recorded {pkg_name} on {to} ({})", inst.version)
+        } else {
+            format!(
+                "Migrated {pkg_name} from {from_shown} to {to} ({})",
+                inst.version
+            )
+        },
     );
     for s in &ran.steps {
         let cmds: Vec<&str> = s["commands"]

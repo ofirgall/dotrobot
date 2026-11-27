@@ -717,7 +717,7 @@ For each package in the resolved set:
 3. Order the candidates by the package's `prefer = [...]` if present, else by the `[priority]` list of the most specific platform key in the machine's chain (§4.1).
 4. Pick the first candidate whose availability is `Ready` or `Bootstrap` and where `needs_root ⇒ facts.sudo`.
 5. If the choice is `Bootstrap{pkg}`, inject `pkg` as a dependency. This is how `rust`/`rustup` becomes a prerequisite of every cargo package with no one writing it down.
-6. Record the choice. **The choice is sticky**: if a package is already installed by *any* candidate provider, keep that provider even if the priority list would now prefer another. Switching providers is explicit: `dots migrate fd --to cargo` uninstalls from one and installs with the other. Otherwise you get `bat` installed by both apt and cargo, shadowing each other on `PATH`. `status` flags duplicates either way: "fd: installed by apt (selected) AND cargo (shadow)".
+6. Record the choice. **The choice is sticky**: if a package is already installed by *any* candidate provider, keep that provider even if the priority list would now prefer another. Switching providers is explicit: `dots migrate fd --to cargo` uninstalls from one and installs with the other. Otherwise you get `bat` installed by both apt and cargo, shadowing each other on `PATH`. When the repo itself changes a package's provider (the old one is no longer a candidate), `apply` does the switch: it installs with the new provider, and only after that succeeds removes the copy `state.json` says dots installed with the old one (shown as `~ fzf apt -> script`, with the removal command under "Commands"). A failed install leaves the old copy alone. The removal is skipped, with the reason shown, when dots did not install the copy (adopted; only the lock knows it), when another declared package uses the same native package, when the provider cannot uninstall, or when the removal would take other packages along (`removal_collateral`). The old provider's lock row is dropped and the new one written, and `state.json` moves to the new provider. `status` flags duplicates either way: "fd: installed by apt (selected) AND cargo (shadow)".
 
 The `no_sudo` case falls out for free: `sudo=false` makes apt unavailable, so `fd` resolves to cargo. No `if $NO_SUDO` branches.
 
@@ -984,7 +984,8 @@ How it is built. The steps below run in parallel per provider, and the results s
 
 2. **Walk PATH.** Use the same PATH as the user's shell: dots' generated env plus the live `$PATH`. List every executable file in every PATH dir, in order. Resolve symlinks to their real path. Since the first match on PATH wins, every later copy of the same name is marked **shadowed**.
 3. **Attribute the paths.** First match the real path against the forward-scan table. If nothing matches, use the **reverse lookup** for the path's area. Under `/usr/bin` and `/usr/sbin`, one batched `dpkg -S` call (or `rpm -qf`/`pacman -Qo`). Under the brew prefix, the Cellar path segment. Under `~/.cargo/bin`, crates2. What remains is `unknown`.
-4. **Join with dots' model.** For each binary, record whether its package is declared and dots-managed, installed but not declared (`unmanaged`), or `orphan` (installed by dots, no longer declared, §8.3f).
+   Whatever no provider claims is then matched against the **`[env] path` directories** of the active packages: a binary in one of a package's own `[env] path` dirs (`~/.fzf/bin`) whose name is that package's declared `bin`/`bins` (its own, or its chosen provider's; the package name when none is declared) is attributed to that package, whichever provider put it there. This is generic: it lives in the bins view, which knows the specs, so a `script` package needs no `bins` list for it.
+4. **Join with dots' model.** For each binary, record whether its package is declared and dots-managed, installed but not declared (`unmanaged`), or `orphan` (installed by dots, no longer declared, §8.3f). An unmanaged copy that `state.json` says dots installed, of a package that has since moved to another provider, is reported as an **old copy** (`superseded_by` in `--json`), never as "installed outside dots"; `status --all` words it the same way.
 
 What it feeds:
 
@@ -1439,7 +1440,7 @@ dots upgrade [pkg...|--all] [--provider X] [--commit]
 dots pin <pkg> [ver] [--commit]
 dots unpin <pkg> [--commit]
 dots remove <pkg> [--commit]          # removes from bundles + uninstalls + unlinks (asks)
-dots migrate <pkg> --to <provider>
+dots migrate <pkg> --to <provider> [--from <provider>] [--yes]
 dots add bundle|pkg <src>:<name> [--copy] [--commit] | search | sources   # §13
 dots pull | eject | uneject [--commit]   # §13
 dots todo [show|done|skip|check]

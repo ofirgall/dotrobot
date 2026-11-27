@@ -88,6 +88,33 @@ pub struct PkgStep {
     pub deps: Vec<String>,
     /// Index of the batch carrying this step.
     pub batch: usize,
+    /// A different provider installed this package before: this step is a provider switch.
+    pub switch: Option<Switch>,
+}
+
+/// The old side of a provider switch (`~ fzf apt -> script`): install with the new provider
+/// first, then remove the copy dots installed with the old one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Switch {
+    pub provider: String,
+    /// The old provider-native name.
+    pub native: String,
+    /// The version the old provider has installed (`None`: it is not installed any more).
+    pub version: Option<String>,
+    /// The removal, run after the new install succeeded. Empty when the copy stays.
+    pub remove: Vec<Action>,
+    /// Why the old copy stays (dots did not install it, another package wants it, the provider
+    /// cannot uninstall it).
+    pub keep: Option<String>,
+    /// Platforms of the old provider's lock rows, dropped once the new install succeeded.
+    pub lock_rows: Vec<String>,
+}
+
+impl Switch {
+    /// Is there an old copy on this machine (removed or kept)?
+    pub fn has_copy(&self) -> bool {
+        self.version.is_some()
+    }
 }
 
 /// One provider call: all actions the provider planned for a set of independent packages.
@@ -142,6 +169,11 @@ impl Plan {
         self.batches
             .iter()
             .any(|b| b.actions.iter().any(|a| a.needs_root))
+            || self
+                .steps
+                .iter()
+                .filter_map(|s| s.switch.as_ref())
+                .any(|w| w.remove.iter().any(|a| a.needs_root))
             || self.settings.iter().any(|s| s.root)
     }
 
@@ -489,7 +521,11 @@ fn plan_packages(
                 dots_providers::Support::No => Exact::No,
             });
         let platform = dots_lock::platform_for(&choice.id, inp.locks.map_or("", |l| l.machine_key));
-        let row = inp.locks.and_then(|l| l.lock.pkg(name, &platform));
+        // A row another provider wrote (the package switched providers) pins nothing here.
+        let row = inp
+            .locks
+            .and_then(|l| l.lock.pkg(name, &platform))
+            .filter(|r| r.provider == choice.id);
         let locked: Option<Locked<'_>> = row.map(Locked::from);
         let installed_v = installed.map(|i| i.version.as_str());
         let offered = inp.locks.and_then(|l| {
@@ -604,6 +640,7 @@ fn plan_packages(
                     note,
                     deps: Vec::new(),
                     batch: 0,
+                    switch: plan_switch(inp, &owned, name, &choice.id),
                 },
                 op,
             },
@@ -746,6 +783,101 @@ fn plan_packages(
     // Bootstraps lead, otherwise keep resolution order (stable).
     plan.steps.sort_by_key(|s| !s.bootstrap);
     Ok(())
+}
+
+/// Is this package's install with `new` a switch away from another provider? The old provider
+/// comes from dots' own records: `state.json` (dots installed it) first, then lock rows of
+/// another provider. Only a copy `state.json` says dots installed is removed; one that only the
+/// lock knows (adopted, pre-existing) stays and is reported.
+fn plan_switch(
+    inp: &Inputs<'_>,
+    owned: &crate::state::State,
+    name: &str,
+    new: &str,
+) -> Option<Switch> {
+    let rows: Vec<&dots_lock::PkgRow> = inp
+        .locks
+        .map(|l| {
+            l.lock
+                .pkgs
+                .iter()
+                .filter(|r| r.name == name && r.provider != new)
+                .collect()
+        })
+        .unwrap_or_default();
+    let by_state = owned.packages.get(name).filter(|o| o.provider != new);
+    let (provider, native, dots_installed) = match (by_state, rows.first()) {
+        (Some(o), _) => (o.provider.clone(), o.name.clone(), true),
+        (None, Some(r)) => {
+            let native = inp
+                .repo
+                .packages
+                .get(name)
+                .and_then(|p| p.providers.get(&r.provider))
+                .and_then(|c| c.common().name)
+                .unwrap_or_else(|| name.to_string());
+            (r.provider.clone(), native, false)
+        }
+        (None, None) => return None,
+    };
+    let lock_rows: Vec<String> = rows
+        .iter()
+        .filter(|r| r.provider == provider)
+        .map(|r| r.platform.clone())
+        .collect();
+    let version = inp
+        .installed
+        .get(&provider)
+        .and_then(|m| m.get(&native))
+        .map(|i| i.version.clone());
+    let mut sw = Switch {
+        provider: provider.clone(),
+        native: native.clone(),
+        version,
+        remove: Vec::new(),
+        keep: None,
+        lock_rows,
+    };
+    if !sw.has_copy() {
+        return Some(sw);
+    }
+    if !dots_installed {
+        sw.keep = Some("it was already installed when dots took it over, so dots leaves it".into());
+        return Some(sw);
+    }
+    // Another active package of the same provider wants the same native package.
+    let wanted_elsewhere = inp.resolution.active().any(|r| {
+        r.name != name
+            && r.chosen_provider()
+                .is_some_and(|c| c.id == provider && c.native_name == native)
+    });
+    if wanted_elsewhere {
+        sw.keep = Some("another package still uses it".into());
+        return Some(sw);
+    }
+    let pkg = inp.repo.packages.get(name);
+    let spec = spec_for_in(
+        &native,
+        pkg.and_then(|p| p.providers.get(&provider)),
+        pkg.map(|p| p.dir.as_path()),
+    );
+    let planned = inp.registry.get_for(&provider, name).map(|p| {
+        p.plan_with_wanted(
+            &[Op {
+                kind: OpKind::Remove,
+                spec,
+                version: None,
+            }],
+            &wanted_specs(inp, &provider),
+        )
+        .map_err(|e| e.to_string())
+    });
+    match planned {
+        Some(Ok(actions)) => sw.remove = actions,
+        Some(Err(e)) => sw.keep = Some(e),
+        None => sw.keep = Some(format!("`{provider}` is not available to remove it")),
+    }
+    Some(sw)
 }
 
 /// Every spec of `provider`'s packages that stays desired after this run: all active packages

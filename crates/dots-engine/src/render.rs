@@ -36,6 +36,17 @@ pub fn plan_text(plan: &Plan) -> String {
             if s.interactive {
                 notes.push("interactive, runs last");
             }
+            let switch_note = s
+                .switch
+                .as_ref()
+                .filter(|w| w.has_copy())
+                .map(|w| match &w.keep {
+                    Some(why) => format!("keeps the old {} copy: {why}", w.provider),
+                    None => format!("then removes the old {} copy", w.provider),
+                });
+            if let Some(n) = &switch_note {
+                notes.push(n);
+            }
             let notes = if notes.is_empty() {
                 String::new()
             } else {
@@ -46,7 +57,10 @@ pub fn plan_text(plan: &Plan) -> String {
                 s.kind.as_str(),
                 s.package,
                 arrow(&s.from, &s.to),
-                s.provider,
+                match s.switch.as_ref().filter(|w| w.has_copy()) {
+                    Some(w) => format!("{} -> {}", w.provider, s.provider),
+                    None => s.provider.clone(),
+                },
                 notes
             ));
         }
@@ -55,6 +69,12 @@ pub fn plan_text(plan: &Plan) -> String {
             for a in &b.actions {
                 let root = if a.needs_root { "sudo " } else { "" };
                 out.push_str(&format!("  [{}] {root}{}\n", b.id + 1, a.argv.join(" ")));
+            }
+        }
+        for w in plan.steps.iter().filter_map(|s| s.switch.as_ref()) {
+            for a in &w.remove {
+                let root = if a.needs_root { "sudo " } else { "" };
+                out.push_str(&format!("  [then] {root}{}\n", a.argv.join(" ")));
             }
         }
     }
@@ -180,20 +200,36 @@ pub fn plan_json(plan: &Plan) -> Value {
 fn plan_json_base(plan: &Plan) -> Value {
     json!({
         "empty": plan.is_empty(),
-        "steps": plan.steps.iter().map(|s| json!({
-            "package": s.package,
-            "provider": s.provider,
-            "name": s.native,
-            "action": s.kind.as_str(),
-            "from": s.from,
-            "to": s.to,
-            "needs_root": s.needs_root,
-            "interactive": s.interactive,
-            "bootstrap": s.bootstrap,
-            "note": s.note,
-            "batch": s.batch,
-            "after": s.deps,
-        })).collect::<Vec<_>>(),
+        "steps": plan.steps.iter().map(|s| {
+            let mut v = json!({
+                "package": s.package,
+                "provider": s.provider,
+                "name": s.native,
+                "action": s.kind.as_str(),
+                "from": s.from,
+                "to": s.to,
+                "needs_root": s.needs_root,
+                "interactive": s.interactive,
+                "bootstrap": s.bootstrap,
+                "note": s.note,
+                "batch": s.batch,
+                "after": s.deps,
+            });
+            if let Some(w) = s.switch.as_ref().filter(|w| w.has_copy()) {
+                v["replaces"] = json!({
+                    "provider": w.provider,
+                    "name": w.native,
+                    "version": w.version,
+                    "removes": w.keep.is_none(),
+                    "keep": w.keep,
+                    "commands": w.remove.iter().map(|a| json!({
+                        "argv": a.argv,
+                        "needs_root": a.needs_root,
+                    })).collect::<Vec<_>>(),
+                });
+            }
+            v
+        }).collect::<Vec<_>>(),
         "batches": plan.batches.iter().map(|b| json!({
             "id": b.id,
             "provider": b.provider,
@@ -264,7 +300,7 @@ impl ApplyReport {
     /// `apply` data: the plan plus what happened.
     pub fn to_json(&self) -> Value {
         let count = |s: &str| self.steps.iter().filter(|r| r.status.as_str() == s).count();
-        json!({
+        let mut v = json!({
             "status": self.status.as_str(),
             "run": self.run_id,
             "dry_run": self.status == crate::apply::Status::DryRun,
@@ -353,7 +389,25 @@ impl ApplyReport {
                 "hooks_ok": self.hooks.iter().filter(|h| h.ok).count(),
                 "hooks_failed": self.hooks.iter().filter(|h| !h.ok).count(),
             },
-        })
+        });
+        // Only a provider switch has old copies to report.
+        if !self.removals.is_empty() {
+            v["removals"] = self
+                .removals
+                .iter()
+                .map(|x| {
+                    json!({
+                        "package": x.package,
+                        "provider": x.provider,
+                        "name": x.native,
+                        "version": x.version,
+                        "removed": x.removed,
+                        "detail": x.detail,
+                    })
+                })
+                .collect();
+        }
+        v
     }
 
     /// The end-of-run summary for the terminal.

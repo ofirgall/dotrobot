@@ -82,9 +82,10 @@ pub struct Written {
 pub fn write_updates(
     root: &Path,
     updates: &[LockUpdate],
+    drops: &[dots_engine::LockDrop],
     content: &[dots_lock::ContentRow],
 ) -> Result<Vec<Written>, Diagnostic> {
-    if updates.is_empty() && content.is_empty() {
+    if updates.is_empty() && drops.is_empty() && content.is_empty() {
         return Ok(Vec::new());
     }
     let file = path(root);
@@ -92,6 +93,16 @@ pub fn write_updates(
     let now = rfc3339(SystemTime::now());
     let by_rev = repo_rev(root);
     let mut written = Vec::new();
+    let mut dropped = false;
+    // Rows of the provider a package moved away from: the lock follows the new provider.
+    for d in drops {
+        if lock
+            .pkg(&d.package, &d.platform)
+            .is_some_and(|r| r.provider == d.provider)
+        {
+            dropped |= lock.remove_pkg(&d.package, &d.platform);
+        }
+    }
     for u in updates {
         let mut row = PkgRow::new(&u.package, &u.platform, &u.provider);
         row.version = u.version.clone();
@@ -116,7 +127,7 @@ pub fn write_updates(
             }),
         }
     }
-    let mut changed = !written.is_empty();
+    let mut changed = dropped || !written.is_empty();
     for row in content {
         if lock.content_for(&row.item) != Some(row) {
             lock.set_content(row.clone());

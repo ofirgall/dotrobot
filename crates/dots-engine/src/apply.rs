@@ -199,6 +199,29 @@ pub struct ApplyReport {
     /// Lock rows for the caller to write into `dots.lock`: every successful install, upgrade
     /// or downgrade whose row changes, and every adoption or first record.
     pub lock_updates: Vec<crate::locks::LockUpdate>,
+    /// Lock rows of a provider a package moved away from: the caller deletes them.
+    pub lock_drops: Vec<LockDrop>,
+    /// What happened to the old copy of each provider switch.
+    pub removals: Vec<RemovalResult>,
+}
+
+/// A lock row to delete after a provider switch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LockDrop {
+    pub package: String,
+    pub provider: String,
+    pub platform: String,
+}
+
+/// The old copy of a provider switch: removed, kept (with the reason) or failed to remove.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemovalResult {
+    pub package: String,
+    pub provider: String,
+    pub native: String,
+    pub version: Option<String>,
+    pub removed: bool,
+    pub detail: Option<String>,
 }
 
 impl ApplyReport {
@@ -223,6 +246,8 @@ impl ApplyReport {
             errors: Vec::new(),
             warnings: Vec::new(),
             lock_updates: Vec::new(),
+            lock_drops: Vec::new(),
+            removals: Vec::new(),
         }
     }
 }
@@ -517,6 +542,8 @@ struct Run<'a> {
     warnings: Vec<Diagnostic>,
     todos: Vec<Todo>,
     lock_updates: Vec<crate::locks::LockUpdate>,
+    lock_drops: Vec<LockDrop>,
+    removals: Vec<RemovalResult>,
     hook_results: Vec<HookStepResult>,
     hooks_skipped: Vec<(HookStep, String)>,
     /// Packages one of whose hooks failed in this run.
@@ -881,6 +908,8 @@ fn execute(
         warnings: Vec::new(),
         todos: Vec::new(),
         lock_updates: Vec::new(),
+        lock_drops: Vec::new(),
+        removals: Vec::new(),
         hook_results: Vec::new(),
         hooks_skipped: Vec::new(),
         hook_failed: BTreeSet::new(),
@@ -1147,6 +1176,19 @@ fn execute(
         }
         drop(ka_stop_tx);
     });
+
+    // Provider switches: the new install is in, so the old copy can go.
+    for s in &plan_v.steps {
+        let Some(sw) = &s.switch else { continue };
+        if run
+            .results
+            .get(&s.package)
+            .is_none_or(|r| r.status != StepStatus::Ok)
+        {
+            continue;
+        }
+        apply_switch(inp, &ctx, cfg, sudo_ok, &mut run, &s.package, sw);
+    }
 
     // Steps never reached.
     for s in &plan_v.steps {
@@ -1592,6 +1634,8 @@ fn execute(
         warnings,
         todos,
         lock_updates,
+        lock_drops,
+        removals,
         hook_results,
         hooks_skipped,
         ..
@@ -1616,7 +1660,131 @@ fn execute(
         errors,
         warnings,
         lock_updates,
+        lock_drops,
+        removals,
     }
+}
+
+/// Remove the old provider's copy after a switch (dots installed it, nothing else needs it) and
+/// queue the old provider's lock rows for deletion. A failed removal leaves a todo.
+fn apply_switch(
+    inp: &Inputs<'_>,
+    ctx: &Ctx,
+    cfg: &ApplyConfig,
+    sudo_ok: bool,
+    run: &mut Run<'_>,
+    package: &str,
+    sw: &crate::plan::Switch,
+) {
+    for platform in &sw.lock_rows {
+        run.lock_drops.push(LockDrop {
+            package: package.to_string(),
+            provider: sw.provider.clone(),
+            platform: platform.clone(),
+        });
+    }
+    if !sw.has_copy() {
+        return;
+    }
+    let mut result = RemovalResult {
+        package: package.to_string(),
+        provider: sw.provider.clone(),
+        native: sw.native.clone(),
+        version: sw.version.clone(),
+        removed: false,
+        detail: sw.keep.clone(),
+    };
+    let provider = inp.registry.get_for(&sw.provider, package);
+    if let (None, Some(provider)) = (&sw.keep, provider) {
+        let mut failure: Option<String> = None;
+        // Reverse dependencies the package manager would take along: leave those alone.
+        for a in sw
+            .remove
+            .iter()
+            .filter(|a| a.kind == dots_providers::OpKind::Remove)
+        {
+            match provider.removal_collateral(ctx, a) {
+                Ok(others) if others.is_empty() => {}
+                Ok(others) => {
+                    failure = Some(format!(
+                        "removing it would also remove {}; left in place",
+                        others.join(", ")
+                    ));
+                    break;
+                }
+                Err(e) => {
+                    failure = Some(format!(
+                        "could not check what removing it would take along: {e}"
+                    ));
+                    break;
+                }
+            }
+        }
+        if failure.is_none() {
+            for a in &sw.remove {
+                let (out, _) = exec_action(provider, ctx, a, cfg.sudo, sudo_ok);
+                if !out.ok {
+                    failure = Some(out.error.unwrap_or_else(|| "the removal failed".into()));
+                    break;
+                }
+            }
+        }
+        match failure {
+            None => {
+                result.removed = true;
+                result.detail = None;
+                run.journal(Entry {
+                    op: "remove".into(),
+                    pkg: package.to_string(),
+                    provider: Some(sw.provider.clone()),
+                    from: sw.version.clone(),
+                    to: None,
+                    exit: 0,
+                    dur_ms: 0,
+                    log: None,
+                });
+            }
+            Some(why) => {
+                run.journal(Entry {
+                    op: "remove".into(),
+                    pkg: package.to_string(),
+                    provider: Some(sw.provider.clone()),
+                    from: sw.version.clone(),
+                    to: None,
+                    exit: 1,
+                    dur_ms: 0,
+                    log: None,
+                });
+                result.detail = Some(why);
+            }
+        }
+    }
+    if let (false, Some(why), None) = (result.removed, &result.detail, &sw.keep) {
+        run.warnings.push(Diagnostic::from_code(
+            "action-failed",
+            &[
+                ("package", package),
+                ("action", "remove"),
+                ("provider", &sw.provider),
+                (
+                    "detail",
+                    &format!("the old `{}` copy stays: {why}", sw.provider),
+                ),
+                ("log", "(no log)"),
+                ("timeout", "its limit"),
+            ],
+        ));
+        let t = Todo {
+            package: package.to_string(),
+            reason: format!("remove the old `{}` copy ({why})", sw.provider),
+            run: cfg.run_id.clone(),
+        };
+        run.state.todos.retain(|x| x.package != t.package);
+        run.state.todos.push(t.clone());
+        run.todos.push(t);
+        run.save();
+    }
+    run.removals.push(result);
 }
 
 /// Create, repair or remove one shim and update the ledger. `Err` is the reason it failed.

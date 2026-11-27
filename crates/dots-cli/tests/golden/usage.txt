@@ -27,7 +27,7 @@ Usage: dots unpin <pkg> [--commit]
 Usage: dots remove <pkg> [--commit]
        dots remove bundle|pkg <item> [--commit]
 
-Usage: dots migrate <pkg> --to <provider>
+Usage: dots migrate <pkg> --to <provider> [--from <provider>] [--yes]
 
 Usage: dots add bundle|pkg <source>:<name> [--copy] [--as <name>] [--no-deps] [--dry-run] [--yes] [--exclude <pkg>...] [--commit]
        dots add bundle|pkg <name> [--copy] [--as <name>] [--no-deps] [--dry-run] [--yes] [--exclude <pkg>...] [--commit]

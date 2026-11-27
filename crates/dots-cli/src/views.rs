@@ -106,15 +106,29 @@ pub fn plan_blocks(plan: &Plan, backup_dir: &str) -> Vec<Block> {
             if s.interactive {
                 notes.push("interactive, runs last");
             }
+            let (marker, provider, switch_note) = match s.switch.as_ref().filter(|w| w.has_copy()) {
+                Some(w) => (
+                    Marker::Change,
+                    format!("{} -> {}", w.provider, s.provider),
+                    Some(match &w.keep {
+                        Some(why) => format!("keeps the old {} copy: {why}", w.provider),
+                        None => format!("then removes the old {} copy", w.provider),
+                    }),
+                ),
+                None => (pkg_marker(s.kind), s.provider.clone(), None),
+            };
+            if let Some(n) = &switch_note {
+                notes.push(n);
+            }
             t.push(
-                Row::new(pkg_marker(s.kind), s.package.clone())
-                    .cell(Cell::muted(s.provider.clone()))
+                Row::new(marker, s.package.clone())
+                    .cell(Cell::muted(provider))
                     .cell(version_cell(&s.from, &s.to))
                     .cell(Cell::muted(notes.join(", "))),
             );
         }
         out.push(Block::Section(Section::new("Packages").block(t)));
-        let lines: Vec<String> = plan
+        let mut lines: Vec<String> = plan
             .batches
             .iter()
             .flat_map(|b| {
@@ -124,6 +138,12 @@ pub fn plan_blocks(plan: &Plan, backup_dir: &str) -> Vec<Block> {
                 })
             })
             .collect();
+        for w in plan.steps.iter().filter_map(|s| s.switch.as_ref()) {
+            for a in &w.remove {
+                let root = if a.needs_root { "sudo " } else { "" };
+                lines.push(format!("[then] {root}{}", a.argv.join(" ")));
+            }
+        }
         if !lines.is_empty() {
             out.push(Block::Section(
                 Section::new("Commands").block(Block::Code { title: None, lines }),
@@ -486,6 +506,24 @@ pub fn apply_report(mut report: Report, r: &ApplyReport, backup_dir: &str) -> Re
             t.push(row);
         }
         report.push(Block::Section(Section::new("Packages").block(t)));
+    }
+    if !r.removals.is_empty() {
+        let mut t = Table::new()
+            .styled_column("provider", 3, dots_core::Style::Muted)
+            .styled_column("detail", 2, dots_core::Style::Muted);
+        for x in &r.removals {
+            let (state, detail) = match (x.removed, &x.detail) {
+                (true, _) => (State::Done, "removed after the switch".to_string()),
+                (false, Some(why)) => (State::Skipped, format!("kept: {why}")),
+                (false, None) => (State::Skipped, "kept".to_string()),
+            };
+            t.push(
+                Row::new(state, x.package.clone())
+                    .cell(Cell::muted(x.provider.clone()))
+                    .cell(Cell::muted(detail)),
+            );
+        }
+        report.push(Block::Section(Section::new("Old copies").block(t)));
     }
     if !r.files.is_empty() {
         let mut t = Table::new()

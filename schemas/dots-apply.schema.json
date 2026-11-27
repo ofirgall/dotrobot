@@ -465,6 +465,61 @@
                   "provider": {
                     "type": "string"
                   },
+                  "replaces": {
+                    "properties": {
+                      "commands": {
+                        "items": {
+                          "properties": {
+                            "argv": {
+                              "items": {
+                                "type": "string"
+                              },
+                              "type": "array"
+                            },
+                            "needs_root": {
+                              "type": "boolean"
+                            }
+                          },
+                          "required": [
+                            "argv",
+                            "needs_root"
+                          ],
+                          "type": "object"
+                        },
+                        "type": "array"
+                      },
+                      "keep": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "name": {
+                        "type": "string"
+                      },
+                      "provider": {
+                        "type": "string"
+                      },
+                      "removes": {
+                        "type": "boolean"
+                      },
+                      "version": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "provider",
+                      "name",
+                      "version",
+                      "removes",
+                      "keep",
+                      "commands"
+                    ],
+                    "type": "object"
+                  },
                   "to": {
                     "type": [
                       "string",
@@ -568,6 +623,46 @@
             "summary"
           ],
           "type": "object"
+        },
+        "removals": {
+          "items": {
+            "properties": {
+              "detail": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "name": {
+                "type": "string"
+              },
+              "package": {
+                "type": "string"
+              },
+              "provider": {
+                "type": "string"
+              },
+              "removed": {
+                "type": "boolean"
+              },
+              "version": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "package",
+              "provider",
+              "name",
+              "version",
+              "removed",
+              "detail"
+            ],
+            "type": "object"
+          },
+          "type": "array"
         },
         "restarts": {
           "items": {

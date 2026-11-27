@@ -2633,3 +2633,117 @@ mod shims {
         );
     }
 }
+
+// ------------------------------------------------------------------ provider switches
+
+#[test]
+fn a_provider_switch_installs_the_new_copy_then_removes_the_one_dots_installed() {
+    // dots installed fzf with apt; the repo now says brew.
+    let sb = sandbox(&[("fzf", "[providers.brew]")], &[]);
+    own(&sb, "fzf", "apt", "0.44.1");
+    let apt = FakeProvider::new("apt").with_installed("fzf", "0.44.1");
+    let brew = FakeProvider::new("brew").with_latest("fzf", "0.60.0");
+    let reg = registry(&[&apt, &brew]);
+    let mut case = Case::new(&sb, &reg, &NoFiles);
+    case.lock.upsert(lock_row("fzf", "apt", "0.44.1"));
+
+    let p = case.plan();
+    assert_eq!(p.steps.len(), 1, "{p:#?}");
+    let sw = p.steps[0].switch.as_ref().expect("a switch");
+    assert_eq!((sw.provider.as_str(), sw.native.as_str()), ("apt", "fzf"));
+    assert_eq!(sw.version.as_deref(), Some("0.44.1"));
+    assert!(sw.keep.is_none(), "{sw:?}");
+    assert_eq!(sw.remove.len(), 1);
+    assert_eq!(sw.remove[0].argv[..2], ["apt", "remove"]);
+    let text = plan_text(&p);
+    assert!(
+        text.contains("apt -> brew") && text.contains("[then] apt remove fzf"),
+        "{text}"
+    );
+    assert!(
+        plan_json(&p)["steps"][0]["replaces"]["removes"] == true,
+        "{}",
+        plan_json(&p)
+    );
+
+    let r = case.apply(true);
+    assert_eq!(r.status, Status::Done, "{:#?}", r.errors);
+    assert!(brew.snapshot_installed().contains_key("fzf"));
+    assert!(
+        !apt.snapshot_installed().contains_key("fzf"),
+        "the old copy is gone"
+    );
+    assert_eq!(r.removals.len(), 1);
+    assert!(r.removals[0].removed, "{:?}", r.removals);
+    // State and lock follow the new provider.
+    let (state, _) = State::load(&sb.dirs.state_json());
+    assert_eq!(state.packages["fzf"].provider, "brew");
+    assert!(
+        r.lock_updates
+            .iter()
+            .any(|u| u.package == "fzf" && u.provider == "brew")
+    );
+    assert_eq!(
+        r.lock_drops,
+        vec![LockDrop {
+            package: "fzf".into(),
+            provider: "apt".into(),
+            platform: "debian/x86_64".into()
+        }]
+    );
+}
+
+#[test]
+fn a_failed_new_install_leaves_the_old_copy_alone() {
+    let sb = sandbox(&[("fzf", "[providers.brew]")], &[]);
+    own(&sb, "fzf", "apt", "0.44.1");
+    let apt = FakeProvider::new("apt").with_installed("fzf", "0.44.1");
+    let brew = FakeProvider::new("brew").failing_on("fzf");
+    let reg = registry(&[&apt, &brew]);
+    let case = Case::new(&sb, &reg, &NoFiles);
+    let r = case.apply(true);
+    assert_eq!(r.status, Status::Failed);
+    assert!(
+        apt.snapshot_installed().contains_key("fzf"),
+        "never missing"
+    );
+    assert!(apt.executed().is_empty());
+    assert!(r.removals.is_empty() && r.lock_drops.is_empty());
+}
+
+#[test]
+fn a_switch_keeps_an_old_copy_dots_did_not_install() {
+    // Only the lock knows the apt copy (adopted): no state.json record.
+    let sb = sandbox(&[("fzf", "[providers.brew]")], &[]);
+    let apt = FakeProvider::new("apt").with_installed("fzf", "0.44.1");
+    let brew = FakeProvider::new("brew");
+    let reg = registry(&[&apt, &brew]);
+    let mut case = Case::new(&sb, &reg, &NoFiles);
+    case.lock.upsert(lock_row("fzf", "apt", "0.44.1"));
+
+    let p = case.plan();
+    let sw = p.steps[0].switch.as_ref().expect("a switch");
+    assert!(sw.remove.is_empty() && sw.keep.is_some(), "{sw:?}");
+    assert!(plan_text(&p).contains("keeps the old apt copy"));
+
+    let r = case.apply(true);
+    assert_eq!(r.status, Status::Done, "{:#?}", r.errors);
+    assert!(
+        apt.snapshot_installed().contains_key("fzf"),
+        "left in place"
+    );
+    assert!(brew.snapshot_installed().contains_key("fzf"));
+    assert!(!r.removals[0].removed && r.removals[0].detail.is_some());
+    // The lock row still moves to the new provider.
+    assert_eq!(r.lock_drops.len(), 1);
+}
+
+#[test]
+fn nothing_is_switched_when_the_same_provider_installed_it() {
+    let sb = sandbox(&[("fzf", "[providers.brew]")], &[]);
+    own(&sb, "fzf", "brew", "0.44.1");
+    let brew = FakeProvider::new("brew").with_installed("fzf", "0.44.1");
+    let reg = registry(&[&brew]);
+    let case = Case::new(&sb, &reg, &NoFiles);
+    assert!(case.plan().steps.iter().all(|s| s.switch.is_none()));
+}

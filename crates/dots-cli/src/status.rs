@@ -472,11 +472,14 @@ fn package_items(l: &Loaded, dirs: &Dirs, all: bool) -> Vec<Item> {
                 let mut it = Item::new(Area::Packages, native, native, State::Unmanaged);
                 it.provider = Some(provider.clone());
                 it.have = Some(inst.version.clone());
-                it.detail = if deps.get(provider).is_some_and(|d| d.contains(native)) {
-                    "installed as a dependency of another package".into()
-                } else {
-                    "installed outside dots".into()
-                };
+                it.detail =
+                    if let Some(pkg) = crate::bins::superseded_by(l, &owned, provider, native) {
+                        format!("old copy installed by dots; `{pkg}` now uses another provider")
+                    } else if deps.get(provider).is_some_and(|d| d.contains(native)) {
+                        "installed as a dependency of another package".into()
+                    } else {
+                        "installed outside dots".into()
+                    };
                 items.push(it);
             }
         }

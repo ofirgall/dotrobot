@@ -202,11 +202,17 @@ pub enum Cmd {
         commit: bool,
     },
     /// Move a package to another provider
-    #[command(override_usage = "dots migrate <pkg> --to <provider>")]
+    #[command(override_usage = "dots migrate <pkg> --to <provider> [--from <provider>] [--yes]")]
     Migrate {
         pkg: String,
         #[arg(long, required = true, value_name = "provider")]
         to: String,
+        /// Remove this provider's copy (also when the package no longer lists it)
+        #[arg(long, value_name = "provider")]
+        from: Option<String>,
+        /// Do not ask before removing the `--from` copy
+        #[arg(long)]
+        yes: bool,
     },
     /// Add a bundle or package from a source
     #[command(

@@ -66,6 +66,12 @@
                   "null"
                 ]
               },
+              "superseded_by": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "version": {
                 "type": [
                   "string",

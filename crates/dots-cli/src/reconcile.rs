@@ -445,8 +445,12 @@ pub(crate) fn apply_inner(
     drop(progress);
     let mut warnings = warnings;
     let hashes = crate::lock_cmd::first_use_hashes(&p.scripts, &p.rc.repo, &p.lock, &report);
-    let written = match crate::lock_cmd::write_updates(&p.rc.m.root, &report.lock_updates, &hashes)
-    {
+    let written = match crate::lock_cmd::write_updates(
+        &p.rc.m.root,
+        &report.lock_updates,
+        &report.lock_drops,
+        &hashes,
+    ) {
         Ok(w) => w,
         Err(d) => {
             warnings.push(d);

@@ -558,3 +558,87 @@ fn bins_does_not_call_a_declared_packages_other_copy_an_orphan() {
         });
     assert_ne!(cargo_copy["class"], "orphan", "{cargo_copy}");
 }
+
+/// `bat` now declares only the script provider (state says script), while a cargo copy dots
+/// no longer lists is still installed: the "already switched" case.
+fn switched_sandbox() -> Sb {
+    let b = sandbox(PREFER_SCRIPT, "rm -f $HOME/bat.installed");
+    write(
+        &b.root.join("packages/bat/package.toml"),
+        "schema = 1\nname = \"bat\"\n[providers.script]\ncheck = \"test -f $HOME/bat.installed\"\nversion = \"echo 1.0.0\"\ninstall = \"touch $HOME/bat.installed\"\n",
+    );
+    let cargo = b.home.join(".cargo");
+    let st = Command::new(cargo.join("bin/cargo"))
+        .args(["install", "bat"])
+        .env("HOME", &b.home)
+        .env("CARGO_HOME", &cargo)
+        .env("PATH", "/usr/bin:/bin")
+        .status()
+        .unwrap();
+    assert!(st.success());
+    assert!(cargo.join("bin/bat").exists());
+    b
+}
+
+#[test]
+fn migrate_from_removes_the_other_providers_copy_once_the_package_already_uses_the_target() {
+    let b = switched_sandbox();
+    let o = run(
+        &b,
+        &[
+            "migrate",
+            "bat",
+            "--from",
+            "cargo",
+            "--to",
+            "script",
+            "--no-input",
+            "--json",
+        ],
+    );
+    assert_eq!(o.code, 0, "{}{}", o.stdout, o.stderr);
+    let doc = json(&o);
+    validate("migrate", &doc);
+    assert_eq!(doc["data"]["from"], serde_json::json!(["cargo"]));
+    assert_eq!(doc["data"]["removed"], serde_json::json!(["cargo"]));
+    assert_eq!(doc["data"]["installed"], false, "script already had it");
+    assert!(!b.home.join(".cargo/bin/bat").exists(), "the copy is gone");
+    assert!(b.home.join("bat.installed").exists(), "the target stays");
+    let ops: Vec<String> = journal(&b)
+        .iter()
+        .filter_map(|e| e["op"].as_str().map(str::to_string))
+        .collect();
+    assert!(ops.contains(&"remove".to_string()), "{ops:?}");
+    // Run again: nothing is left to remove, and it says so rather than "Migrated".
+    let o = run(
+        &b,
+        &[
+            "migrate",
+            "bat",
+            "--from",
+            "cargo",
+            "--to",
+            "script",
+            "--no-input",
+        ],
+    );
+    assert_eq!(o.code, 1, "{}{}", o.stdout, o.stderr);
+    assert!(
+        o.stderr.contains("nothing to remove"),
+        "{}{}",
+        o.stdout,
+        o.stderr
+    );
+}
+
+#[test]
+fn migrate_without_from_says_when_there_is_nothing_to_do() {
+    let b = switched_sandbox();
+    // No `--from`: dots does not guess which unlisted copy to remove.
+    let o = run(&b, &["migrate", "bat", "--to", "script", "--no-input"]);
+    assert_eq!(o.code, 0, "{}{}", o.stdout, o.stderr);
+    let text = format!("{}{}", o.stdout, o.stderr);
+    assert!(text.contains("Nothing to migrate"), "{text}");
+    assert!(!text.contains("Migrated"), "{text}");
+    assert!(b.home.join(".cargo/bin/bat").exists());
+}

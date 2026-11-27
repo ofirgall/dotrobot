@@ -120,6 +120,30 @@ For bash, `set -euo pipefail` is prepended to each command.
 
 A script with `needs_root = true` runs through `sudo -n`, whose default `env_reset` would drop `HOME` (it becomes `/root`), the `DOTS_*` variables (settings and secrets included) and the `[env]` `PATH` directories. So `dots` writes `HOME`, `PATH` and the `DOTS_*` variables to a file in a private temporary directory (mode 0600, directory 0700), and the script starts by sourcing it (`set -a; . <file>; set +a`). Nothing but the file path appears in the command line, so no other user can read your secrets with `ps`. The file is deleted when the action ends, however it ends. This also works when `dots` is already root. Root scripts need the `bash` or `sh` shell; a `needs_root` script with `shell = "pwsh"` is refused with an error.
 
+### Binaries of a script package
+
+`dots bins` and `dots which` attribute a script package's binaries without a `bins` list when
+they live in one of the package's own `[env] path` directories and carry the package's declared
+`bin` (or an entry of `bins`; the package name when none is declared). `~/.fzf/bin/fzf` belongs
+to the `fzf` package when it declares `[env] path = ["~/.fzf/bin"]`. A binary outside those
+directories, or one the package does not declare, still shows as an unknown owner.
+
+### Switching providers
+
+When a package's provider changes (the repo now declares `script` where dots installed it with
+`apt`), `dots apply` installs with the new provider first, then removes the copy `state.json`
+says dots installed with the old one. The plan shows `~ fzf apt -> script` and lists the
+removal command. A copy dots did not install (adopted), a native package another declared
+package still uses, a provider that cannot uninstall, and a removal that would also remove other
+packages are all left in place and reported. The `dots.lock` row of the old provider is replaced
+by the new provider's. A copy left behind (the old provider is no longer listed by the package, or
+`apply` kept it) is removed explicitly with `dots migrate <pkg> --from <provider> --to <current>`;
+`dots which` / `dots bins` print exactly that command on the duplicate copy. It asks first
+(`--yes` or `--no-input` skips the question) and refuses when removing it would take other
+packages along. Without `--from`, migrating to the provider a package already uses reports
+"Nothing to migrate" instead of pretending to move anything. If the new install fails, the old copy is untouched. Plan JSON carries a
+`replaces` object on the step; apply JSON lists `removals`.
+
 ## Provider options worth knowing
 
 - **cargo `locked`.** `cargo install` runs with `--locked` by default. Set `[providers.cargo] locked = false` for an old crate whose lockfile no longer builds with the current rustc. If a `--locked` install fails with a compile error, the failure message suggests it.

@@ -95,6 +95,9 @@ pub struct BinCopy {
     /// An unmanaged copy whose package the package manager installed only as a dependency of
     /// another one (brew `installed_on_request` false, apt auto-installed).
     pub dependency: bool,
+    /// An unmanaged copy that `state.json` says dots installed: the declared package now uses
+    /// another provider (this is its old copy). Names that package.
+    pub superseded: Option<String>,
 }
 
 fn walk_path(dirs: &[PathBuf], only: Option<&str>) -> Vec<(String, PathBuf)> {
@@ -161,6 +164,7 @@ pub fn inventory(l: &Loaded, dirs: &Dirs, only: Option<&str>) -> Vec<BinCopy> {
             shadowed: false,
             duplicate_of: None,
             dependency: false,
+            superseded: None,
         });
     }
 
@@ -219,10 +223,40 @@ pub fn inventory(l: &Loaded, dirs: &Dirs, only: Option<&str>) -> Vec<BinCopy> {
         }
     }
 
+    // 3b. a package's own `[env] path` directories: a binary there that no provider claims
+    // (a script install into `~/.fzf/bin`) belongs to the package that declares the bin.
+    let env_owners = env_dir_owners(l, dirs);
+    for c in copies.iter_mut().filter(|c| c.provider.is_none()) {
+        let Some(dir) = c.path.parent() else { continue };
+        let Some(o) = env_owners
+            .iter()
+            .find(|o| o.dirs.iter().any(|d| d == dir) && o.bins.contains(&c.bin))
+        else {
+            continue;
+        };
+        c.package = Some(o.package.clone());
+        c.provider = o.provider.clone();
+        c.native = o.native.clone();
+        c.class = Class::Managed;
+        c.version = o
+            .provider
+            .as_ref()
+            .zip(o.native.as_ref())
+            .and_then(|(p, n)| {
+                l.installed
+                    .get(p)
+                    .and_then(|m| m.get(n))
+                    .map(|i| i.version.clone())
+            });
+    }
+
     // 4. join with dots' model.
     let owned = OwnedState::load(&dirs.state_json()).0;
     let deps = dependencies(l);
     for c in &mut copies {
+        if c.package.is_some() {
+            continue;
+        }
         let (Some(prov), Some(native)) = (c.provider.clone(), c.native.clone()) else {
             continue;
         };
@@ -248,6 +282,7 @@ pub fn inventory(l: &Loaded, dirs: &Dirs, only: Option<&str>) -> Vec<BinCopy> {
             c.class = Class::Orphan;
         } else {
             c.class = Class::Unmanaged;
+            c.superseded = superseded_by(l, &owned, &prov, &native);
             c.dependency = deps.get(&prov).is_some_and(|d| d.contains(&native));
             c.same_name_as = l
                 .resolution
@@ -281,6 +316,77 @@ pub fn inventory(l: &Loaded, dirs: &Dirs, only: Option<&str>) -> Vec<BinCopy> {
     }
     copies.sort_by(|a, b| a.bin.cmp(&b.bin));
     copies
+}
+
+/// An active package's `[env] path` directories and the executables it declares: the evidence
+/// that a binary found there is the package's own, whichever provider put it there.
+struct EnvOwner {
+    package: String,
+    provider: Option<String>,
+    native: Option<String>,
+    dirs: Vec<PathBuf>,
+    bins: BTreeSet<String>,
+}
+
+fn env_dir_owners(l: &Loaded, dirs: &Dirs) -> Vec<EnvOwner> {
+    let mut ctx = dots_env::EnvCtx::new(&dirs.home);
+    ctx.vars = dots_files::resolve_path_vars(&l.rc.repo.manifest.paths, l.rc.chain.levels());
+    l.resolution
+        .active()
+        .filter_map(|r| {
+            let pkg = l.rc.repo.packages.get(&r.name)?;
+            if pkg.env.path.is_empty() {
+                return None;
+            }
+            let entries = dots_env::EnvOverlay::from_contributions(
+                ctx.clone(),
+                &[dots_env::Contribution::new(r.name.clone(), pkg.env.clone())],
+            )
+            .path_entries();
+            let choice = r.chosen_provider();
+            // What the package says it puts on PATH: its own `bin`/`bins`, the chosen
+            // provider's, else a binary named like the package.
+            let mut bins: BTreeSet<String> = pkg.bin.iter().chain(&pkg.bins).cloned().collect();
+            if let Some(c) = choice
+                .and_then(|c| pkg.providers.get(&c.id))
+                .map(|c| c.common())
+            {
+                bins.extend(c.bin);
+                bins.extend(c.bins);
+            }
+            if bins.is_empty() {
+                bins.insert(r.name.clone());
+            }
+            Some(EnvOwner {
+                package: r.name.clone(),
+                provider: choice.map(|c| c.id.clone()),
+                native: choice.map(|c| c.native_name.clone()),
+                dirs: entries.into_iter().map(PathBuf::from).collect(),
+                bins,
+            })
+        })
+        .collect()
+}
+
+/// The declared package whose old copy `(provider, native)` is: `state.json` says dots
+/// installed it with that provider, but the package has since moved to another one.
+pub fn superseded_by(
+    l: &Loaded,
+    owned: &OwnedState,
+    provider: &str,
+    native: &str,
+) -> Option<String> {
+    owned
+        .packages
+        .iter()
+        .find(|(name, o)| {
+            o.provider == provider
+                && o.name == native
+                && l.resolution.get(name).is_some_and(|p| {
+                    p.is_active() && p.chosen_provider().is_some_and(|c| c.id != provider)
+                })
+        })
+        .map(|(name, _)| name.clone())
 }
 
 /// Per provider, the installed packages that were not asked for: the package manager pulled
@@ -325,9 +431,16 @@ impl BinCopy {
         match self.class {
             Class::Managed => {}
             Class::Orphan => n.push("orphan (installed by dots, no longer declared)".into()),
+            Class::Unmanaged if self.superseded.is_some() => n.push(format!(
+                "old copy (installed by dots; `{}` now uses another provider)",
+                self.superseded.as_deref().unwrap_or_default()
+            )),
             Class::Unmanaged if self.dependency => {
                 n.push("unmanaged (installed as a dependency of another package)".into());
             }
+            // The duplicate note and the hint already say where it came from; a short note
+            // survives a narrow terminal, where a long one drops the whole column.
+            Class::Unmanaged if self.duplicate_of.is_some() => n.push("unmanaged".into()),
             Class::Unmanaged => n.push("unmanaged (installed outside dots)".into()),
             Class::Unknown => n.push("unknown owner".into()),
         }
@@ -335,16 +448,19 @@ impl BinCopy {
     }
 
     fn hint(&self) -> Option<String> {
-        self.duplicate_of
-            .as_ref()
-            .map(|(pkg, to)| format!("dots migrate {pkg} --to {to}"))
+        let (pkg, to) = self.duplicate_of.as_ref()?;
+        // Name the copy to remove: `--from` also works once the package stopped listing it.
+        Some(match &self.provider {
+            Some(from) => format!("dots migrate {pkg} --from {from} --to {to}"),
+            None => format!("dots migrate {pkg} --to {to}"),
+        })
     }
 
     fn package_cell(&self) -> Cell {
         match (&self.package, self.class) {
             (Some(p), _) => Cell::accent(p.clone()),
             (None, Class::Unknown) => Cell::muted("?"),
-            (None, _) => match &self.same_name_as {
+            (None, _) => match self.superseded.as_ref().or(self.same_name_as.as_ref()) {
                 Some(n) => Cell::muted(format!("({n})")),
                 None => Cell::muted("-"),
             },
@@ -362,6 +478,7 @@ impl BinCopy {
             "version": self.version,
             "class": self.class.word(),
             "dependency": self.dependency,
+            "superseded_by": self.superseded,
             "wins": wins,
             "shadowed": self.shadowed,
             "shim": self.shim_to.as_ref().map(|t| tilde(t, home)),
@@ -607,12 +724,80 @@ mod tests {
             lines[other].contains("shadowed") && lines[other].contains("apt"),
             "{out}"
         );
-        assert!(out.contains("dots migrate bat --to cargo"), "{out}");
+        assert!(
+            out.contains("dots migrate bat --from apt --to cargo"),
+            "{out}"
+        );
         let d = &r.data["copies"];
         assert_eq!(d[0]["wins"], true);
         assert_eq!(d[1]["wins"], false);
-        assert_eq!(d[1]["hint"], "dots migrate bat --to cargo");
+        assert_eq!(d[1]["hint"], "dots migrate bat --from apt --to cargo");
         assert_eq!(d[1]["class"], "unmanaged");
+    }
+
+    /// `fzf` declared with cargo only; an apt copy (no longer a candidate) is shadowed by it.
+    fn switched() -> (Fixture, Loaded) {
+        let fx = Fixture::new(&[("fzf", "[providers.cargo]\n")]);
+        let t = fx.tmp.path();
+        let (cargo_bin, usr_bin) = (t.join("home/.cargo/bin"), t.join("usr/bin"));
+        exe(&cargo_bin.join("fzf"));
+        exe(&usr_bin.join("fzf"));
+        let reg = Registry::new()
+            .with(Box::new(BinsProvider {
+                inner: FakeProvider::new("cargo").with_installed("fzf", "0.75.0"),
+                bins: vec![("fzf".into(), cargo_bin.join("fzf"))],
+            }))
+            .with(Box::new(BinsProvider {
+                inner: FakeProvider::new("apt").with_installed("fzf", "0.44.1"),
+                bins: vec![("fzf".into(), usr_bin.join("fzf"))],
+            }));
+        let path = format!("{}:{}", cargo_bin.display(), usr_bin.display());
+        let l = fx.load(reg, Fixture::facts(true), &path);
+        (fx, l)
+    }
+
+    #[test]
+    fn the_hint_for_a_copy_of_another_provider_names_what_to_remove() {
+        let (fx, l) = switched();
+        let r = which_report(&l, &fx.dirs, "fzf");
+        let old = &r.data["copies"][1];
+        assert_eq!(old["provider"], "apt", "{old}");
+        assert_eq!(old["hint"], "dots migrate fzf --from apt --to cargo");
+        // The row keeps its provider and notes, at a normal and a narrow terminal.
+        for width in [260, 170] {
+            let out = Blocks::new(&Ui::fixed(Tier::Plain, width)).report(&r);
+            let row = out.lines().find(|l| l.contains("usr/bin/fzf")).unwrap();
+            assert!(row.contains("apt"), "{width}: {out}");
+            assert!(
+                row.contains("shadowed; duplicate install; unmanaged"),
+                "{width}: {out}"
+            );
+            assert!(out.contains("--from apt --to cargo"), "{width}: {out}");
+        }
+    }
+
+    #[test]
+    fn an_old_copy_dots_installed_is_not_called_outside_dots() {
+        let (fx, l) = duplicate();
+        // dots installed bat with apt; the package has since moved to cargo.
+        let mut st = OwnedState::default();
+        st.packages.insert(
+            "bat".into(),
+            dots_engine::OwnedPackage {
+                provider: "apt".into(),
+                name: "bat".into(),
+                version: Some("0.19.0".into()),
+                run: "r-1".into(),
+                ts: "t".into(),
+            },
+        );
+        st.save(&fx.dirs.state_json()).unwrap();
+        let r = which_report(&l, &fx.dirs, "bat");
+        let apt = &r.data["copies"][1];
+        assert_eq!(apt["superseded_by"], "bat", "{apt}");
+        let out = text(&r);
+        assert!(out.contains("old copy (installed by dots"), "{out}");
+        assert!(!out.contains("installed outside dots"), "{out}");
     }
 
     #[test]

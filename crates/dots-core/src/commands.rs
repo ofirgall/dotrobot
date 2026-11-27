@@ -418,6 +418,29 @@ fn lock_data_schema() -> Value {
 /// commands grouped in batches, file steps, and counts.
 fn plan_data_schema() -> Value {
     let nullable_str = json!({ "type": ["string", "null"] });
+    // A provider switch: the old provider's copy that is removed (or kept) after the install.
+    let replaces = json!({
+        "type": "object",
+        "required": ["provider", "name", "version", "removes", "keep", "commands"],
+        "properties": {
+            "provider": { "type": "string" },
+            "name": { "type": "string" },
+            "version": nullable_str,
+            "removes": { "type": "boolean" },
+            "keep": nullable_str,
+            "commands": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["argv", "needs_root"],
+                    "properties": {
+                        "argv": { "type": "array", "items": { "type": "string" } },
+                        "needs_root": { "type": "boolean" }
+                    }
+                }
+            }
+        }
+    });
     json!({
         "type": "object",
         "required": ["empty", "steps", "batches", "files", "settings", "services", "shims", "hooks", "unplanned", "summary"],
@@ -440,6 +463,7 @@ fn plan_data_schema() -> Value {
                         "interactive": { "type": "boolean" },
                         "bootstrap": { "type": "boolean" },
                         "note": nullable_str,
+                        "replaces": replaces,
                         "batch": { "type": "integer", "minimum": 0 },
                         "after": { "type": "array", "items": { "type": "string" } }
                     }
@@ -607,6 +631,21 @@ fn apply_data_schema() -> Value {
             "run": { "type": "string" },
             "dry_run": { "type": "boolean" },
             "plan": plan_data_schema(),
+            "removals": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["package", "provider", "name", "version", "removed", "detail"],
+                    "properties": {
+                        "package": { "type": "string" },
+                        "provider": { "type": "string" },
+                        "name": { "type": "string" },
+                        "version": nullable_str,
+                        "removed": { "type": "boolean" },
+                        "detail": nullable_str
+                    }
+                }
+            },
             "results": {
                 "type": "array",
                 "items": {
@@ -930,6 +969,7 @@ fn bin_entry_schema() -> Value {
             "version": nullable_str,
             "class": { "enum": ["managed", "orphan", "unmanaged", "unknown"] },
             "dependency": { "type": "boolean" },
+            "superseded_by": nullable_str,
             "wins": { "type": "boolean" },
             "shadowed": { "type": "boolean" },
             "shim": nullable_str,

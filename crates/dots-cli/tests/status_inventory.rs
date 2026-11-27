@@ -558,6 +558,46 @@ fn managed_binaries_name_their_package_and_provider() {
     );
 }
 
+/// A binary in a package's own `[env] path` directory belongs to that package, whichever
+/// provider put it there; a binary the package does not declare, or one outside its dirs, stays
+/// unowned.
+#[test]
+fn a_binary_in_a_packages_env_path_dir_is_owned_by_that_package() {
+    let b = sandbox(
+        &[script(
+            "fzf",
+            "1.0.0",
+            "bin = \"fzf\"\n[env]\npath = [\"~/.fzf/bin\"]",
+        )],
+        "",
+    );
+    installed(&b, &["fzf"]);
+    exe(&b.home.join(".fzf/bin/fzf"));
+    exe(&b.home.join(".fzf/bin/stray"));
+    exe(&b.local_bin().join("fzf-tmux"));
+    let path = b.local_bin().display().to_string();
+    let d = json(&run_path(&b, &path, &["bins", "--json"]));
+    validate("bins", &d);
+    let find = |name: &str| {
+        d["data"]["bins"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["bin"] == name)
+            .unwrap_or_else(|| panic!("{name} missing: {d}"))
+            .clone()
+    };
+    let fzf = find("fzf");
+    assert_eq!(fzf["package"], "fzf", "{fzf}");
+    assert_eq!(fzf["class"], "managed", "{fzf}");
+    assert_eq!(fzf["provider"], "script");
+    assert_eq!(fzf["path"], "~/.fzf/bin/fzf");
+    assert_eq!(find("stray")["class"], "unknown", "not a declared bin");
+    assert_eq!(find("fzf-tmux")["class"], "unknown", "outside the env dirs");
+    let w = run_path(&b, &path, &["which", "fzf"]);
+    assert!(!w.stdout.contains("unknown owner"), "{}", w.stdout);
+}
+
 #[test]
 fn which_lists_every_copy_in_path_order_and_marks_the_winner() {
     let (b, _) = bins_sandbox();

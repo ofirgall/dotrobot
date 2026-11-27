@@ -152,9 +152,15 @@ pub fn dispatch(cmd: Option<&Cmd>, ctx: &Context) -> Report {
         ),
         Some(Cmd::Config { action }) => crate::config_cmd::run(ctx, action),
         Some(Cmd::Questions) => crate::questions::run(ctx),
-        Some(Cmd::Migrate { pkg, to }) => {
-            crate::migrate::run(ctx, &crate::migrate::MigrateArgs { pkg, to })
-        }
+        Some(Cmd::Migrate { pkg, to, from, yes }) => crate::migrate::run(
+            ctx,
+            &crate::migrate::MigrateArgs {
+                pkg,
+                to,
+                from: from.as_deref(),
+                yes: *yes,
+            },
+        ),
         Some(Cmd::Show { address, effective }) => crate::show::run(ctx, address, *effective),
         Some(Cmd::Override { action }) => crate::override_cmd::run(ctx, action),
         _ => not_implemented(name, ctx),
