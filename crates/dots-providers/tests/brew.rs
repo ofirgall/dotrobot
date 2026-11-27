@@ -232,6 +232,68 @@ fn plan_batches_formulae_casks_taps_and_pins() {
     assert_eq!(p.plan(&ops).unwrap(), acts, "plan is deterministic");
 }
 
+/// `brew install --cask a b c` stops at the first failure: the retry is one command per
+/// package, casks keep `--cask`, taps are not repeated, and only installs and upgrades of
+/// several packages are retried.
+#[test]
+fn retry_each_splits_a_batch_into_one_command_per_package() {
+    let p = BrewProvider::new();
+    let ops = [
+        op(OpKind::Install, brew::spec("a", true, None), None),
+        op(OpKind::Install, brew::spec("b", true, None), None),
+        op(OpKind::Install, brew::spec("c", true, None), None),
+        op(OpKind::Install, Spec::new("f1"), None),
+        op(
+            OpKind::Install,
+            brew::spec("f2", false, Some("me/tools")),
+            None,
+        ),
+        op(OpKind::Upgrade, Spec::new("u1"), None),
+        op(OpKind::Upgrade, Spec::new("u2"), None),
+    ];
+    let acts = p.plan(&ops).unwrap();
+    let batch = |kind, cask: bool| {
+        acts.iter()
+            .find(|a| {
+                !a.ops.is_empty() && a.kind == kind && a.argv.iter().any(|x| x == "--cask") == cask
+            })
+            .unwrap()
+    };
+    let lines = |a: &dots_providers::Action| -> Vec<String> {
+        p.retry_each(a).unwrap().iter().map(argv).collect()
+    };
+    assert_eq!(
+        lines(batch(OpKind::Install, true)),
+        ["install --cask a", "install --cask b", "install --cask c"]
+    );
+    assert_eq!(
+        lines(batch(OpKind::Install, false)),
+        ["install f1", "install me/tools/f2"]
+    );
+    assert_eq!(
+        lines(batch(OpKind::Upgrade, false)),
+        ["upgrade u1", "upgrade u2"]
+    );
+    // Each retry carries exactly its own op, so the engine can attribute the outcome.
+    for a in p.retry_each(batch(OpKind::Install, true)).unwrap() {
+        assert_eq!(a.ops.len(), 1);
+    }
+    // One package, a removal, a tap: nothing to split.
+    let one = p
+        .plan(&[op(OpKind::Install, brew::spec("a", true, None), None)])
+        .unwrap();
+    assert!(p.retry_each(&one[0]).is_none());
+    let rm = p
+        .plan(&[
+            op(OpKind::Remove, Spec::new("x"), None),
+            op(OpKind::Remove, Spec::new("y"), None),
+        ])
+        .unwrap();
+    assert!(p.retry_each(&rm[0]).is_none());
+    let tap = acts.iter().find(|a| a.ops.is_empty()).unwrap();
+    assert!(p.retry_each(tap).is_none());
+}
+
 #[test]
 fn plan_limited_versions_and_errors() {
     let p = BrewProvider::new();

@@ -509,6 +509,22 @@ impl Provider for BrewProvider {
         Ok(actions)
     }
 
+    /// `brew install a b c` stops at the first package that fails (a cask that needs sudo, an
+    /// unknown name) and leaves the rest untried: run the packages one at a time instead.
+    fn retry_each(&self, action: &Action) -> Option<Vec<Action>> {
+        if action.ops.len() < 2 || !matches!(action.kind, OpKind::Install | OpKind::Upgrade) {
+            return None;
+        }
+        let mut each = Vec::new();
+        for op in &action.ops {
+            // Taps were added by their own earlier action; keep only the package's command.
+            let mut one = self.plan(std::slice::from_ref(op)).ok()?;
+            one.retain(|a| a.kind == action.kind && !a.ops.is_empty());
+            each.extend(one);
+        }
+        Some(each)
+    }
+
     fn exec(&self, ctx: &Ctx, action: &Action) -> Result<Outcome> {
         let mut argv = action.argv.clone();
         if argv.is_empty() {

@@ -634,13 +634,22 @@ pub fn apply_report(mut report: Report, r: &ApplyReport, backup_dir: &str) -> Re
                 .join("; ")
         )));
     }
+    // One batched command that failed for several packages gives them all the same error:
+    // show it once, naming the packages.
+    let mut failures: Vec<(&str, Vec<&str>)> = Vec::new();
     for s in r.steps.iter().filter(|s| s.status == StepStatus::Failed) {
         if let Some(e) = &s.error {
-            report.push(Block::Code {
-                title: Some(format!("{} failed", s.package)),
-                lines: e.lines().map(str::to_string).collect(),
-            });
+            match failures.iter_mut().find(|(text, _)| *text == e.as_str()) {
+                Some((_, pkgs)) => pkgs.push(&s.package),
+                None => failures.push((e, vec![&s.package])),
+            }
         }
+    }
+    for (text, pkgs) in failures {
+        report.push(Block::Code {
+            title: Some(format!("{} failed", pkgs.join(", "))),
+            lines: text.lines().map(str::to_string).collect(),
+        });
     }
     if !r.files_skipped.is_empty() {
         report.push(Block::text(format!(

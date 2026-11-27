@@ -254,6 +254,7 @@ impl ApplyReport {
 
 // ------------------------------------------------------------------------------ batch worker
 
+#[derive(Clone)]
 struct ActionOutcome {
     /// Native names of the ops this action carried.
     natives: Vec<String>,
@@ -437,31 +438,83 @@ fn run_batch(
             continue;
         }
         let (out, plain_failure) = exec_action(provider, ctx, action, use_sudo, sudo_ok);
-        // A batch of packages that failed as a whole may be down to one bad member: the
-        // provider can name per-package actions to run instead, so only that one fails.
+        // A batch of packages that failed as a whole may be down to one bad member (or to a
+        // package manager that stopped at the first failure, leaving the rest half done):
+        // find out what the failed command did install, keep that, and run the rest one at a
+        // time, so only the packages that really fail are failures.
         if plain_failure
+            && action.ops.len() > 1
             && matches!(
                 action.kind,
                 dots_providers::OpKind::Install | dots_providers::OpKind::Upgrade
             )
-            && let Some(each) = provider.retry_each(action)
         {
-            for one in &each {
-                if stop.load(Ordering::SeqCst) {
+            let each = provider.retry_each(action);
+            // Only an install can be confirmed by presence: an upgrade leaves the package
+            // installed whether or not it went through.
+            let present: BTreeSet<String> = if action.kind == dots_providers::OpKind::Install {
+                provider
+                    .installed(ctx)
+                    .map(|m| {
+                        action
+                            .ops
+                            .iter()
+                            .map(|o| o.spec.name.clone())
+                            .filter(|n| m.contains_key(n))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            } else {
+                BTreeSet::new()
+            };
+            if each.is_some() || !present.is_empty() {
+                let per_op = out.dur_ms / action.ops.len() as u64;
+                for name in &present {
                     actions.push(ActionOutcome {
-                        natives: one.ops.iter().map(|o| o.spec.name.clone()).collect(),
-                        ran: false,
-                        ok: false,
-                        log: None,
+                        natives: vec![name.clone()],
+                        ran: true,
+                        ok: true,
+                        log: out.log.clone(),
                         error: None,
                         code: None,
-                        dur_ms: 0,
+                        dur_ms: per_op,
                     });
-                    continue;
                 }
-                actions.push(exec_action(provider, ctx, one, use_sudo, sudo_ok).0);
+                let rest: Vec<String> = action
+                    .ops
+                    .iter()
+                    .map(|o| o.spec.name.clone())
+                    .filter(|n| !present.contains(n))
+                    .collect();
+                match each {
+                    Some(each) => {
+                        for one in each
+                            .iter()
+                            .filter(|a| a.ops.iter().any(|o| !present.contains(&o.spec.name)))
+                        {
+                            if stop.load(Ordering::SeqCst) {
+                                actions.push(ActionOutcome {
+                                    natives: one.ops.iter().map(|o| o.spec.name.clone()).collect(),
+                                    ran: false,
+                                    ok: false,
+                                    log: None,
+                                    error: None,
+                                    code: None,
+                                    dur_ms: 0,
+                                });
+                                continue;
+                            }
+                            actions.push(exec_action(provider, ctx, one, use_sudo, sudo_ok).0);
+                        }
+                    }
+                    // Nothing to retry with: what is still missing failed with the batch.
+                    None => actions.push(ActionOutcome {
+                        natives: rest,
+                        ..out
+                    }),
+                }
+                continue;
             }
-            continue;
         }
         if !out.ok && action.ops.is_empty() {
             prep_failed = true;
@@ -634,20 +687,39 @@ impl Run<'_> {
             self.record_hook(h);
         }
         let mut all_ok = true;
+        // The actions that carried a package's step.
+        let actions_of = |native: &str| -> Vec<&ActionOutcome> {
+            let mine: Vec<&ActionOutcome> = out
+                .actions
+                .iter()
+                .filter(|a| a.natives.iter().any(|n| n == native) || a.natives.is_empty())
+                .collect();
+            if mine.is_empty() {
+                out.actions.iter().collect()
+            } else {
+                mine
+            }
+        };
+        // Packages that failed with one and the same command error (one batched command that
+        // failed for several of them): the error is reported once, naming all of them.
+        let mut failing_together: BTreeMap<(Option<String>, Option<PathBuf>), Vec<String>> =
+            BTreeMap::new();
         for pkg in &batch.packages {
             let Some(step) = self.plan.step(pkg) else {
                 continue;
             };
-            let mine: Vec<&ActionOutcome> = out
-                .actions
-                .iter()
-                .filter(|a| a.natives.contains(&step.native) || a.natives.is_empty())
-                .collect();
-            let mine: Vec<&ActionOutcome> = if mine.is_empty() {
-                out.actions.iter().collect()
-            } else {
-                mine
+            if let Some(f) = actions_of(&step.native).iter().find(|a| a.ran && !a.ok) {
+                failing_together
+                    .entry((f.error.clone(), f.log.clone()))
+                    .or_default()
+                    .push(pkg.clone());
+            }
+        }
+        for pkg in &batch.packages {
+            let Some(step) = self.plan.step(pkg) else {
+                continue;
             };
+            let mine = actions_of(&step.native);
             let dur_ms: u64 = mine.iter().map(|a| a.dur_ms).sum();
             let log = mine.iter().rev().find_map(|a| a.log.clone());
             let failed = mine.iter().find(|a| a.ran && !a.ok);
@@ -668,22 +740,31 @@ impl Run<'_> {
                         Some(c) if dots_core::errors::lookup(c).is_some() => c,
                         _ => "action-failed",
                     };
-                    let mut d = Diagnostic::from_code(
-                        code,
-                        &[
-                            ("package", pkg),
-                            ("action", step.kind.as_str()),
-                            ("provider", &step.provider),
-                            ("detail", &detail),
-                            ("log", &logs),
-                            ("timeout", "its limit"),
-                        ],
-                    );
-                    let tail = log_tail(&log);
-                    if !tail.is_empty() {
-                        d.hint = format!("{}\n{tail}", d.hint);
+                    let group = &failing_together[&(f.error.clone(), f.log.clone())];
+                    // Only the first package of a group reports; the error names them all.
+                    if group.first() == Some(pkg) {
+                        let diag = |packages: String| {
+                            Diagnostic::from_code(
+                                code,
+                                &[
+                                    ("package", &packages),
+                                    ("action", step.kind.as_str()),
+                                    ("provider", &step.provider),
+                                    ("detail", &detail),
+                                    ("log", &logs),
+                                    ("timeout", "its limit"),
+                                ],
+                            )
+                        };
+                        let mut d = diag(group.join("`, `"));
+                        // `dots apply a b`, not `dots apply a`, `b``.
+                        d.hint = diag(group.join(" ")).hint;
+                        let tail = log_tail(&log);
+                        if !tail.is_empty() {
+                            d.hint = format!("{}\n{tail}", d.hint);
+                        }
+                        self.errors.push(d);
                     }
-                    self.errors.push(d);
                     (StepStatus::Failed, Some(msg))
                 }
                 (None, true) => (StepStatus::NotRun, None),

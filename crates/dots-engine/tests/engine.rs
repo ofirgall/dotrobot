@@ -747,6 +747,99 @@ fn a_failed_batch_is_retried_per_package_when_the_provider_offers_it() {
     assert_eq!(brew.executed().len(), 1);
 }
 
+/// `brew install a b c d` stops at the failing package. What it installed before stopping is
+/// kept (not reported failed), and the packages it never reached are retried one by one, so
+/// only the package that really fails is a failure (with its own log).
+#[test]
+fn a_batch_that_stopped_part_way_keeps_what_installed_and_retries_the_rest() {
+    struct Each(FakeProvider);
+    impl Provider for Each {
+        fn id(&self) -> &'static str {
+            self.0.id()
+        }
+        fn caps(&self) -> Caps {
+            self.0.caps()
+        }
+        fn availability(&self, f: &Facts) -> Availability {
+            self.0.availability(f)
+        }
+        fn installed(&self, c: &Ctx) -> PResult<BTreeMap<String, Installed>> {
+            self.0.installed(c)
+        }
+        fn latest(&self, c: &Ctx, s: &[Spec]) -> PResult<BTreeMap<String, Latest>> {
+            self.0.latest(c, s)
+        }
+        fn plan(&self, o: &[Op]) -> PResult<Vec<Action>> {
+            self.0.plan(o)
+        }
+        fn exec(&self, c: &Ctx, a: &Action) -> PResult<Outcome> {
+            self.0.exec(c, a)
+        }
+        fn retry_each(&self, a: &Action) -> Option<Vec<Action>> {
+            let mut out = Vec::new();
+            for op in &a.ops {
+                out.extend(self.0.plan(std::slice::from_ref(op)).ok()?);
+            }
+            Some(out)
+        }
+        fn bins(&self, c: &Ctx, i: &BTreeMap<String, Installed>) -> PResult<Vec<BinEntry>> {
+            self.0.bins(c, i)
+        }
+    }
+    // Planned in name order: a, b, bad, d, e. The command stops at `bad`.
+    let pkgs: &[(&str, &str)] = &[
+        ("a", "[providers.brew]"),
+        ("b", "[providers.brew]"),
+        ("bad", "[providers.brew]"),
+        ("d", "[providers.brew]"),
+        ("e", "[providers.brew]"),
+    ];
+    let sb = sandbox(pkgs, &[]);
+    let brew = FakeProvider::new("brew")
+        .failing_on("bad")
+        .stopping_at_failures();
+    let mut reg = Registry::new();
+    reg.register(Box::new(Each(brew.clone())));
+    let r = Case::new(&sb, &reg, &NoFiles).apply(true);
+    for ok in ["a", "b", "d", "e"] {
+        assert_eq!(status_of(&r, ok), &StepStatus::Ok, "{ok}: {:?}", r.errors);
+    }
+    assert_eq!(status_of(&r, "bad"), &StepStatus::Failed);
+    assert_eq!(r.status, Status::Failed);
+    // The batch, then one retry for each package that was not installed (bad, d, e).
+    let ran: Vec<String> = brew.executed().iter().map(|a| a.argv.join(" ")).collect();
+    assert_eq!(ran.len(), 4, "{ran:?}");
+    assert_eq!(
+        ran[1..],
+        ["brew install bad", "brew install d", "brew install e"]
+    );
+    // One error, for the package that failed.
+    assert_eq!(r.errors.len(), 1, "{:?}", r.errors);
+    assert!(r.errors[0].message.contains("bad"));
+}
+
+/// Without `retry_each` the packages the command installed are still kept; only the missing
+/// ones fail with the batch, and the one command's error is reported once.
+#[test]
+fn a_batch_without_retry_still_keeps_what_installed() {
+    let pkgs: &[(&str, &str)] = &[
+        ("a", "[providers.brew]"),
+        ("bad", "[providers.brew]"),
+        ("c", "[providers.brew]"),
+    ];
+    let sb = sandbox(pkgs, &[]);
+    let brew = FakeProvider::new("brew")
+        .failing_on("bad")
+        .stopping_at_failures();
+    let reg = registry(&[&brew]);
+    let r = Case::new(&sb, &reg, &NoFiles).apply(true);
+    assert_eq!(status_of(&r, "a"), &StepStatus::Ok, "{:?}", r.errors);
+    assert_eq!(status_of(&r, "bad"), &StepStatus::Failed);
+    assert_eq!(status_of(&r, "c"), &StepStatus::Failed);
+    assert_eq!(r.errors.len(), 1, "{:?}", r.errors);
+    assert!(r.errors[0].message.contains("bad") && r.errors[0].message.contains("c"));
+}
+
 // ------------------------------------------------------------------ 4.2
 
 fn apt_caps() -> Caps {
