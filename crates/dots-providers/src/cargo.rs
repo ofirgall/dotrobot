@@ -103,6 +103,13 @@ pub(crate) fn exec_action(
     })
 }
 
+/// `CARGO_NET_GIT_FETCH_WITH_CLI=true` for every cargo command, unless the user's environment
+/// already says something. cargo's built-in libgit2 cannot use the ssh agent or a gitconfig
+/// `url.<ssh>.insteadOf` rewrite ("no authentication methods succeeded"); the `git` CLI can.
+fn fetch_with_cli(ctx: &Ctx) -> Option<&'static str> {
+    (!ctx.env.contains_key(FETCH_WITH_CLI)).then_some("true")
+}
+
 fn cargo_home(home: &Path, env: &BTreeMap<String, String>) -> PathBuf {
     match env.get("CARGO_HOME").filter(|v| !v.is_empty()) {
         Some(c) => PathBuf::from(c),
@@ -190,6 +197,9 @@ impl Provider for CargoProvider {
         let mut cmd = Cmd::new(&bin)
             .args(["install", "--list"])
             .envs(&command_env(ctx, bin.parent()));
+        if let Some(v) = fetch_with_cli(ctx) {
+            cmd.env.insert(FETCH_WITH_CLI.into(), v.into());
+        }
         cmd.env.insert(
             "CARGO_HOME".into(),
             cargo_home(&ctx.home, &ctx.env)
@@ -226,9 +236,12 @@ impl Provider for CargoProvider {
             if s.opts.contains_key("git") || s.opts.contains_key("path") {
                 continue;
             }
-            let cmd = Cmd::new(&bin)
+            let mut cmd = Cmd::new(&bin)
                 .args(["search", "--limit", "1", &s.name])
                 .envs(&command_env(ctx, bin.parent()));
+            if let Some(v) = fetch_with_cli(ctx) {
+                cmd.env.insert(FETCH_WITH_CLI.into(), v.into());
+            }
             let out = ctx.runner.run(&cmd)?;
             if !out.success() {
                 continue;
@@ -339,12 +352,12 @@ impl Provider for CargoProvider {
         };
         let action = &resolve_bare(action, idx, "cargo", resolve_bin(&ctx.home, &ctx.env))?;
         let bin_dir = Path::new(&action.argv[idx]).parent().map(Path::to_path_buf);
-        let out = exec_action(
-            ctx,
-            action,
-            bin_dir.as_deref(),
-            &[("CARGO_HOME", &home.to_string_lossy())],
-        )?;
+        let home_str = home.to_string_lossy();
+        let mut extra: Vec<(&str, &str)> = vec![("CARGO_HOME", &home_str)];
+        if let Some(v) = fetch_with_cli(ctx) {
+            extra.push((FETCH_WITH_CLI, v));
+        }
+        let out = exec_action(ctx, action, bin_dir.as_deref(), &extra)?;
         if !out.success && !ctx.dry_run && action.argv.iter().any(|a| a == "--locked") {
             let text = out
                 .log

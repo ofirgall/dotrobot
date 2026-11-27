@@ -535,3 +535,60 @@ fn locked_compile_failure_hints_locked_false() {
     let out = run("locked=false", compile).unwrap();
     assert!(!out.success, "no hint and no error without --locked");
 }
+
+// ------------------------------------------------------- git fetch with the CLI
+
+fn ctx_in(tmp: &std::path::Path, rec: Arc<RecordingRunner>) -> Ctx {
+    let bin = tmp.join(".cargo/bin/cargo");
+    std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+    std::fs::write(&bin, "").unwrap();
+    Ctx {
+        runner: rec,
+        home: tmp.into(),
+        log_dir: tmp.join("logs"),
+        ..Ctx::default()
+    }
+}
+
+#[test]
+fn cargo_commands_fetch_git_with_the_cli_unless_the_user_says_otherwise() {
+    let tmp = tempfile::tempdir().unwrap();
+    let rec = Arc::new(RecordingRunner::new());
+    let ctx = ctx_in(tmp.path(), rec.clone());
+    let p = CargoProvider::for_ctx(&ctx);
+    let a = p
+        .plan(&[op(
+            OpKind::Install,
+            "herdr",
+            Some("git=https://github.com/ofirgall/herdr"),
+            None,
+        )])
+        .unwrap()
+        .remove(0);
+    assert!(p.exec(&ctx, &a).unwrap().success);
+    let install = rec.commands().remove(0);
+    assert_eq!(
+        install
+            .env
+            .get("CARGO_NET_GIT_FETCH_WITH_CLI")
+            .map(String::as_str),
+        Some("true"),
+        "{install:?}"
+    );
+
+    // The user's own setting wins: dots adds nothing.
+    let rec = Arc::new(RecordingRunner::new());
+    let mut ctx = ctx_in(tmp.path(), rec.clone());
+    ctx.env
+        .insert("CARGO_NET_GIT_FETCH_WITH_CLI".into(), "false".into());
+    assert!(p.exec(&ctx, &a).unwrap().success);
+    let install = rec.commands().remove(0);
+    assert_eq!(
+        install
+            .env
+            .get("CARGO_NET_GIT_FETCH_WITH_CLI")
+            .map(String::as_str),
+        Some("false"),
+        "{install:?}"
+    );
+}
