@@ -251,8 +251,23 @@ The live region at the bottom is redrawn atomically (synchronized output). Finis
  6 of 11 done · 1 failed · 1m 20s
 ```
 
+What is built today (the wording follows the sentence style below; the ETA and the measurable bars are not built yet):
+
+```
+ ✓ Installed ripgrep, fd  4.2s
+ ✓ Linked ~/.config/yazi  create  0.1s
+ ✗ Installing herdr (script)  failed: herdr: exit 1  12s
+
+ ⠹ Installing kv (cargo)  1m 12s  Compiling ez-workspaces v0.4.1
+ ⠹ Installing bottom (cargo)  38s  Compiling clap_derive v4.5.0
+ Applying  [██████████░░░░░░░░░░]  6/11 steps · 1 failed · 1m 20s
+```
+
 How each part works:
-- **Per-task line**: spinner, name, provider, then the **last line of the tool's own output** (dimmed and truncated to fit), so a long cargo build visibly makes progress instead of looking frozen. Elapsed time is on the right.
+- **Per-task line**: spinner, what it is doing as a sentence (`Installing plantuml, deno, zsh (brew)`, `Upgrading kv (cargo)`, `Running post_install hook of kv`), the elapsed time, then the **last line of the tool's own output** (dimmed and cut to the terminal width), so a long cargo build visibly makes progress instead of looking frozen. Most tools report no percentage, so there is a spinner and the clock, never a made-up bar. At most 5 running steps are listed; the rest are counted (`3 more running`).
+- **Overall bar**: the last row, `Applying  [██████████░░░░░░░░░░]  9/23 steps · 1 failed · 3m 12s`. A step is a package batch, a file, a setting, a service, a shim or a hook, counted when it ends. The bar is full only when the run is. On a narrow terminal the bar shrinks, then goes, before the counts are cut. Phases that report one step at a time (files, settings, services) show a running note (`Applying 3 settings`).
+- **Finished lines** use the past tense (`Installed plantuml, deno, zsh  43s`, `Linked ~/.zshrc  create`, `Set NSGlobalDomain KeyRepeat  6 -> 2`, `Ran post_install hook of kv`). A failure keeps the running wording and adds `failed: <why>`.
+- **Child output** reaches the row through an optional line callback on the provider runner (`dots_providers::with_line_sink`, set per step by the engine's `Observer::output_sink`). The logs still get the full output; a tool that redraws one line with `\r` counts each redraw as a line.
 - **ETA** comes from the journal: dots knows how long `kv` took the last 3 times on this machine. It is only shown when there is history, and never invented.
 - **Bars** appear only when progress is measurable: a download with Content-Length, cargo's `(n/m)` and apt's `Unpacking (n/m)`. Otherwise there is just a spinner. There are no fake progress bars.
 - **Terminal progress**: OSC 9;4 sets the tab/taskbar progress in ghostty, Windows Terminal, WezTerm and ConEmu, and the window title shows `dots: 6/11`. Both are cleared on exit, including on Ctrl-C and on panic, via a drop guard.
@@ -271,6 +286,8 @@ How each part works:
              sudo: a terminal is required to read the password
            log: /home/me/.local/state/dots/logs/r-3f9a1c/cloudflare-warp.install.log
   ```
+- **Still running (no TTY or reduced motion).** There is no spinner to show life, so a step that runs longer than 30 s adds `[..] still running: Installing kv (cargo) (1m 30s)` every 30 s, in the log too. `DOTS_HEARTBEAT_SECS` changes the interval (fractions allowed, `0` turns it off).
+- **Before the run (`dots plan`, and `apply` while it works out the plan).** Reading providers takes a while (`brew info`, cargo checks, script checks, latest-version lookups), so a single transient line shows the phase on stderr: `⠼ Checking installed packages (brew, 1/4)  4s`, `⠼ Looking up latest versions (brew: 41 packages)  7s`, `⠼ Running 12 script checks (3/12)`. It appears after 200 ms, is erased when the plan prints (or before the confirmation question), and is drawn only on a terminal that allows motion: off a TTY, under `--quiet` or with `DOTS_REDUCE_MOTION` nothing is added, and `--json` stdout is untouched.
 - **Ctrl-C once**: "Stopping after current steps… (Ctrl-C again to force)". Running steps finish, the journal is written, and it ends with a summary of what was and wasn't done. **Twice**: kill the children and record them as `interrupted`.
 
 ### 4.6 Apply summary (and failures)

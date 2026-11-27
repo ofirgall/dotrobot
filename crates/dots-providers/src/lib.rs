@@ -19,7 +19,9 @@ mod runner;
 pub mod script;
 pub mod uv;
 pub use fetch::{CurlFetcher, Fetcher};
-pub use runner::{Cmd, DEFAULT_TIMEOUT, Output, RealRunner, Runner, Stdin};
+pub use runner::{
+    Cmd, DEFAULT_TIMEOUT, LineSink, Output, RealRunner, Runner, Stdin, with_line_sink,
+};
 
 pub type Result<T> = std::result::Result<T, ProviderError>;
 

@@ -3,11 +3,13 @@
 //! [`RealRunner`]. Providers must pass an absolute program path (resolved by the provider,
 //! never via `PATH`).
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -15,6 +17,50 @@ use crate::{ProviderError, Result};
 
 /// Default command timeout (matches the script default of 20 minutes).
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(20 * 60);
+
+/// Receives a command's output line by line while it runs (progress display only: the full
+/// output is still collected into [`Output`] and the log files).
+pub type LineSink = Arc<dyn Fn(&str) + Send + Sync>;
+
+thread_local! {
+    static LINE_SINK: RefCell<Option<LineSink>> = const { RefCell::new(None) };
+}
+
+/// Run `f` with `sink` receiving the output lines of every command [`RealRunner`] runs on
+/// this thread meanwhile. Optional and invisible to providers: nothing changes when no sink
+/// is set. The previous sink is restored afterwards.
+pub fn with_line_sink<R>(sink: Option<LineSink>, f: impl FnOnce() -> R) -> R {
+    struct Restore(Option<LineSink>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            LINE_SINK.with(|s| *s.borrow_mut() = self.0.take());
+        }
+    }
+    let _restore = Restore(LINE_SINK.with(|s| s.replace(sink)));
+    f()
+}
+
+fn current_line_sink() -> Option<LineSink> {
+    LINE_SINK.with(|s| s.borrow().clone())
+}
+
+/// Split `chunk` into lines (on `\n` and `\r`, so progress meters that redraw one line count),
+/// reporting each complete one, then the unfinished tail so a slow tool still shows life.
+fn feed_lines(pending: &mut Vec<u8>, chunk: &[u8], sink: &LineSink) {
+    for &b in chunk {
+        if b == b'\n' || b == b'\r' {
+            if !pending.is_empty() {
+                sink(&String::from_utf8_lossy(pending));
+                pending.clear();
+            }
+        } else {
+            pending.push(b);
+        }
+    }
+    if !pending.is_empty() {
+        sink(&String::from_utf8_lossy(pending));
+    }
+}
 
 /// What a command reads on stdin. `Null` (`/dev/null`) is the default so nothing hangs.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -213,10 +259,26 @@ impl Runner for RealRunner {
                 let _ = si.write_all(&b);
             });
         }
+        let sink = current_line_sink();
         let reader = |mut r: Box<dyn Read + Send>| {
+            let sink = sink.clone();
             thread::spawn(move || {
                 let mut buf = Vec::new();
-                let _ = r.read_to_end(&mut buf);
+                let mut pending = Vec::new();
+                let mut chunk = [0u8; 8192];
+                loop {
+                    match r.read(&mut chunk) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            buf.extend_from_slice(&chunk[..n]);
+                            if let Some(s) = &sink {
+                                feed_lines(&mut pending, &chunk[..n], s);
+                            }
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                        Err(_) => break,
+                    }
+                }
                 String::from_utf8_lossy(&buf).into_owned()
             })
         };
@@ -267,6 +329,32 @@ mod tests {
             .unwrap();
         assert!(o.timed_out && !o.success());
         assert!(r.run(&Cmd::new("/nonexistent/x")).is_err());
+    }
+
+    #[test]
+    fn a_line_sink_sees_output_lines_while_the_command_runs() {
+        use std::sync::Mutex;
+        let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+        let s = seen.clone();
+        let sink: LineSink = Arc::new(move |l: &str| s.lock().unwrap().push(l.to_string()));
+        let o = with_line_sink(Some(sink), || {
+            RealRunner
+                .run(
+                    &Cmd::new("/bin/sh")
+                        .arg("-c")
+                        .arg("echo one; printf 'two\\rthree\\n' >&2"),
+                )
+                .unwrap()
+        });
+        // The collected output is untouched.
+        assert_eq!(o.stdout, "one\n");
+        assert_eq!(o.stderr, "two\rthree\n");
+        let seen = seen.lock().unwrap();
+        for want in ["one", "two", "three"] {
+            assert!(seen.iter().any(|l| l == want), "{seen:?}");
+        }
+        // Outside the scope there is no sink.
+        assert!(current_line_sink().is_none());
     }
 
     #[test]

@@ -31,6 +31,7 @@ mod todo;
 mod upgrade;
 mod views;
 mod why;
+mod wording;
 
 fn main() {
     // Interrupt exits 130; `apply` turns the first one into "stop after the current action".

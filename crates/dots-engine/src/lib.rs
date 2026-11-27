@@ -22,7 +22,7 @@ mod version;
 
 pub use apply::{
     ApplyConfig, ApplyReport, LockDrop, Mode, NoObserver, NoPrompt, Observer, Prompter,
-    RemovalResult, Status, StepResult, StepStatus, SudoPolicy, apply, apply_observed,
+    RemovalResult, Status, StepRef, StepResult, StepStatus, SudoPolicy, apply, apply_observed,
 };
 pub use files::{FileStep, FileStepResult, FilesPhase, FilesRequest, NoFiles, Payload};
 pub use hooks::{HookRequest, HookStep, HookStepResult, HooksPhase, NoHooksPhase};

@@ -8,7 +8,9 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime};
 
 use dots_core::Diagnostic;
-use dots_providers::{Action, Cmd, Ctx, Installed, Provider, ProviderError, Stdin};
+use dots_providers::{
+    Action, Cmd, Ctx, Installed, LineSink, Provider, ProviderError, Stdin, with_line_sink,
+};
 
 use crate::files::{FileStep, FileStepResult, FilesRequest};
 use crate::hooks::{HookStep, HookStepResult, HooksPhase, run_hook};
@@ -74,6 +76,20 @@ pub trait Observer: Send + Sync {
     fn hook_done(&self, _result: &HookStepResult) {}
     /// One provider shim was created, repaired or removed (or failed).
     fn shim_done(&self, _result: &ShimStepResult) {}
+    /// A package hook is about to run (its `hook_done` follows).
+    fn hook_started(&self, _hook: &HookStep) {}
+    /// Where the output lines of the commands of `step` go while they run (progress display
+    /// only; logs are written regardless). Asked once as the step starts.
+    fn output_sink(&self, _step: StepRef<'_>) -> Option<LineSink> {
+        None
+    }
+}
+
+/// A running step whose command output an observer may want to follow.
+#[derive(Debug, Clone, Copy)]
+pub enum StepRef<'a> {
+    Batch(&'a Batch),
+    Hook(&'a HookStep),
 }
 
 /// Observes nothing.
@@ -1310,16 +1326,19 @@ fn execute(
                         .cloned()
                         .collect();
                     let hooks_phase = inp.hooks;
+                    let sink = obs.output_sink(StepRef::Batch(b));
                     scope.spawn(move || {
-                        let out = run_batch(
-                            provider,
-                            &bctx,
-                            b,
-                            stop,
-                            use_sudo,
-                            sudo_ok,
-                            (hooks_phase, &pre_hooks),
-                        );
+                        let out = with_line_sink(sink, || {
+                            run_batch(
+                                provider,
+                                &bctx,
+                                b,
+                                stop,
+                                use_sudo,
+                                sudo_ok,
+                                (hooks_phase, &pre_hooks),
+                            )
+                        });
                         let _ = tx.send(out);
                     });
                     if b.interactive {
@@ -1483,7 +1502,9 @@ fn execute(
                 continue;
             }
             let before = run.hook_results.len();
-            let r = run_hook(inp.hooks, &hook_ctx, h);
+            obs.hook_started(h);
+            let sink = obs.output_sink(StepRef::Hook(h));
+            let r = with_line_sink(sink, || run_hook(inp.hooks, &hook_ctx, h));
             run.record_hook(r);
             for r in &run.hook_results[before..] {
                 obs.hook_done(r);

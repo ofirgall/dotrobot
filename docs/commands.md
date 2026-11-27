@@ -48,6 +48,15 @@ $ echo $?
 `--json` data: `{ packages, bundles, errors, warnings }` (counts); the problems are in
 `errors[]` and `warnings[]`.
 
+## Progress while `plan` and `apply` work
+
+Progress goes to stderr, so stdout (and `--json`) stay clean; `--quiet` drops it.
+
+- `dots plan` and the planning part of `dots apply`/`dots upgrade` show one transient line on a terminal while they ask providers what is installed and what is the latest version (`Checking installed packages`, `Looking up latest versions`, `Running 12 script checks`). It is erased when the plan prints. Without a terminal nothing is printed.
+- A running `dots apply` on a terminal shows each running step as a sentence with a spinner, the elapsed time and the last line of the tool's output (`Installing plantuml, deno, zsh (brew)  1m 04s  ==> Pouring deno...`), and an overall bar (`Applying  [█████░░░░░░░░░░░░░░░]  9/23 steps · 1 failed · 3m 12s`). Finished steps stay above it (`Installed plantuml, deno, zsh  43s`).
+- Without a terminal (ssh without a tty, a pipe, CI) or with `DOTS_REDUCE_MOTION`, the same events are plain ASCII lines (`[..] Installing kv (cargo)`, `[x] Installed kv  3m 05s`), and a step that runs longer than 30 s adds `[..] still running: Installing kv (cargo) (1m 30s)` every 30 s. Set `DOTS_HEARTBEAT_SECS` to change the interval, or `0` to turn it off. The lines are also appended to the run log (`~/.local/state/dots/logs/<run-id>/run.log`).
+- Ctrl-C clears the live region; the first press stops after the running steps, the second ends the process at once.
+
 ## `dots apply`, `dots upgrade` and sudo steps
 
 `dots apply` has three modes for the steps that need root (see "Sudo steps" in `providers.md`):

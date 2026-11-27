@@ -1,13 +1,19 @@
-//! Streamed progress of `dots apply`: one line when a step starts and one when it finishes, on
+//! Streamed progress of `dots apply`: a line when a step starts and one when it finishes, on
 //! stderr, as it happens, and the same lines in the run's live log (`logs/<run-id>/run.log`).
 //!
+//! - A terminal: the live region of `dots-ui` shows the running steps (spinner, elapsed time
+//!   and the last line of the tool's own output) and an overall bar; finished steps scroll up
+//!   as permanent lines.
 //! - Not a terminal (a pipe, ssh without a tty, CI): plain ASCII lines, flushed one by one, no
-//!   colors, spinners or cursor movement. With a terminal the live region of `dots-ui` is kept
-//!   and the finished lines still scroll up as permanent lines.
+//!   colors, spinners or cursor movement. A step running longer than 30 s adds a
+//!   `still running` line every 30 s (`DOTS_HEARTBEAT_SECS` changes the interval, `0` turns
+//!   it off), also in the run log.
 //! - `--quiet` draws nothing; the log is still written. With `--json` the lines go to stderr
 //!   and stdout stays the one JSON document.
 //! - A failure prints its error and the log path at once, not only in the final summary. Packages
 //!   that failed with the same error (one batched command) are listed under it once.
+//!
+//! The wording (`Installing plantuml (brew)`, `Linked ~/.zshrc`) lives in [`crate::wording`].
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -15,11 +21,20 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use dots_core::State;
-use dots_engine::{Batch, Observer, Plan, StepResult, StepStatus};
+use dots_engine::{Batch, HookStep, Observer, Plan, StepRef, StepResult, StepStatus};
+use dots_providers::LineSink;
 use dots_ui::{IconSet, Progress, TaskId, Tier, Ui};
 
-/// How many package names a step line shows before `+N more`.
-const MAX_NAMES: usize = 6;
+use crate::wording as w;
+
+/// The heartbeat interval override, in seconds (fractions allowed; `0` turns it off).
+const HEARTBEAT_ENV: &str = "DOTS_HEARTBEAT_SECS";
+
+/// A phase that reports its steps one by one: its live note goes away after the last one.
+struct Note {
+    id: TaskId,
+    remaining: usize,
+}
 
 pub struct LiveProgress {
     p: Progress,
@@ -27,6 +42,9 @@ pub struct LiveProgress {
     /// A running batch: its line and when it started (its duration is wall clock, not the sum
     /// of its packages, which share one command's time).
     batches: Mutex<BTreeMap<usize, (TaskId, Instant)>>,
+    /// Running hooks, by `package/event`.
+    hooks: Mutex<BTreeMap<String, TaskId>>,
+    note: Mutex<Option<Note>>,
 }
 
 impl LiveProgress {
@@ -45,10 +63,18 @@ impl LiveProgress {
         } else {
             Progress::silent(&ui)
         };
+        if let Some(v) = std::env::var(HEARTBEAT_ENV)
+            .ok()
+            .and_then(|v| v.trim().parse::<f64>().ok())
+        {
+            p.set_heartbeat((v > 0.0).then(|| Duration::from_secs_f64(v)));
+        }
         LiveProgress {
             p,
             log_path,
             batches: Mutex::default(),
+            hooks: Mutex::default(),
+            note: Mutex::new(None),
         }
     }
 
@@ -83,6 +109,34 @@ impl LiveProgress {
         let state = if ok { State::Done } else { State::Failed };
         self.p
             .record(label, state, detail, Some(Duration::from_millis(dur_ms)));
+        self.note_step_done();
+    }
+
+    /// A phase starts: its note replaces the previous phase's.
+    fn phase_started(&self, what: &str, n: usize) {
+        self.end_note();
+        if n == 0 {
+            return;
+        }
+        let id = self.p.start_note(&w::phase_note(what, n));
+        *self.note.lock().unwrap() = Some(Note { id, remaining: n });
+    }
+
+    fn note_step_done(&self) {
+        let mut g = self.note.lock().unwrap();
+        if let Some(n) = g.as_mut() {
+            n.remaining = n.remaining.saturating_sub(1);
+            if n.remaining == 0 {
+                self.p.dismiss(n.id);
+                *g = None;
+            }
+        }
+    }
+
+    fn end_note(&self) {
+        if let Some(n) = self.note.lock().unwrap().take() {
+            self.p.dismiss(n.id);
+        }
     }
 }
 
@@ -90,33 +144,6 @@ impl Drop for LiveProgress {
     fn drop(&mut self) {
         self.p.finish_all();
     }
-}
-
-/// `a, b, c` or `a, b, c, d, e, f +4 more`.
-fn names(packages: &[String]) -> String {
-    if packages.len() <= MAX_NAMES {
-        packages.join(", ")
-    } else {
-        format!(
-            "{} +{} more",
-            packages[..MAX_NAMES].join(", "),
-            packages.len() - MAX_NAMES
-        )
-    }
-}
-
-/// `brew install`, `cargo install/upgrade`: the provider and what its actions do.
-fn what(b: &Batch) -> String {
-    let mut kinds: Vec<String> = Vec::new();
-    for a in b.actions.iter().filter(|a| !a.ops.is_empty()) {
-        let k = format!("{:?}", a.kind).to_lowercase();
-        if !kinds.contains(&k) {
-            kinds.push(k);
-        }
-    }
-    format!("{} {}", b.provider, kinds.join("/"))
-        .trim_end()
-        .to_string()
 }
 
 fn past(action: &str) -> String {
@@ -129,11 +156,17 @@ fn past(action: &str) -> String {
     }
 }
 
+fn hook_key(h: &HookStep) -> String {
+    format!("{}/{}", h.package, h.event)
+}
+
 impl Observer for LiveProgress {
     fn planned(&self, plan: &Plan) {
+        // The plan is confirmed: the "working it out" indicator is over.
+        dots_ui::phase::finish();
         self.open_log();
         self.p.set_total(
-            plan.steps.len()
+            plan.batches.len()
                 + plan.files.len()
                 + plan.settings.len()
                 + plan.services.len()
@@ -151,23 +184,46 @@ impl Observer for LiveProgress {
     }
 
     fn batch_started(&self, b: &Batch) {
-        let id = self.p.start(&names(&b.packages), &what(b));
+        self.end_note();
+        let id = self.p.start(&w::batch_running(b), "");
         self.batches
             .lock()
             .unwrap()
             .insert(b.id, (id, Instant::now()));
+        if b.interactive {
+            // The tool talks to the user itself: the live region would be drawn over it.
+            self.p.suspend();
+        }
+    }
+
+    fn output_sink(&self, step: StepRef<'_>) -> Option<LineSink> {
+        let id = match step {
+            StepRef::Batch(b) => self.batches.lock().unwrap().get(&b.id).map(|(id, _)| *id),
+            StepRef::Hook(h) => self.hooks.lock().unwrap().get(&hook_key(h)).copied(),
+        }?;
+        Some(self.p.output_sink(id))
     }
 
     fn batch_finished(&self, b: &Batch, results: &[StepResult]) {
         let Some((id, started)) = self.batches.lock().unwrap().remove(&b.id) else {
             return;
         };
+        if b.interactive {
+            self.p.resume();
+        }
         let failed: Vec<&StepResult> = results
             .iter()
             .filter(|r| r.status == StepStatus::Failed)
             .collect();
         let dur = started.elapsed();
-        let (state, detail) = if !failed.is_empty() {
+        let ok: Vec<String> = results
+            .iter()
+            .filter(|r| r.status == StepStatus::Ok)
+            .map(|r| r.package.clone())
+            .collect();
+        // The finished line: `Installed a, b` when it all went through, otherwise the running
+        // wording with what went wrong.
+        let (state, label, detail) = if !failed.is_empty() {
             let mut detail = match failed.as_slice() {
                 [one] => format!(
                     "{}: {}",
@@ -181,26 +237,22 @@ impl Observer for LiveProgress {
             };
             // A partial failure: say which packages did go through, so a batch line naming
             // them all does not read as all of them failing.
-            let ok: Vec<String> = results
-                .iter()
-                .filter(|r| r.status == StepStatus::Ok)
-                .map(|r| r.package.clone())
-                .collect();
             if !ok.is_empty() {
                 let action = results
                     .iter()
                     .find(|r| r.status == StepStatus::Ok)
                     .map_or("install", |r| r.action.as_str());
-                detail.push_str(&format!(" ({} {})", past(action), names(&ok)));
+                detail.push_str(&format!(" ({} {})", past(action), w::names(&ok)));
             }
-            (State::Failed, detail)
+            (State::Failed, None, detail)
         } else if results.iter().all(|r| r.status == StepStatus::Ok) {
-            let action = results.first().map_or("install", |r| r.action.as_str());
-            (State::Done, past(action))
+            (State::Done, Some(w::batch_done(b, &ok)), String::new())
         } else {
-            (State::Skipped, "not run".to_string())
+            (State::Skipped, None, "not run".to_string())
         };
-        self.p.finish(id, state, &detail, Some(dur));
+        self.p
+            .finish_as(id, state, label.as_deref(), &detail, Some(dur));
+        self.note_step_done();
 
         // The error and the log, now: each distinct error once, naming its packages.
         let mut groups: Vec<(Vec<&str>, &StepResult)> = Vec::new();
@@ -229,6 +281,10 @@ impl Observer for LiveProgress {
         }
     }
 
+    fn files_started(&self, total: usize) {
+        self.phase_started("file change", total);
+    }
+
     fn file_done(&self, r: &dots_engine::FileStepResult) {
         let detail = if r.ok {
             r.step.action.clone()
@@ -236,11 +292,15 @@ impl Observer for LiveProgress {
             r.detail.clone().unwrap_or_default()
         };
         self.record(
-            &format!("{}  {}", r.step.kind, r.step.dst),
+            &w::file(&r.step.kind, &r.step.dst, r.ok),
             r.ok,
             &detail,
             r.dur_ms,
         );
+    }
+
+    fn settings_started(&self, total: usize) {
+        self.phase_started("setting", total);
     }
 
     fn setting_done(&self, r: &dots_engine::SettingStepResult) {
@@ -251,7 +311,7 @@ impl Observer for LiveProgress {
             r.detail.clone().unwrap_or_default()
         };
         self.record(
-            &format!("{}  {}", r.step.kind, r.step.label),
+            &w::setting(&r.step.action, &r.step.label, r.ok),
             r.ok,
             &detail,
             r.dur_ms,
@@ -260,11 +320,22 @@ impl Observer for LiveProgress {
 
     fn shim_done(&self, r: &dots_engine::ShimStepResult) {
         let detail = if r.ok {
-            r.step.action.clone()
+            String::new()
         } else {
             r.detail.clone().unwrap_or_default()
         };
-        self.record(&format!("shim  {}", r.step.dst), r.ok, &detail, r.dur_ms);
+        self.record(
+            &w::shim(&r.step.action, &r.step.dst, r.ok),
+            r.ok,
+            &detail,
+            r.dur_ms,
+        );
+    }
+
+    fn hook_started(&self, h: &HookStep) {
+        self.end_note();
+        let id = self.p.start(&w::hook(&h.event, &h.package, false), "");
+        self.hooks.lock().unwrap().insert(hook_key(h), id);
     }
 
     fn hook_done(&self, r: &dots_engine::HookStepResult) {
@@ -273,25 +344,40 @@ impl Observer for LiveProgress {
         } else {
             r.detail.clone().unwrap_or_default()
         };
-        self.record(
-            &format!("{}  {}", r.step.package, r.step.event),
-            r.ok,
-            &detail,
-            r.dur_ms,
-        );
+        let running = self.hooks.lock().unwrap().remove(&hook_key(&r.step));
+        let dur = Some(Duration::from_millis(r.dur_ms));
+        match running {
+            Some(id) => {
+                let state = if r.ok { State::Done } else { State::Failed };
+                let label = r.ok.then(|| w::hook(&r.step.event, &r.step.package, true));
+                self.p.finish_as(id, state, label.as_deref(), &detail, dur);
+                self.note_step_done();
+            }
+            // Ran inside its package's batch (a `pre_install` hook): only the result is known.
+            None => self.record(
+                &w::hook(&r.step.event, &r.step.package, r.ok),
+                r.ok,
+                &detail,
+                r.dur_ms,
+            ),
+        }
         if let (false, Some(log)) = (r.ok, &r.log) {
             self.p.println(&format!("        log: {}", log.display()));
         }
     }
 
+    fn services_started(&self, total: usize) {
+        self.phase_started("service change", total);
+    }
+
     fn service_done(&self, r: &dots_engine::ServiceStepResult) {
         let detail = if r.ok {
-            r.step.action.clone()
+            r.step.manager.clone()
         } else {
             r.detail.clone().unwrap_or_default()
         };
         self.record(
-            &format!("{}  {}", r.step.manager, r.step.name),
+            &w::service(&r.step.action, &r.step.name, r.ok),
             r.ok,
             &detail,
             r.dur_ms,

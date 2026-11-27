@@ -244,12 +244,23 @@ fn offers_for<'a>(
 
 // ------------------------------------------------------------------------------ plan
 
+/// The transient "what is it doing" line on stderr while a command works out its plan. Does
+/// nothing off a terminal or under `--quiet`; erased when dropped.
+pub(crate) fn working(ctx: &Context, label: &str) -> Option<dots_ui::phase::PhaseGuard> {
+    (!ctx.opts.quiet).then(|| {
+        let ui = dots_ui::Ui::from_process(&ctx.opts, &dots_core::ProcessEnv);
+        dots_ui::phase::start(&ui, label)
+    })
+}
+
 pub fn plan_cmd(ctx: &Context, args: &Args, check: bool) -> Report {
     let run_id = new_run_id();
+    let _working = working(ctx, "Reading your repo");
     let p = match prepare(ctx, None, &run_id) {
         Ok(p) => p,
         Err((e, w)) => return failure("plan", ExitCode::Error, e, w),
     };
+    dots_ui::phase::note("Working out what to change");
     let (errors, warnings) = split(&p.rc, &p.resolution);
     if !errors.is_empty() {
         return failure("plan", ExitCode::Error, errors, warnings);
@@ -327,6 +338,8 @@ impl Prompter for Tty {
     }
 
     fn confirm(&self, text: &str) -> bool {
+        // The plan is ready: the "working it out" line must not sit under the question.
+        dots_ui::phase::finish();
         let mut err = std::io::stderr();
         let _ = writeln!(err, "{text}");
         let _ = write!(err, "Proceed? [y/N] ");
@@ -348,6 +361,8 @@ pub fn on_interrupt() {
     {
         return;
     }
+    // No unwinding on exit: leave no half-drawn live region or spinner line behind.
+    dots_ui::clear_on_exit();
     std::process::exit(ExitCode::Interrupted.code());
 }
 
@@ -405,10 +420,12 @@ pub(crate) fn apply_inner(
         }
     };
 
+    let _working = working(ctx, "Reading your repo");
     let p = match prepare(ctx, a.root.as_deref(), &run_id) {
         Ok(p) => p,
         Err((e, w)) => return none(failure(command, ExitCode::Error, e, w)),
     };
+    dots_ui::phase::note("Working out what to change");
     let (errors, warnings) = split(&p.rc, &p.resolution);
     if !errors.is_empty() {
         return none(failure(command, ExitCode::Error, errors, warnings));

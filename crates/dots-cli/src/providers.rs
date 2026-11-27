@@ -441,8 +441,21 @@ pub fn fetch_item(pkg: &str) -> String {
 /// nothing (the status commands report provider problems themselves).
 pub fn installed(registry: &Registry, ctx: &Ctx) -> InstalledMap {
     let mut out = InstalledMap::new();
-    for id in registry.ids() {
-        for (_, p) in registry.instances(id) {
+    let ids: Vec<&str> = registry.ids().collect();
+    for (i, id) in ids.iter().enumerate() {
+        let instances: Vec<_> = registry.instances(id).collect();
+        // Per-package instances (script checks) are many cheap commands, shared ones one query.
+        let checks = instances.iter().filter(|(pkg, _)| pkg.is_some()).count();
+        for (n, (_, p)) in instances.iter().enumerate() {
+            dots_ui::phase::note(&if checks > 1 {
+                format!("Running {checks} {id} checks ({}/{checks})", n + 1)
+            } else {
+                format!(
+                    "Checking installed packages ({id}, {}/{})",
+                    i + 1,
+                    ids.len()
+                )
+            });
             if let Ok(m) = p.installed(ctx) {
                 out.entry(id.to_string()).or_default().extend(m);
             }
@@ -504,6 +517,11 @@ impl<'a> LiveOffers<'a> {
         p: &dyn dots_providers::Provider,
         specs: &[dots_providers::Spec],
     ) {
+        dots_ui::phase::note(&format!(
+            "Looking up latest versions ({provider}: {} package{})",
+            specs.len(),
+            if specs.len() == 1 { "" } else { "s" }
+        ));
         let mut seen = self.seen.borrow_mut();
         let mut record =
             |spec: &dots_providers::Spec,

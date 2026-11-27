@@ -5,6 +5,7 @@ mod config;
 mod emit;
 mod layout;
 mod pager;
+pub mod phase;
 mod progress;
 mod render;
 mod theme;
@@ -15,7 +16,9 @@ pub use config::{IconSet, ThemeChoice, Toggle, UiConfig};
 pub use emit::{emit, load_config};
 pub use layout::{truncate_end, truncate_middle, width};
 pub use pager::{page, run_pager};
-pub use progress::{Progress, ProgressSink, TaskId};
+pub use progress::{
+    HEARTBEAT, Overall, Progress, ProgressSink, TaskId, bar, clear_on_exit, format_duration,
+};
 pub use render::{Blocks, Rendered, render, render_with};
 pub use theme::{paint, state_symbol};
 pub use tier::{Tier, detect_tier, detect_tier_with};
