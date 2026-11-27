@@ -6,6 +6,10 @@
 //!   Finished tasks scroll up as permanent single lines. Rich adds synchronized output
 //!   (mode 2026) and the terminal's own progress indicator (OSC 9;4).
 //! - Otherwise (Plain, reduced motion, not a TTY): no spinner frames, one line per state change.
+//!
+//! Every line is written whole (one `write_all`, then a flush) under one lock, so tasks running
+//! in parallel never interleave fragments. An optional log (`set_log`) receives every event
+//! line too, without colors or cursor movement, so `tail -f` works from another terminal.
 
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -45,6 +49,8 @@ struct Inner {
     done: usize,
     failed: usize,
     live_lines: usize,
+    /// A second copy of every event line, plain text with the run's elapsed time in front.
+    log: Option<Box<dyn Write + Send>>,
     frame: usize,
     started: Instant,
     last_draw: Option<Instant>,
@@ -65,6 +71,16 @@ impl Progress {
         Progress::with_sink(ui, Box::new(std::io::stderr()), ui.animate(), true)
     }
 
+    /// Progress that draws nothing (`--quiet`): only the log, when one is set, gets the lines.
+    pub fn silent(ui: &Ui) -> Progress {
+        Progress::with_sink(ui, Box::new(std::io::sink()), false, false)
+    }
+
+    /// Also write every event line to `log`: plain text, one line each, flushed at once.
+    pub fn set_log(&self, log: Box<dyn Write + Send>) {
+        lock(&self.inner).log = Some(log);
+    }
+
     /// For tests and embedders: an explicit sink and animation flag, no ticker thread (call
     /// [`Progress::tick`] to advance the spinner).
     pub fn manual(ui: &Ui, sink: Box<dyn ProgressSink>, animate: bool) -> Progress {
@@ -82,6 +98,7 @@ impl Progress {
             done: 0,
             failed: 0,
             live_lines: 0,
+            log: None,
             frame: 0,
             started: Instant::now(),
             last_draw: None,
@@ -128,6 +145,9 @@ impl Progress {
         if !i.animate {
             let line = i.event_line(State::Running, label, detail, None);
             i.print_line(&line);
+        } else {
+            let line = i.event_line(State::Running, label, detail, None);
+            i.log_line(&line);
         }
         i.running.push(task);
         i.draw(true);
@@ -165,6 +185,27 @@ impl Progress {
             format!("{}: {detail}", state.word())
         };
         let line = i.event_line(state, &task.label, &detail, Some(elapsed));
+        i.print_line(&line);
+        i.draw(true);
+    }
+
+    /// A step that is over by the time anyone hears of it: one permanent line, no start line.
+    pub fn record(&self, label: &str, state: State, detail: &str, elapsed: Option<Duration>) {
+        let mut i = lock(&self.inner);
+        i.done += 1;
+        if matches!(state, State::Failed | State::Missing | State::Conflict) {
+            i.failed += 1;
+        }
+        let detail = if matches!(state, State::Ok | State::Done) || detail.is_empty() {
+            if matches!(state, State::Ok | State::Done) {
+                detail.to_string()
+            } else {
+                state.word().to_string()
+            }
+        } else {
+            format!("{}: {detail}", state.word())
+        };
+        let line = i.event_line(state, label, &detail, elapsed);
         i.print_line(&line);
         i.draw(true);
     }
@@ -226,6 +267,48 @@ pub fn format_duration(d: Duration) -> String {
     }
 }
 
+/// `mm:ss` since the run started (`hh:mm:ss` past an hour), the log's line prefix.
+fn format_clock(d: Duration) -> String {
+    let s = d.as_secs();
+    if s >= 3600 {
+        format!("{:02}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60)
+    } else {
+        format!("{:02}:{:02}", s / 60, s % 60)
+    }
+}
+
+/// `text` without escape sequences (colors, cursor movement, OSC).
+fn strip_ansi(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\x1b' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            // CSI: parameters, then a final byte in @..~
+            Some('[') => {
+                for n in chars.by_ref() {
+                    if ('@'..='~').contains(&n) {
+                        break;
+                    }
+                }
+            }
+            // OSC: up to BEL or ST
+            Some(']') => {
+                while let Some(n) = chars.next() {
+                    if n == '\x07' || (n == '\x1b' && chars.next() == Some('\\')) {
+                        break;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
 impl Inner {
     fn p(&self, tone: Option<Tone>, bold: bool, dim: bool, text: &str) -> String {
         paint(&self.ui, tone, bold, dim, text)
@@ -260,10 +343,24 @@ impl Inner {
         line
     }
 
+    /// One whole line, in one write, so nothing else can land in the middle of it.
     fn print_line(&mut self, line: &str) {
         self.clear_live();
-        let _ = writeln!(self.sink, "{line}");
+        let mut buf = String::with_capacity(line.len() + 1);
+        buf.push_str(line);
+        buf.push('\n');
+        let _ = self.sink.write_all(buf.as_bytes());
         let _ = self.sink.flush();
+        self.log_line(line);
+    }
+
+    /// The line, without styling, in the log.
+    fn log_line(&mut self, line: &str) {
+        let stamp = format_clock(self.started.elapsed());
+        let Some(log) = self.log.as_mut() else { return };
+        let text = format!("{stamp} {}\n", strip_ansi(line).trim_start());
+        let _ = log.write_all(text.as_bytes());
+        let _ = log.flush();
     }
 
     fn clear_live(&mut self) {
@@ -475,6 +572,78 @@ mod tests {
             text.ends_with("\x1b]9;4;0;\x07"),
             "cleared on drop: {text:?}"
         );
+    }
+
+    #[test]
+    fn the_log_gets_every_event_as_plain_text_even_when_the_screen_animates() {
+        let ui = Ui::fixed(Tier::Basic, 80);
+        let (screen, log) = (Buf::default(), Buf::default());
+        {
+            let p = Progress::manual(&ui, Box::new(screen.clone()), true);
+            p.set_log(Box::new(log.clone()));
+            let a = p.start("ripgrep", "brew install");
+            p.finish(a, State::Failed, "boom", Some(Duration::from_secs(2)));
+            p.record(
+                "fd",
+                State::Done,
+                "installed",
+                Some(Duration::from_millis(50)),
+            );
+        }
+        let text = log.text();
+        assert!(!text.contains('\x1b'), "{text:?}");
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 3, "{text:?}");
+        assert!(lines[0].starts_with("00:00 ") && lines[0].contains("ripgrep"));
+        assert!(lines[1].contains("failed: boom") && lines[1].contains("2.0s"));
+        assert!(lines[2].contains("fd") && lines[2].contains("installed"));
+    }
+
+    #[test]
+    fn parallel_tasks_write_whole_lines() {
+        let ui = Ui::fixed(Tier::Plain, 80);
+        let (screen, log) = (Buf::default(), Buf::default());
+        let p = Arc::new(Progress::manual(&ui, Box::new(screen.clone()), false));
+        p.set_log(Box::new(log.clone()));
+        let threads: Vec<_> = (0..8)
+            .map(|t| {
+                let p = p.clone();
+                std::thread::spawn(move || {
+                    for n in 0..50 {
+                        let id = p.start(&format!("pkg-{t}-{n}"), "brew install");
+                        p.finish(id, State::Ok, "installed", None);
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        for text in [screen.text(), log.text()] {
+            let lines: Vec<&str> = text.lines().collect();
+            assert_eq!(lines.len(), 8 * 50 * 2);
+            for l in lines {
+                assert!(
+                    l.contains("pkg-") && (l.contains("brew install") || l.contains("installed")),
+                    "fragment: {l:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn silent_draws_nothing_but_still_logs() {
+        let ui = Ui::fixed(Tier::Plain, 80);
+        let log = Buf::default();
+        let p = Progress::silent(&ui);
+        p.set_log(Box::new(log.clone()));
+        p.println("run log: x");
+        assert_eq!(log.text(), "00:00 run log: x\n");
+    }
+
+    #[test]
+    fn strips_styling_from_log_lines() {
+        assert_eq!(strip_ansi("\x1b[32m✓\x1b[0m ok\x1b]9;4;0;\x07!"), "✓ ok!");
     }
 
     #[test]
