@@ -247,11 +247,20 @@ fn no_prompt_env(c: &mut Command, cmd: &Cmd) {
     }
 }
 
+/// Whether the child leads its own process group (see `run`). A command run inside
+/// [`with_tty`] stays in the terminal's foreground group: the tool it runs may call sudo,
+/// and a sudo that has to ask from a background group is stopped by `SIGTTOU`/`SIGTTIN`
+/// and hangs, silently, until the timeout.
+fn own_group(cmd: &Cmd) -> bool {
+    cmd.stdin != Stdin::Inherit && !KEEP_TTY.with(|k| k.get())
+}
+
 /// Kill the command's process group (the child leads its own group, see `run`), so a
-/// timed-out script does not leave orphans holding its output open.
+/// timed-out script does not leave orphans holding its output open. A child in the
+/// terminal's group is killed alone (by the caller).
 fn kill_tree(child: &std::process::Child, cmd: &Cmd) {
     #[cfg(unix)]
-    if cmd.stdin != Stdin::Inherit {
+    if own_group(cmd) {
         let _ = Command::new("/bin/sh")
             .arg("-c")
             .arg(format!("kill -KILL -- -{}", child.id()))
@@ -315,12 +324,13 @@ impl Runner for RealRunner {
         // passphrase prompt nobody can see. A new session has no controlling terminal, so
         // opening `/dev/tty` fails at once. It is also its own process group, which is what
         // lets a timeout kill the whole tree. Sudo (terminal-keyed credentials) only gets the
-        // process group; an interactive command keeps both (a background group reading the
-        // terminal would be stopped).
+        // process group; an interactive command, or one inside `with_tty` whose tool may
+        // prompt for a sudo password, keeps both (a background group reading the terminal
+        // would be stopped).
         #[cfg(unix)]
         if !keeps_tty(cmd) {
             detach_from_tty(&mut c);
-        } else if cmd.stdin != Stdin::Inherit {
+        } else if own_group(cmd) {
             use std::os::unix::process::CommandExt;
             c.process_group(0);
         }
@@ -408,11 +418,12 @@ mod tests {
         let plain = Cmd::new("/bin/echo");
         assert!(!keeps_tty(&plain));
         with_tty(true, || {
-            assert!(keeps_tty(&plain));
+            assert!(keeps_tty(&plain) && !own_group(&plain));
             with_tty(false, || assert!(!keeps_tty(&plain)));
             assert!(keeps_tty(&plain));
         });
         assert!(!keeps_tty(&plain));
+        assert!(own_group(&Cmd::new("sudo")));
     }
 
     #[test]
