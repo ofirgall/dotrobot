@@ -1982,6 +1982,57 @@ fn a_lock_older_than_what_is_installed_downgrades_only_with_permission() {
     assert_eq!(brew.executed()[0].ops[0].version.as_deref(), Some("1.0.0"));
 }
 
+/// Bug 31: after an upgrade the installed version of a git- or path-sourced crate is ahead of
+/// (or not comparable with) the lock row, and the plan used to raise `downgrade X -> ?`.
+fn bound_case(body: &str, installed: &str, row: &str, stale: Option<&str>) -> (Plan, usize) {
+    let sb = sandbox(&[("igrep", body)], &[]);
+    own(&sb, "igrep", "cargo", installed);
+    let mut cargo = FakeProvider::new("cargo").with_installed("igrep", installed);
+    if let Some(r) = stale {
+        cargo = cargo.with_stale("igrep", r);
+    }
+    let reg = registry(&[&cargo]);
+    let mut case = Case::new(&sb, &reg, &NoFiles);
+    case.lock.upsert(lock_row("igrep", "cargo", row));
+    let p = case.plan();
+    let downgrades = p
+        .steps
+        .iter()
+        .filter(|s| s.kind == StepKind::Downgrade)
+        .count();
+    (p, downgrades)
+}
+
+#[test]
+fn a_git_crate_ahead_of_its_lock_row_is_not_a_downgrade() {
+    let body = "[providers.cargo]\ngit = \"https://github.com/konradsz/igrep\"";
+    let (p, downgrades) = bound_case(body, "1.3.0", "1.2.0", None);
+    assert_eq!(downgrades, 0);
+    assert!(p.steps.is_empty(), "{:?}", p.steps);
+}
+
+#[test]
+fn a_path_crate_with_a_build_suffix_is_not_a_downgrade() {
+    let body = "[providers.cargo]\npath = \"crate\"";
+    let (p, downgrades) = bound_case(body, "0.1.0.1+87aa6082", "0.1.0", None);
+    assert_eq!(downgrades, 0);
+    assert!(p.steps.is_empty(), "{:?}", p.steps);
+}
+
+#[test]
+fn a_mismatched_git_crate_plans_an_upgrade_not_a_downgrade() {
+    let body = "[providers.cargo]\ngit = \"https://github.com/konradsz/igrep\"";
+    let (p, downgrades) = bound_case(
+        body,
+        "1.3.0",
+        "1.2.0",
+        Some("installed from another source"),
+    );
+    assert_eq!(downgrades, 0);
+    assert_eq!(p.steps.len(), 1);
+    assert_eq!(p.steps[0].kind, StepKind::Upgrade);
+}
+
 #[test]
 fn a_newer_install_under_a_limited_provider_is_left_alone() {
     let sb = sandbox(&[("less", "[providers.apt]")], &[]);

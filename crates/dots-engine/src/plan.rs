@@ -594,7 +594,7 @@ fn plan_packages(
             })
             .flatten()
         });
-        let decision = match inp.locks.and_then(|l| l.upgrade.get(name)) {
+        let mut decision = match inp.locks.and_then(|l| l.upgrade.get(name)) {
             Some(t) => rules::Decision {
                 step: Some(rules::Step {
                     kind: if installed_v.is_some() {
@@ -621,6 +621,23 @@ fn plan_packages(
                 exact,
             }),
         };
+        // A package built from a git or local source takes its version from the source, so a
+        // lock row cannot be restored by reinstalling: the install would build whatever the
+        // source holds now, and the plan could only say "-> ?". Moving "down" to the row is
+        // therefore never offered (it used to raise a spurious, confirmed downgrade to an
+        // unknown version after every upgrade); a pinned `rev` is the way to hold a git
+        // source, and `stale_reason` below still catches a real source mismatch.
+        let source_bound = spec.opts.contains_key("git") || spec.opts.contains_key("path");
+        if source_bound
+            && !spec.opts.contains_key("rev")
+            && !inp.locks.is_some_and(|l| l.upgrade.contains_key(name))
+            && decision
+                .step
+                .as_ref()
+                .is_some_and(|s| s.kind == Kind::Downgrade)
+        {
+            decision.step = None;
+        }
         if decision.rewrite || decision.adopt || decision.drift.is_some() {
             plan.lock.push(LockStep {
                 package: name.clone(),
@@ -661,8 +678,7 @@ fn plan_packages(
             None => None,
         };
         let Some(step) = decided else { continue };
-        // A package built from a git or local source takes its version from the source.
-        let source_bound = spec.opts.contains_key("git") || spec.opts.contains_key("path");
+        // (A source-bound package takes its version from the source.)
         let (kind, op_kind, version) = match step.kind {
             Kind::Install => (StepKind::Install, OpKind::Install, step.version),
             Kind::Upgrade => (StepKind::Upgrade, OpKind::Upgrade, step.version),
