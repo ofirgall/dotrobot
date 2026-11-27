@@ -401,7 +401,7 @@ fn package_items(l: &Loaded, dirs: &Dirs, all: bool) -> Vec<Item> {
         if choice.id == "git" {
             it.area = Area::Git;
         }
-        if let Some(why) = l.failed.get(&choice.id) {
+        if let Some(why) = l.failure(&choice.id, name) {
             it.state = State::Failed;
             it.detail = format!("{} could not be queried: {why}", choice.id);
             it.hints = vec!["dots doctor".into()];
@@ -1535,6 +1535,36 @@ mod tests {
         assert_eq!(r.data["state"], "outdated");
         assert_eq!(r.data["versions"]["latest"], "10.2.0");
         assert_eq!(r.data["provider"]["chosen"]["id"], "cargo");
+    }
+
+    /// A per-package provider instance that cannot be queried (a Windows-only package whose
+    /// script needs a shell this machine lacks) fails its own row, never the rows of the other
+    /// packages that share the provider id.
+    #[test]
+    fn a_failing_instance_fails_only_its_own_package() {
+        let fx = Fixture::new(&[
+            ("good", "[providers.script]\ncheck = \"true\"\n"),
+            (
+                "winscript",
+                "when = 'os = \"windows\"'\n[providers.script]\ncheck = \"true\"\nshell = \"pwsh\"\n",
+            ),
+            ("bad", "[providers.script]\ncheck = \"true\"\n"),
+        ]);
+        let reg = Registry::new()
+            .with_for(
+                "good",
+                Box::new(FakeProvider::new("script").with_installed("good", "1")),
+            )
+            .with_for(
+                "winscript",
+                Box::new(FakeProvider::new("script").failing_query()),
+            )
+            .with_for("bad", Box::new(FakeProvider::new("script").failing_query()));
+        let l = fx.load(reg, Fixture::facts(false), "");
+        let snap = compute(&l, &fx.dirs, false);
+        assert_eq!(state_of(&snap, "good"), State::Ok);
+        assert_eq!(state_of(&snap, "winscript"), State::NotApplicable);
+        assert_eq!(state_of(&snap, "bad"), State::Failed);
     }
 
     #[test]

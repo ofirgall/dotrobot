@@ -84,11 +84,21 @@ pub struct Loaded {
     pub registry: Registry,
     pub pctx: Ctx,
     pub installed: InstalledMap,
-    /// Providers whose `installed()` call failed, with the reason.
+    /// Provider instances whose `installed()` call failed, with the reason. A shared provider
+    /// is keyed by its id, a per-package instance (`script`, `git`) by `id/package`; read it
+    /// with [`Loaded::failure`].
     pub failed: BTreeMap<String, String>,
     pub resolution: Resolution,
     pub warnings: Vec<Diagnostic>,
     pub git: GitInfo,
+}
+
+/// Key of `Loaded::failed`: the provider id, plus the package for a per-package instance.
+fn failure_key(id: &str, pkg: Option<&str>) -> String {
+    match pkg {
+        Some(p) => format!("{id}/{p}"),
+        None => id.to_string(),
+    }
 }
 
 /// One `installed()` call per provider instance, run on a thread pool. A failing provider
@@ -97,18 +107,18 @@ pub fn installed_parallel(
     registry: &Registry,
     ctx: &Ctx,
 ) -> (InstalledMap, BTreeMap<String, String>) {
-    let jobs: Vec<(&str, &dyn dots_providers::Provider)> = registry
+    let jobs: Vec<(&str, Option<&str>, &dyn dots_providers::Provider)> = registry
         .ids()
-        .flat_map(|id| registry.instances(id).map(move |(_, p)| (id, p)))
+        .flat_map(|id| registry.instances(id).map(move |(pkg, p)| (id, pkg, p)))
         .collect();
-    let results = par_map(&jobs, |(_, p)| p.installed(ctx));
+    let results = par_map(&jobs, |(_, _, p)| p.installed(ctx));
     let mut map = InstalledMap::new();
     let mut failed = BTreeMap::new();
-    for ((id, _), r) in jobs.iter().zip(results) {
+    for ((id, pkg, _), r) in jobs.iter().zip(results) {
         match r {
             Ok(m) => map.entry((*id).to_string()).or_default().extend(m),
             Err(e) => {
-                failed.entry((*id).to_string()).or_insert(e.to_string());
+                failed.entry(failure_key(id, *pkg)).or_insert(e.to_string());
             }
         }
     }
@@ -215,6 +225,16 @@ pub struct ActivePkg<'a> {
 }
 
 impl Loaded {
+    /// Why the query of provider `id` failed for package `pkg`: its own instance, else the
+    /// shared one. One package's failing script never marks another package's.
+    pub fn failure(&self, id: &str, pkg: &str) -> Option<&String> {
+        if self.registry.has_scoped(id, pkg) {
+            self.failed.get(&failure_key(id, Some(pkg)))
+        } else {
+            self.failed.get(id)
+        }
+    }
+
     pub fn active(&self) -> impl Iterator<Item = ActivePkg<'_>> {
         self.resolution.active().map(|res| {
             let choice = res.chosen_provider();

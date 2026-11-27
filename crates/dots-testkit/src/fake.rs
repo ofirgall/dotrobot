@@ -27,6 +27,8 @@ struct State {
     partial: bool,
     /// Installed packages `stale_reason` reports (until an install or upgrade of them runs).
     stale: BTreeMap<String, String>,
+    /// `list` (the `installed` query) fails.
+    query_fails: bool,
 }
 
 /// Cloneable handle; clones share state, so tests keep one to inspect after handing another over.
@@ -56,6 +58,9 @@ impl Runner for FakeBackend {
         let verb = cmd.args.first().map(String::as_str).unwrap_or_default();
         if verb == "list" {
             st.installed_calls += 1;
+            if st.query_fails {
+                return Ok(Output::fail(1, "fake: list failed"));
+            }
             let lines: String = st
                 .installed
                 .iter()
@@ -215,6 +220,12 @@ impl FakeProvider {
             .unwrap()
             .stale
             .insert(name.into(), reason.into());
+        self
+    }
+
+    /// The `installed` query fails (the provider "could not be queried").
+    pub fn failing_query(self) -> Self {
+        self.state.lock().unwrap().query_fails = true;
         self
     }
 

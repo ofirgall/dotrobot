@@ -95,8 +95,8 @@ fn providers(l: &Loaded) -> Vec<Finding> {
             }
         }
         if let Some(c) = &sel.chosen
-            && let Some(why) = l.failed.get(&c.id)
-            && seen.insert(format!("{}:failed", c.id))
+            && let Some(why) = l.failure(&c.id, &res.name)
+            && seen.insert(format!("{}:{}:failed", c.id, why))
         {
             out.push(finding(
                 &c.id,
