@@ -182,8 +182,10 @@ Parse modes for `installed`:
   an object (name to version string, or to an object with `version`); `.` is the root;
 - `regex:<re>`: applied to each line, with named groups `name` and `version` (or groups 1 and 2).
 
-Placeholders are filled from the spec and the facts: `{name}`, `{source}` (the package's
-`source`, or its name), `{version}`, `{version|latest}` (a default when no version is requested;
+Placeholders are filled from the spec and the facts: `{name}` (the provider-native name: the
+package's `[providers.<id>] name`, else the package name), `{source}` (the `source` key of the
+package's `[providers.<id>]` block, else the spec-level source, else the native name; in
+`{names}` each entry follows the same rule), `{version}`, `{version|latest}` (a default when no version is requested;
 a bare `{version}` without one is an error), `{bin}`, `{names}` (batch only), `{os}`, `{arch}`,
 `{distro}`, `{home}`, `{user}` and `{hostname}`. Other braces, such as an awk body, are left alone.
 

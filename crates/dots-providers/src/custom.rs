@@ -141,6 +141,15 @@ impl CustomDef {
     }
 }
 
+/// What `{source}` (and each entry of `{names}`) stands for: the `source` key of the package's
+/// `[providers.<id>]` block (it reaches the spec as the `source` option), else the spec-level
+/// source, else the native name.
+fn source_of(spec: &Spec) -> &str {
+    spec.get("source")
+        .or(spec.source.as_deref())
+        .unwrap_or(&spec.name)
+}
+
 /// Fill placeholders. `names` is only set for batched installs.
 fn expand(tpl: &str, vars: &BTreeMap<&str, String>, version: Option<&str>) -> Result<String> {
     let mut out = String::new();
@@ -269,12 +278,10 @@ impl CustomProvider {
 
     fn op_vars(&self, spec: &Spec) -> BTreeMap<&'static str, String> {
         let mut v = self.fact_vars();
+        // `name` is the provider-native name (the block's `name`, else the package's).
         v.insert("name", spec.name.clone());
         v.insert("bin", spec.name.clone());
-        v.insert(
-            "source",
-            spec.source.clone().unwrap_or_else(|| spec.name.clone()),
-        );
+        v.insert("source", source_of(spec).to_string());
         v
     }
 
@@ -454,6 +461,7 @@ impl Provider for CustomProvider {
                     let mut vars = self.fact_vars();
                     vars.insert("name", name.clone());
                     vars.insert("bin", name.clone());
+                    // The listing only knows names: that is all a `version` command gets.
                     vars.insert("source", name.clone());
                     let line = expand(tpl, &vars, None)?;
                     let o = ctx.runner.run(&self.sh(ctx, &line))?;
@@ -520,7 +528,7 @@ impl Provider for CustomProvider {
             let mut vars = self.fact_vars();
             let names: Vec<String> = ops
                 .iter()
-                .map(|o| shell_quote(o.spec.source.as_deref().unwrap_or(&o.spec.name)))
+                .map(|o| shell_quote(source_of(&o.spec)))
                 .collect();
             vars.insert("names", names.join(" "));
             let line = expand(&self.def.install, &vars, None)?;
