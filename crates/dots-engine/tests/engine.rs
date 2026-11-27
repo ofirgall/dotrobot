@@ -2009,6 +2009,9 @@ fn a_git_crate_ahead_of_its_lock_row_is_not_a_downgrade() {
     let (p, downgrades) = bound_case(body, "1.3.0", "1.2.0", None);
     assert_eq!(downgrades, 0);
     assert!(p.steps.is_empty(), "{:?}", p.steps);
+    // Bug 34: and its row follows what is installed, instead of staying behind as a drift.
+    assert!(p.lock[0].rewrite && !p.lock[0].has_step, "{:?}", p.lock);
+    assert_eq!(p.lock[0].to.as_deref(), Some("1.3.0"));
 }
 
 #[test]
@@ -2017,6 +2020,8 @@ fn a_path_crate_with_a_build_suffix_is_not_a_downgrade() {
     let (p, downgrades) = bound_case(body, "0.1.0.1+87aa6082", "0.1.0", None);
     assert_eq!(downgrades, 0);
     assert!(p.steps.is_empty(), "{:?}", p.steps);
+    assert!(p.lock[0].rewrite && !p.lock[0].has_step, "{:?}", p.lock);
+    assert_eq!(p.lock[0].to.as_deref(), Some("0.1.0.1+87aa6082"));
 }
 
 #[test]
@@ -2043,10 +2048,35 @@ fn a_newer_install_under_a_limited_provider_is_left_alone() {
     let reg = registry(&[&apt]);
     let mut case = Case::new(&sb, &reg, &NoFiles);
     case.lock.upsert(lock_row("less", "apt", "8.7.0"));
-    assert!(
-        case.plan().steps.is_empty(),
-        "apt cannot go down; status reports drift"
-    );
+    let p = case.plan();
+    assert!(p.steps.is_empty(), "apt cannot go down");
+    // Bug 34: the row is brought up to what is installed, so one `apply` clears the difference
+    // `status` shows (it used to be a drift that nothing resolved).
+    assert!(p.lock[0].rewrite && !p.lock[0].has_step, "{:?}", p.lock);
+    let r = case.apply(true);
+    assert_eq!(r.status, Status::Done, "{:#?}", r.errors);
+    assert!(apt.executed().is_empty());
+    assert_eq!(r.lock_updates[0].version.as_deref(), Some("8.7.1"));
+}
+
+/// Bug 34: a brew-like provider (cannot install an older version) holds a newer version than
+/// the row. Apply records it in the lock; once recorded the plan has nothing left to say.
+#[test]
+fn a_newer_brew_install_rewrites_its_stale_lock_row() {
+    let sb = sandbox(&[("gh", "[providers.brew]")], &[]);
+    own(&sb, "gh", "brew", "2.105.0");
+    let brew = FakeProvider::new("brew")
+        .with_caps(limited_caps())
+        .with_installed("gh", "2.105.0");
+    let reg = registry(&[&brew]);
+    let mut case = Case::new(&sb, &reg, &NoFiles);
+    case.lock.upsert(lock_row("gh", "brew", "2.104.0"));
+    let p = case.plan();
+    assert!(p.steps.is_empty());
+    assert_eq!(p.lock[0].to.as_deref(), Some("2.105.0"));
+    let mut case2 = Case::new(&sb, &reg, &NoFiles);
+    case2.lock.upsert(lock_row("gh", "brew", "2.105.0"));
+    assert!(case2.plan().lock.is_empty());
 }
 
 #[test]

@@ -24,6 +24,9 @@ struct Machine {
     calls: Vec<String>,
     /// `sudo` itself fails (no credential).
     sudo_fails: bool,
+    /// `defaults export` of a domain nobody wrote fails ("Domain ... does not exist") instead of
+    /// printing an empty dict (older macOS, `defaults read` wording).
+    strict_domains: bool,
 }
 
 #[derive(Default)]
@@ -98,6 +101,11 @@ impl Runner for Fake {
         let prog = a[0].rsplit(['/', '\\']).next().unwrap().to_string();
         let args = &a[1..];
         Ok(match (prog.as_str(), args.first().map(String::as_str)) {
+            ("defaults", Some("export"))
+                if m.strict_domains && !m.defaults.contains_key(&scope(&args[1])) =>
+            {
+                Output::fail(1, &format!("Domain {} does not exist", args[1]))
+            }
             ("defaults", Some("export")) => {
                 let d = m
                     .defaults
@@ -1019,6 +1027,67 @@ fn status_of_a_root_entry_without_a_cached_sudo_is_unknown_not_failed() {
     let user = decl(KEYREPEAT, "macos");
     f.0.lock().unwrap().sudo_fails = false;
     assert_ne!(status(&sys(&f), &l, &user)[0].health, Health::Unknown);
+}
+
+/// Bug 36: a key (or a whole domain) nobody wrote is unset, not unreadable: it differs from the
+/// declared value, so the setting is `missing` and `apply` plans the write.
+#[test]
+fn a_key_that_does_not_exist_reads_as_unset_not_unknown() {
+    const UA: &str =
+        "[[defaults]]\ndomain = \"com.apple.universalaccess\"\nkey = \"cursorFill\"\nvalue = 1\n";
+    let (_t, l) = fresh();
+    for strict in [false, true] {
+        let f = Fake::default();
+        f.0.lock().unwrap().strict_domains = strict;
+        let d = decl(UA, "macos");
+        // the domain does not exist at all
+        let rows = status(&sys(&f), &l, &d);
+        assert_eq!(rows[0].health, Health::Missing, "strict={strict}");
+        assert_eq!(rows[0].observed.as_deref(), Some("unset"));
+        let (steps, _) = plan(&sys(&f), &d, &[]).unwrap();
+        assert_eq!(steps.len(), 1, "strict={strict}");
+        // the domain exists, the key does not
+        f.set_defaults("com.apple.universalaccess", json!({ "other": 1 }));
+        let rows = status(&sys(&f), &l, &d);
+        assert_eq!(rows[0].health, Health::Missing, "strict={strict}");
+        assert_eq!(rows[0].observed.as_deref(), Some("unset"));
+    }
+}
+
+/// A root entry's domain that does not exist is unset too, once root can be read.
+#[test]
+fn a_missing_root_domain_is_unset_and_an_unreadable_one_stays_unknown() {
+    let (_t, l) = fresh();
+    let f = Fake::default();
+    f.0.lock().unwrap().strict_domains = true;
+    let d = decl(ROOT_KEY, "macos");
+    assert_eq!(status(&sys(&f), &l, &d)[0].health, Health::Missing);
+    // no credential: root's preferences cannot be read, which is not "unset"
+    f.0.lock().unwrap().sudo_fails = true;
+    let rows = status(&sys_with(&f, Sudo::Unavailable), &l, &d);
+    assert_eq!(rows[0].health, Health::Unknown);
+}
+
+/// Real read failures stay failures: only a missing domain is "unset".
+#[test]
+fn a_permission_error_reading_defaults_is_still_a_failure() {
+    #[derive(Debug)]
+    struct Denied;
+    impl Runner for Denied {
+        fn run(&self, _: &Cmd) -> PResult<Output> {
+            Ok(Output::fail(1, "Operation not permitted"))
+        }
+    }
+    let s = Sys {
+        runner: &Denied,
+        tools: Tools::default(),
+        sudo: Sudo::Unneeded,
+    };
+    let (_t, l) = fresh();
+    assert_eq!(
+        status(&s, &l, &decl(KEYREPEAT, "macos"))[0].health,
+        Health::Failed
+    );
 }
 
 // ------------------------------------------------------------------ xdg tool not installed yet

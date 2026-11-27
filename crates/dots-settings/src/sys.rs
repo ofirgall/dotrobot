@@ -317,6 +317,12 @@ fn read_domain(sys: &Sys, domain: &str, root: bool) -> Result<Map<String, Value>
         if root && sys.sudo != Sudo::Unneeded && out.stderr.trim_start().starts_with("sudo:") {
             return Err(NEEDS_SUDO_READ.to_string());
         }
+        // A domain nobody wrote yet has no keys: every key of it is unset, not unreadable.
+        // (`defaults export` normally prints an empty dict for it; `defaults read` and some
+        // macOS versions say "... does not exist" instead.)
+        if out.stderr.contains("does not exist") {
+            return Ok(Map::new());
+        }
         let who = if root { "as root " } else { "" };
         return Err(format!(
             "`defaults export {domain}` {who}failed: {}",
