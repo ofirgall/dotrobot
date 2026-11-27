@@ -4,6 +4,58 @@
   "properties": {
     "data": {
       "properties": {
+        "sudo": {
+          "description": "how sudo steps were handled: `skip` (plain apply), `with` (--with-sudo) or `only` (--sudo-only)",
+          "properties": {
+            "mode": {
+              "enum": [
+                "skip",
+                "with",
+                "only"
+              ]
+            },
+            "not_applied_ordinary": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "skipped": {
+              "description": "steps not applied because they need sudo (or depend on one that was not applied), with the reason",
+              "items": {
+                "properties": {
+                  "kind": {
+                    "enum": [
+                      "package",
+                      "setting"
+                    ]
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "provider": {
+                    "type": "string"
+                  },
+                  "reason": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name",
+                  "kind",
+                  "provider",
+                  "reason"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "mode",
+            "skipped",
+            "not_applied_ordinary"
+          ],
+          "type": "object"
+        },
         "upgrade": {
           "properties": {
             "commit": {

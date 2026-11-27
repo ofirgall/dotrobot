@@ -71,6 +71,8 @@ pub fn dispatch(cmd: Option<&Cmd>, ctx: &Context) -> Report {
             all,
             provider,
             commit,
+            with_sudo,
+            sudo_only,
         }) => crate::upgrade::run(
             ctx,
             &crate::upgrade::UpgradeArgs {
@@ -78,6 +80,7 @@ pub fn dispatch(cmd: Option<&Cmd>, ctx: &Context) -> Report {
                 all: *all,
                 provider: provider.as_deref(),
                 commit: *commit,
+                sudo: crate::reconcile::sudo_policy(*with_sudo, *sudo_only),
             },
         ),
         Some(Cmd::Pin {
@@ -150,13 +153,7 @@ pub fn dispatch(cmd: Option<&Cmd>, ctx: &Context) -> Report {
                 dry_run: *dry_run,
                 allow_downgrade: *allow_downgrade,
                 root: root.clone(),
-                sudo: if *sudo_only {
-                    dots_engine::SudoPolicy::Only
-                } else if *with_sudo {
-                    dots_engine::SudoPolicy::With
-                } else {
-                    dots_engine::SudoPolicy::Skip
-                },
+                sudo: crate::reconcile::sudo_policy(*with_sudo, *sudo_only),
             },
         ),
         Some(Cmd::Config { action }) => crate::config_cmd::run(ctx, action),

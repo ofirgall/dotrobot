@@ -171,7 +171,9 @@ pub enum Cmd {
     #[command(override_usage = "dots facts")]
     Facts,
     /// Upgrade packages
-    #[command(override_usage = "dots upgrade [<pkg>...|--all] [--provider <id>] [--commit]")]
+    #[command(
+        override_usage = "dots upgrade [<pkg>...|--all] [--provider <id>] [--commit] [--with-sudo|--sudo-only]"
+    )]
     Upgrade {
         #[arg(conflicts_with = "all")]
         pkgs: Vec<String>,
@@ -181,6 +183,12 @@ pub enum Cmd {
         provider: Option<String>,
         #[arg(long)]
         commit: bool,
+        /// Also run the steps that need sudo, asking for the password once
+        #[arg(long, conflicts_with = "sudo_only")]
+        with_sudo: bool,
+        /// Run only the steps that need sudo (and their hooks), asking for the password once
+        #[arg(long)]
+        sudo_only: bool,
     },
     /// Pin a package to a version
     #[command(override_usage = "dots pin <pkg> [<version>] [--commit]")]

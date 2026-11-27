@@ -68,6 +68,8 @@ Steps that need your password are opt-in. A plain `dots apply` never asks for it
 - `dots apply --sudo-only`: only the sudo steps (and their install hooks), password once.
 - `dots apply --with-sudo`: everything, password once at the start.
 
+`dots upgrade` follows the same rule: a plain `dots upgrade` skips sudo steps and warns, `dots upgrade --with-sudo` and `dots upgrade --sudo-only` mean what they mean on apply.
+
 A step needs sudo when a provider runs it as root (apt, a script with `needs_root = true`), when it is a `root = true` system setting, or when its package declares `requires_sudo = true` (for a brew cask whose installer asks for the password: a `.pkg`, a kernel extension). `dots plan` marks these steps and counts them. When `dots` already runs as root, sudo steps are ordinary and a plain apply runs them.
 
 Anything can have platform-specific sections, which go from general to specific: `linux › debian › ubuntu › ubuntu-22.04` (plus CPU architecture and WSL). `[platform.ubuntu]` applies to every Ubuntu, `[platform."ubuntu-22.04"]` overrides just that release, and the most specific one wins.

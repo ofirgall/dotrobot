@@ -1442,7 +1442,7 @@ A **sudo step** is one `apply` must not run unasked: (a) any provider action mar
 | `--with-sudo` | run | applied | primed once at the start; if that fails, root actions fail with `sudo-failed` as before |
 | `--sudo-only` | the only steps run, plus their `pre_install`/`post_install` hooks and the root settings | not applied (one line gives their count); a sudo step whose ordinary dependency is still missing is skipped with "run `dots apply` first" | primed once |
 
-The engine pre-marks skipped batches dead (`StepStatus::SkippedSudo`), and its existing dependent-skipping fixpoint carries the skip to everything downstream. Because a skipped step has no `Ok` result, its package's files, settings, services and hooks are left alone exactly like those of a failed install, and nothing is written to `state.json`, the lock or the journal. A skip is not a failure: the run is `done` with exit code 0, and ends with a warning that lists every step not applied with its reason. When `dots` runs as root (`Sudo::Unneeded`) sudo steps are ordinary: nothing is primed, skipped or warned about. `dots plan` marks sudo steps with `sudo` and its "Heads up" says that N steps need sudo and a plain apply skips them.
+The engine pre-marks skipped batches dead (`StepStatus::SkippedSudo`), and its existing dependent-skipping fixpoint carries the skip to everything downstream. Because a skipped step has no `Ok` result, its package's files, settings, services and hooks are left alone exactly like those of a failed install, and nothing is written to `state.json`, the lock or the journal. A skip is not a failure: the run is `done` with exit code 0, and ends with a warning that lists every step not applied with its reason. `dots upgrade` is the same engine run (`apply_inner` with a planner) and takes the same flags through the same `SudoPolicy` (`reconcile::sudo_policy`): plain `dots upgrade` skips sudo steps and their dependents, warns (the warning names the command that ran) and exits 0; its `--json` carries the same `sudo` block. When `dots` runs as root (`Sudo::Unneeded`) sudo steps are ordinary: nothing is primed, skipped or warned about. `dots plan` marks sudo steps with `sudo` and its "Heads up" says that N steps need sudo and a plain apply skips them.
 
 ### 14.2 Commands (complete v1 surface)
 
@@ -1451,7 +1451,7 @@ dots init [--from <remote>]           # create dots.toml + machine.toml; optiona
 dots apply [pkg|bundle...] [--files-only|--packages-only] [--with-sudo|--sudo-only] [--yes] [--dry-run] [--root P] [--home D]
 dots plan  [...same selectors]
 dots status | outdated | why | which | bins | doctor | facts
-dots upgrade [pkg...|--all] [--provider X] [--commit]
+dots upgrade [pkg...|--all] [--provider X] [--commit] [--with-sudo|--sudo-only]
 dots pin <pkg> [ver] [--commit]
 dots unpin <pkg> [--commit]
 dots remove <pkg> [--commit]          # removes from bundles + uninstalls + unlinks (asks)

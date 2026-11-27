@@ -315,6 +315,18 @@ fn stop_flag() -> Arc<AtomicBool> {
         .clone()
 }
 
+/// The sudo mode `--with-sudo` / `--sudo-only` select (they conflict); neither skips sudo steps.
+/// Shared by `apply` and `upgrade`.
+pub fn sudo_policy(with_sudo: bool, sudo_only: bool) -> dots_engine::SudoPolicy {
+    if sudo_only {
+        dots_engine::SudoPolicy::Only
+    } else if with_sudo {
+        dots_engine::SudoPolicy::With
+    } else {
+        dots_engine::SudoPolicy::Skip
+    }
+}
+
 pub fn apply_cmd(ctx: &Context, a: &ApplyArgs) -> Report {
     apply_inner(ctx, a, "apply", None).0
 }
@@ -488,7 +500,8 @@ fn to_report(
         }
     };
     warnings.extend(r.warnings.iter().cloned());
-    let mut report = crate::views::apply_report(Report::ok(command, r.to_json()), &r, backup_dir);
+    let mut report =
+        crate::views::apply_report(Report::ok(command, r.to_json()), &r, backup_dir, command);
     report.exit = exit;
     report.errors = r.errors.clone();
     report.warnings = warnings;

@@ -18,7 +18,7 @@ Usage: dots doctor
 
 Usage: dots facts
 
-Usage: dots upgrade [<pkg>...|--all] [--provider <id>] [--commit]
+Usage: dots upgrade [<pkg>...|--all] [--provider <id>] [--commit] [--with-sudo|--sudo-only]
 
 Usage: dots pin <pkg> [<version>] [--commit]
 

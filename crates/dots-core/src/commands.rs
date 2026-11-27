@@ -301,12 +301,40 @@ fn lint_data_schema() -> Value {
     })
 }
 
+/// The `sudo` block of an `apply` or `upgrade` run.
+fn sudo_data_schema() -> Value {
+    json!({
+        "type": "object",
+        "description": "how sudo steps were handled: `skip` (plain apply), `with` (--with-sudo) or `only` (--sudo-only)",
+        "required": ["mode", "skipped", "not_applied_ordinary"],
+        "properties": {
+            "mode": { "enum": ["skip", "with", "only"] },
+            "skipped": {
+                "type": "array",
+                "description": "steps not applied because they need sudo (or depend on one that was not applied), with the reason",
+                "items": {
+                    "type": "object",
+                    "required": ["name", "kind", "provider", "reason"],
+                    "properties": {
+                        "name": { "type": "string" },
+                        "kind": { "enum": ["package", "setting"] },
+                        "provider": { "type": "string" },
+                        "reason": { "type": "string" }
+                    }
+                }
+            },
+            "not_applied_ordinary": { "type": "integer", "minimum": 0 }
+        }
+    })
+}
+
 /// `dots upgrade` data: the `apply` run that moved the packages (when one ran), plus what moved
 /// and what was left alone and why.
 fn upgrade_data_schema() -> Value {
     json!({
         "type": "object",
         "properties": {
+            "sudo": sudo_data_schema(),
             "upgrade": {
                 "type": "object",
                 "required": ["targets", "skipped"],
@@ -631,29 +659,7 @@ fn apply_data_schema() -> Value {
                 "enum": ["done", "failed", "interrupted", "dry-run",
                          "confirmation-required", "declined", "plan-failed"]
             },
-            "sudo": {
-                "type": "object",
-                "description": "how sudo steps were handled: `skip` (plain apply), `with` (--with-sudo) or `only` (--sudo-only)",
-                "required": ["mode", "skipped", "not_applied_ordinary"],
-                "properties": {
-                    "mode": { "enum": ["skip", "with", "only"] },
-                    "skipped": {
-                        "type": "array",
-                        "description": "steps not applied because they need sudo (or depend on one that was not applied), with the reason",
-                        "items": {
-                            "type": "object",
-                            "required": ["name", "kind", "provider", "reason"],
-                            "properties": {
-                                "name": { "type": "string" },
-                                "kind": { "enum": ["package", "setting"] },
-                                "provider": { "type": "string" },
-                                "reason": { "type": "string" }
-                            }
-                        }
-                    },
-                    "not_applied_ordinary": { "type": "integer", "minimum": 0 }
-                }
-            },
+            "sudo": sudo_data_schema(),
             "run": { "type": "string" },
             "dry_run": { "type": "boolean" },
             "plan": plan_data_schema(),

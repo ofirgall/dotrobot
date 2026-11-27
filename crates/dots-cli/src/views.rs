@@ -385,7 +385,7 @@ pub fn sudo_heads_up(n: usize) -> String {
 }
 
 /// The end-of-run warning of what `apply` left undone because of sudo, as blocks.
-fn sudo_skipped_blocks(r: &ApplyReport) -> Vec<Block> {
+fn sudo_skipped_blocks(r: &ApplyReport, command: &str) -> Vec<Block> {
     let n = r.sudo_skipped.len();
     let mut out = Vec::new();
     if n > 0 {
@@ -415,13 +415,13 @@ fn sudo_skipped_blocks(r: &ApplyReport) -> Vec<Block> {
             );
         }
         out.push(Block::Table(t));
-        out.push(Block::hint(
-            "dots apply --sudo-only   (or dots apply --with-sudo for everything)",
-        ));
+        out.push(Block::hint(format!(
+            "dots {command} --sudo-only   (or dots {command} --with-sudo for everything)"
+        )));
     }
     if r.sudo_unselected > 0 {
         out.push(Block::text(format!(
-            "{} not applied (--sudo-only runs only the sudo steps); run `dots apply` for them",
+            "{} not applied (--sudo-only runs only the sudo steps); run `dots {command}` for them",
             plural(r.sudo_unselected, "other step", "other steps")
         )));
     }
@@ -457,7 +457,12 @@ fn dur(ms: u64) -> String {
 }
 
 /// `dots apply`: the plan when nothing ran, else what happened.
-pub fn apply_report(mut report: Report, r: &ApplyReport, backup_dir: &str) -> Report {
+pub fn apply_report(
+    mut report: Report,
+    r: &ApplyReport,
+    backup_dir: &str,
+    command: &str,
+) -> Report {
     let plan = &r.plan;
     match r.status {
         Status::PlanFailed => return report,
@@ -763,7 +768,7 @@ pub fn apply_report(mut report: Report, r: &ApplyReport, backup_dir: &str) -> Re
     if !r.todos.is_empty() {
         report.push(Block::hint("dots todo"));
     }
-    for b in sudo_skipped_blocks(r) {
+    for b in sudo_skipped_blocks(r, command) {
         report.push(b);
     }
     if r.status == Status::Interrupted {

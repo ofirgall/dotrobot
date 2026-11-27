@@ -392,6 +392,87 @@ fn upgrade_stays_inside_a_prefix_and_rewrites_the_lock_and_journal() {
     );
 }
 
+/// `fd` (a sudo step: `requires_sudo`) and `bat` (ordinary), both installed and behind.
+fn sudo_upgrade_sandbox() -> Sb {
+    let b = sandbox(&[script("fd", "requires_sudo = true"), script("bat", "")]);
+    let key = machine_key(&b);
+    seed_lock(&b, &[("fd", &key, "1.0.0"), ("bat", &key, "1.0.0")]);
+    set(&b, "fd", Some("1.0.0"), "1.1.0");
+    set(&b, "bat", Some("1.0.0"), "1.1.0");
+    b
+}
+
+#[test]
+fn plain_upgrade_skips_sudo_steps_warns_and_exits_zero() {
+    let b = sudo_upgrade_sandbox();
+    let o = run(&b, &["upgrade", "fd", "bat"]);
+    assert_eq!(o.code, 0, "{}{}", o.stdout, o.stderr);
+    assert!(
+        o.stdout.contains("1 step needs sudo and was not applied")
+            && o.stdout.contains("dots upgrade --sudo-only")
+            && o.stdout.contains("dots upgrade --with-sudo"),
+        "{}",
+        o.stdout
+    );
+    assert_eq!(ver(&b, "bat"), "1.1.0");
+    assert_eq!(ver(&b, "fd"), "1.0.0");
+    // Nothing skipped is recorded.
+    let lock = lock_text(&b);
+    let row = |n: &str| {
+        lock.split("[[pkg]]")
+            .find(|r| r.contains(&format!("name = \"{n}\"")))
+            .unwrap_or_default()
+            .to_string()
+    };
+    assert!(row("fd").contains("version = \"1.0.0\""), "{lock}");
+    assert!(row("bat").contains("version = \"1.1.0\""), "{lock}");
+    assert!(
+        journal(&b)
+            .iter()
+            .all(|e| !(e["op"] == "upgrade" && e["pkg"] == "fd"))
+    );
+    let o = run(&b, &["upgrade", "fd", "bat", "--json"]);
+    assert_eq!(o.code, 0, "{}{}", o.stdout, o.stderr);
+    let d = json(&o);
+    validate("upgrade", &d);
+    assert_eq!(d["data"]["sudo"]["mode"], "skip");
+    assert_eq!(d["data"]["sudo"]["skipped"][0]["name"], "fd");
+}
+
+#[test]
+fn upgrade_sudo_only_runs_just_the_sudo_steps() {
+    let b = sudo_upgrade_sandbox();
+    let o = run(&b, &["upgrade", "fd", "bat", "--sudo-only", "--json"]);
+    assert_eq!(o.code, 0, "{}{}", o.stdout, o.stderr);
+    let d = json(&o);
+    validate("upgrade", &d);
+    assert_eq!(d["data"]["sudo"]["mode"], "only");
+    assert_eq!(ver(&b, "fd"), "1.1.0");
+    assert_eq!(ver(&b, "bat"), "1.0.0");
+}
+
+#[test]
+fn upgrade_with_sudo_runs_everything() {
+    let b = sudo_upgrade_sandbox();
+    let o = run(&b, &["upgrade", "fd", "bat", "--with-sudo", "--json"]);
+    assert_eq!(o.code, 0, "{}{}", o.stdout, o.stderr);
+    let d = json(&o);
+    validate("upgrade", &d);
+    assert_eq!(d["data"]["sudo"]["mode"], "with");
+    assert!(d["data"]["sudo"]["skipped"].as_array().unwrap().is_empty());
+    assert_eq!(ver(&b, "fd"), "1.1.0");
+    assert_eq!(ver(&b, "bat"), "1.1.0");
+}
+
+#[test]
+fn upgrade_sudo_flags_conflict() {
+    let b = sudo_upgrade_sandbox();
+    let o = run(&b, &["upgrade", "fd", "--with-sudo", "--sudo-only"]);
+    assert_eq!(o.code, 64, "{}{}", o.stdout, o.stderr);
+    assert!(o.stderr.contains("cannot be used with"), "{}", o.stderr);
+    assert_eq!(ver(&b, "fd"), "1.0.0");
+}
+
 #[test]
 fn upgrade_rewrites_only_this_platforms_rows() {
     let b = sandbox(&[script("fd", "")]);
