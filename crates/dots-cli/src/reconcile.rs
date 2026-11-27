@@ -203,6 +203,45 @@ pub(crate) fn prepare(
     })
 }
 
+/// Live offers for the planner, told up front which (provider, spec) pairs it will ask
+/// about (the lock-drift and range checks of `plan_packages`), so each shared provider is
+/// queried once with all of them instead of once per package.
+fn offers_for<'a>(
+    p: &'a Prepared,
+    pctx: &'a dots_providers::Ctx,
+    upgrading: &BTreeSet<String>,
+) -> providers::LiveOffers<'a> {
+    let mut cands = Vec::new();
+    for pr in p.resolution.active() {
+        let Some(choice) = pr.chosen_provider() else {
+            continue;
+        };
+        if upgrading.contains(&pr.name) {
+            continue;
+        }
+        let exact = p
+            .registry
+            .get_for(&choice.id, &pr.name)
+            .map(|x| x.caps().exact_version);
+        let platform = dots_lock::platform_for(&choice.id, &p.machine_key);
+        let locked = p
+            .lock
+            .pkg(&pr.name, &platform)
+            .is_some_and(|r| r.provider == choice.id);
+        if !(pr.wanted.is_range() || (locked && exact != Some(dots_providers::Support::Yes))) {
+            continue;
+        }
+        let pkg = p.rc.repo.packages.get(&pr.name);
+        let cfg = pkg.and_then(|k| k.providers.get(&choice.id));
+        cands.push(providers::OfferCandidate {
+            provider: choice.id.clone(),
+            pkg: pr.name.clone(),
+            spec: dots_resolve::spec_for_in(&choice.native_name, cfg, pkg.map(|k| k.dir.as_path())),
+        });
+    }
+    providers::LiveOffers::with_candidates(&p.registry, pctx, cands)
+}
+
 // ------------------------------------------------------------------------------ plan
 
 pub fn plan_cmd(ctx: &Context, args: &Args, check: bool) -> Report {
@@ -222,7 +261,7 @@ pub fn plan_cmd(ctx: &Context, args: &Args, check: bool) -> Report {
     let hooks = hooks_phase(&p, &ctx.dirs, &hook_settings);
     let scope = args.scope();
     let unreviewed = BTreeSet::new();
-    let offers = providers::LiveOffers::new(&p.registry, &p.pctx);
+    let offers = offers_for(&p, &p.pctx, &BTreeSet::new());
     let no_upgrade = BTreeMap::new();
     let locks = dots_engine::LockInputs {
         lock: &p.lock,
@@ -399,7 +438,7 @@ pub(crate) fn apply_inner(
     let services = services_phase(&p, &pctx);
     let hook_settings = crate::config_cmd::settings_for(&p.rc);
     let hooks = hooks_phase(&p, &ctx.dirs, &hook_settings);
-    let offers = providers::LiveOffers::new(&p.registry, &pctx);
+    let offers = offers_for(&p, &pctx, &upgrade.keys().cloned().collect());
     let locks = dots_engine::LockInputs {
         lock: &p.lock,
         machine_key: &p.machine_key,

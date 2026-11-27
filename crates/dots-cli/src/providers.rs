@@ -451,21 +451,79 @@ pub fn installed(registry: &Registry, ctx: &Ctx) -> InstalledMap {
     out
 }
 
+/// One (provider, package) the resolver, planner or upgrade may ask `offered()` about.
+pub struct OfferCandidate {
+    pub provider: String,
+    pub pkg: String,
+    pub spec: dots_providers::Spec,
+}
+
 /// What providers offer, asked live and remembered for the run. Backs constraint-aware
 /// provider selection and drift notes; a provider that cannot answer offers nothing (and is
 /// then assumed able to deliver).
+///
+/// Asking costs a provider call (`brew info` is about a second per call), so the callers
+/// announce the candidates they will ask about ([`LiveOffers::with_candidates`]). The first
+/// miss for a shared provider instance then asks `latest()` once for every announced
+/// candidate of that instance. Per-package instances (script, git, custom) are asked per
+/// package. If the batch fails, each spec is asked on its own so one bad name does not
+/// blank the rest.
 pub struct LiveOffers<'a> {
     registry: &'a Registry,
     ctx: &'a Ctx,
+    candidates: Vec<OfferCandidate>,
     seen: std::cell::RefCell<std::collections::BTreeMap<(String, String), Option<String>>>,
+    /// Shared provider ids whose candidates were already fetched.
+    fetched: std::cell::RefCell<std::collections::BTreeSet<String>>,
 }
 
 impl<'a> LiveOffers<'a> {
     pub fn new(registry: &'a Registry, ctx: &'a Ctx) -> Self {
+        Self::with_candidates(registry, ctx, Vec::new())
+    }
+
+    pub fn with_candidates(
+        registry: &'a Registry,
+        ctx: &'a Ctx,
+        candidates: Vec<OfferCandidate>,
+    ) -> Self {
         LiveOffers {
             registry,
             ctx,
+            candidates,
             seen: Default::default(),
+            fetched: Default::default(),
+        }
+    }
+
+    /// Ask one provider instance about `specs`, remembering every answer. One `latest()`
+    /// call; when it fails, one per spec.
+    fn fetch(
+        &self,
+        provider: &str,
+        p: &dyn dots_providers::Provider,
+        specs: &[dots_providers::Spec],
+    ) {
+        let mut seen = self.seen.borrow_mut();
+        let mut record =
+            |spec: &dots_providers::Spec,
+             m: &std::collections::BTreeMap<String, dots_providers::Latest>| {
+                seen.insert(
+                    (provider.to_string(), spec.name.clone()),
+                    m.get(&spec.name).map(|l| l.version.clone()),
+                );
+            };
+        match p.latest(self.ctx, specs) {
+            Ok(m) => specs.iter().for_each(|sp| record(sp, &m)),
+            Err(_) if specs.len() > 1 => {
+                for sp in specs {
+                    let m = p
+                        .latest(self.ctx, std::slice::from_ref(sp))
+                        .unwrap_or_default();
+                    record(sp, &m);
+                }
+            }
+            Err(_) => specs.iter().for_each(|sp| record(sp, &Default::default())),
         }
     }
 }
@@ -482,12 +540,31 @@ impl dots_resolve::OfferSource for LiveOffers<'_> {
         if let Some(v) = self.seen.borrow().get(&key) {
             return v.clone();
         }
-        let answer = self
-            .registry
-            .get_for(provider, pkg)
-            .and_then(|p| p.latest(self.ctx, std::slice::from_ref(spec)).ok())
-            .and_then(|m| m.get(native).map(|l| l.version.clone()));
-        self.seen.borrow_mut().insert(key, answer.clone());
+        if let Some(p) = self.registry.get_for(provider, pkg) {
+            if self.registry.has_scoped(provider, pkg) {
+                self.fetch(provider, p, std::slice::from_ref(spec));
+            } else {
+                // The shared instance: ask for everything announced in one call (plus this
+                // spec, when it was not announced).
+                let first = self.fetched.borrow_mut().insert(provider.to_string());
+                let mut specs: Vec<dots_providers::Spec> = Vec::new();
+                if first {
+                    for c in self.candidates.iter().filter(|c| {
+                        c.provider == provider && !self.registry.has_scoped(provider, &c.pkg)
+                    }) {
+                        if !specs.iter().any(|s| s.name == c.spec.name) {
+                            specs.push(c.spec.clone());
+                        }
+                    }
+                }
+                if !specs.iter().any(|s| s.name == native) {
+                    specs.push(spec.clone());
+                }
+                self.fetch(provider, p, &specs);
+            }
+        }
+        let answer = self.seen.borrow().get(&key).cloned().flatten();
+        self.seen.borrow_mut().entry(key).or_insert(answer.clone());
         answer
     }
 }
@@ -538,5 +615,142 @@ mod home_tests {
         // No HOME at all: the sandbox stands in.
         let ctx = exec_ctx_from(&dirs, BTreeMap::new(), false, false, "r1");
         assert_eq!(ctx.env["HOME"], "/scratch");
+    }
+}
+
+#[cfg(test)]
+mod offers_tests {
+    use super::*;
+    use dots_providers::*;
+    use dots_resolve::OfferSource;
+    use dots_testkit::FakeProvider;
+    use std::collections::BTreeMap;
+    use std::sync::{Arc, Mutex};
+
+    /// Records every `latest()` call's spec names; a batch naming `bad` errors, like
+    /// `brew info` with an unknown name.
+    struct Counting {
+        inner: FakeProvider,
+        calls: Arc<Mutex<Vec<Vec<String>>>>,
+    }
+    impl Provider for Counting {
+        fn id(&self) -> &'static str {
+            "fake"
+        }
+        fn caps(&self) -> Caps {
+            self.inner.caps()
+        }
+        fn availability(&self, f: &Facts) -> Availability {
+            self.inner.availability(f)
+        }
+        fn installed(&self, c: &Ctx) -> Result<BTreeMap<String, Installed>> {
+            self.inner.installed(c)
+        }
+        fn latest(&self, c: &Ctx, s: &[Spec]) -> Result<BTreeMap<String, Latest>> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(s.iter().map(|x| x.name.clone()).collect());
+            if s.iter().any(|x| x.name == "bad") {
+                return Err(ProviderError::Other("unknown".into()));
+            }
+            self.inner.latest(c, s)
+        }
+        fn plan(&self, o: &[Op]) -> Result<Vec<Action>> {
+            self.inner.plan(o)
+        }
+        fn exec(&self, c: &Ctx, a: &Action) -> Result<Outcome> {
+            self.inner.exec(c, a)
+        }
+        fn bins(&self, c: &Ctx, i: &BTreeMap<String, Installed>) -> Result<Vec<BinEntry>> {
+            self.inner.bins(c, i)
+        }
+    }
+
+    fn setup() -> (Registry, Arc<Mutex<Vec<Vec<String>>>>) {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut reg = Registry::new();
+        reg.register(Box::new(Counting {
+            inner: FakeProvider::new("fake")
+                .with_latest("a", "1")
+                .with_latest("b", "2")
+                .with_latest("c", "3"),
+            calls: calls.clone(),
+        }));
+        (reg, calls)
+    }
+
+    fn cand(n: &str) -> OfferCandidate {
+        OfferCandidate {
+            provider: "fake".into(),
+            pkg: n.into(),
+            spec: Spec::new(n),
+        }
+    }
+
+    fn ctx() -> Ctx {
+        let dirs = Dirs::resolve(Some(Path::new("/scratch")), &dots_core::ProcessEnv);
+        exec_ctx_from(&dirs, BTreeMap::new(), false, false, "r1")
+    }
+
+    #[test]
+    fn announced_candidates_are_asked_in_one_call() {
+        let (reg, calls) = setup();
+        let ctx = ctx();
+        let offers = LiveOffers::with_candidates(&reg, &ctx, vec![cand("a"), cand("b"), cand("c")]);
+        for n in ["a", "b", "c", "a"] {
+            let v = offers.offered("fake", n, n, &Spec::new(n));
+            assert_eq!(
+                v.as_deref(),
+                Some(match n {
+                    "a" => "1",
+                    "b" => "2",
+                    _ => "3",
+                })
+            );
+        }
+        assert_eq!(offers.offered("fake", "zz", "zz", &Spec::new("zz")), None);
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls[0], ["a", "b", "c"]);
+        assert_eq!(
+            calls.len(),
+            2,
+            "one batch, then one for the unannounced name"
+        );
+    }
+
+    #[test]
+    fn failing_batch_falls_back_per_spec() {
+        let (reg, calls) = setup();
+        let ctx = ctx();
+        let offers =
+            LiveOffers::with_candidates(&reg, &ctx, vec![cand("a"), cand("bad"), cand("c")]);
+        assert_eq!(
+            offers.offered("fake", "a", "a", &Spec::new("a")).as_deref(),
+            Some("1")
+        );
+        assert_eq!(
+            offers.offered("fake", "bad", "bad", &Spec::new("bad")),
+            None
+        );
+        assert_eq!(
+            offers.offered("fake", "c", "c", &Spec::new("c")).as_deref(),
+            Some("3")
+        );
+        // The batch, then one call per spec.
+        assert_eq!(calls.lock().unwrap().len(), 4);
+    }
+
+    #[test]
+    fn offline_offers_nothing() {
+        let dirs = Dirs::resolve(Some(Path::new("/scratch")), &dots_core::ProcessEnv);
+        let ctx = exec_ctx_from(&dirs, BTreeMap::new(), true, false, "r1");
+        let reg = {
+            let mut r = Registry::new();
+            r.register(Box::new(dots_providers::brew::BrewProvider::new()));
+            r
+        };
+        let offers = LiveOffers::with_candidates(&reg, &ctx, vec![cand("a")]);
+        assert_eq!(offers.offered("brew", "a", "a", &Spec::new("a")), None);
     }
 }

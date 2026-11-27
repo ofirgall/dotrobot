@@ -12,7 +12,7 @@ Every provider exposes these operations:
 |-----------|--------------|
 | `availability` | `Ready { bin_path }`, `Bootstrap { pkg }` (usable after installing `pkg`) or `Unsupported`. The provider finds its own binary in known locations, never through `PATH`. `availability_in` is the same with the execution context. |
 | `installed` | ONE batched query returning name, version, pinned and source for everything installed. |
-| `latest` | Batched and cacheable: the latest available version per package. |
+| `latest` | Batched and cacheable: the latest available version per package. `plan`, `apply` and `upgrade` announce every package they will look up, so a shared provider (brew, apt, cargo, uv) gets one `latest` call with all of them; if that call fails, each package is asked on its own. Per-package instances (script, git, custom) are asked per package. |
 | `plan` | Pure. Turns `Install`, `Upgrade`, `Remove`, `Pin` and `Unpin` ops into the exact commands (`Action.argv`). `dots plan -v` shows these. It runs nothing and writes nothing. |
 | `exec` | Runs exactly `Action.argv`, writes the output to `<log_dir>/<pkg>.<action>.log` and returns the log path. |
 | `bins` | The executables each installed package put on disk. Batched. |

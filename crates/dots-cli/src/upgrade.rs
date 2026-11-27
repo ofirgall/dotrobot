@@ -17,7 +17,9 @@ use serde_json::{Value, json};
 
 use crate::app::Context;
 use crate::lock_cmd::Written;
+use crate::providers::{LiveOffers, OfferCandidate};
 use crate::reconcile::{ApplyArgs, Args, Prepared, UpgradeSet, apply_inner};
+use dots_resolve::OfferSource;
 
 pub struct UpgradeArgs<'a> {
     pub pkgs: &'a [String],
@@ -65,7 +67,7 @@ fn exact_of(p: &Prepared, provider: &str, pkg: &str) -> Exact {
 
 /// What `name` would move to. `into_spec`: the installed version violates the spec (a
 /// dependency whose floor is tighter), so moving is required rather than optional.
-fn verdict(p: &Prepared, name: &str, into_spec: bool) -> Verdict {
+fn verdict(p: &Prepared, offers: &LiveOffers<'_>, name: &str, into_spec: bool) -> Verdict {
     let Some(pr) = p.resolution.get(name).filter(|r| r.is_active()) else {
         return Verdict::Skip("not part of this machine's package set".into());
     };
@@ -98,11 +100,7 @@ fn verdict(p: &Prepared, name: &str, into_spec: bool) -> Verdict {
     let pkg = p.rc.repo.packages.get(name);
     let cfg = pkg.and_then(|k| k.providers.get(&choice.id));
     let spec = spec_for_in(&choice.native_name, cfg, pkg.map(|k| k.dir.as_path()));
-    let offered = p
-        .registry
-        .get_for(&choice.id, name)
-        .and_then(|prov| prov.latest(&p.pctx, std::slice::from_ref(&spec)).ok())
-        .and_then(|m| m.get(&choice.native_name).map(|l| l.version.clone()));
+    let offered = offers.offered(&choice.id, name, &choice.native_name, &spec);
     let exact = exact_of(p, &choice.id, name);
     let mv = |ask: Option<String>, to: Option<String>| {
         Verdict::Move(Move {
@@ -207,6 +205,35 @@ fn beyond_range(
     })
 }
 
+/// The (provider, spec) pairs `verdict` will look up for `names`: installed, unpinned
+/// packages with a provider.
+fn candidates(p: &Prepared, names: &[String]) -> Vec<OfferCandidate> {
+    let mut out = Vec::new();
+    for name in names {
+        let Some(pr) = p.resolution.get(name).filter(|r| r.is_active()) else {
+            continue;
+        };
+        let Some(choice) = pr.chosen_provider() else {
+            continue;
+        };
+        let installed = p
+            .installed
+            .get(&choice.id)
+            .and_then(|m| m.get(&choice.native_name));
+        if !installed.is_some_and(|i| !i.pinned) {
+            continue;
+        }
+        let pkg = p.rc.repo.packages.get(name);
+        let cfg = pkg.and_then(|k| k.providers.get(&choice.id));
+        out.push(OfferCandidate {
+            provider: choice.id.clone(),
+            pkg: name.clone(),
+            spec: spec_for_in(&choice.native_name, cfg, pkg.map(|k| k.dir.as_path())),
+        });
+    }
+    out
+}
+
 fn compute(p: &Prepared, args: &UpgradeArgs<'_>) -> Outcome {
     let mut out = Outcome {
         key: p.machine_key.clone(),
@@ -222,6 +249,8 @@ fn compute(p: &Prepared, args: &UpgradeArgs<'_>) -> Outcome {
     } else {
         args.pkgs.to_vec()
     };
+    // One `latest()` call per shared provider for everything that may be asked.
+    let offers = LiveOffers::with_candidates(&p.registry, &p.pctx, candidates(p, &names));
     let mut done: BTreeMap<String, ()> = BTreeMap::new();
     let mut queue: Vec<(String, bool)> = names.into_iter().map(|n| (n, false)).collect();
     while let Some((name, into_spec)) = queue.pop() {
@@ -247,7 +276,7 @@ fn compute(p: &Prepared, args: &UpgradeArgs<'_>) -> Outcome {
             }
             continue;
         }
-        match verdict(p, &name, into_spec) {
+        match verdict(p, &offers, &name, into_spec) {
             Verdict::Move(m) => {
                 // Dependencies whose floors the installed version no longer meets move first.
                 for e in p
