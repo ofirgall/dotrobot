@@ -49,6 +49,9 @@
               },
               "provider": {
                 "type": "string"
+              },
+              "sudo": {
+                "type": "boolean"
               }
             },
             "required": [
@@ -419,6 +422,13 @@
                 ],
                 "type": "object"
               },
+              "sudo": {
+                "description": "why a plain `dots apply` skips this step (`requires_sudo`, `needs_root`, ...); null for an ordinary step",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "to": {
                 "type": [
                   "string",
@@ -474,6 +484,10 @@
               "type": "integer"
             },
             "shims": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "sudo_steps": {
               "minimum": 0,
               "type": "integer"
             }

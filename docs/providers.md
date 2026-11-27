@@ -35,6 +35,20 @@ Each provider declares `Caps`:
 
 Behavior that depends on a capability is visible to the user.
 
+### Sudo steps
+
+A step is a *sudo step* when `dots apply` must not run it without being asked: a provider action marked `needs_root` (every `apt` action; a script with `needs_root = true`; a uv `break_system_packages` install into a system directory the user cannot write), a root system setting (`root = true`), or a package that declares
+
+```toml
+requires_sudo = true              # the whole package, whatever provider installs it
+
+[providers.brew]
+cask = true
+requires_sudo = true              # or on one provider block only
+```
+
+Use `requires_sudo` for a step that is not run as root by `dots` but still needs the admin password: a brew cask with a `.pkg` installer, a kernel extension. A plain `dots apply` skips sudo steps (and the steps that depend on them); `--with-sudo` runs everything; `--sudo-only` runs only the sudo steps. A package's hooks follow its install step: when the install is skipped so are its hooks. `dots lint` warns when `requires_sudo` is set on a provider that is always root anyway (`apt`, a `needs_root` script). The step's batch never mixes sudo and ordinary packages of one provider, so a cask that needs the password does not hold back the formulae next to it.
+
 A provider may also implement `stale_reason(ctx, spec)`: for an installed package the version rules leave alone, it returns why the package must be upgraded anyway (apt: its declared `repo` is not configured yet, so it still comes from the distribution archive). The plan shows the reason and upgrades the package; the default is no reason. It must read local state only.
 
 ### Conformance kit

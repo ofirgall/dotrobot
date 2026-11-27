@@ -224,7 +224,7 @@ Every error dots reports carries one of these stable codes (`errors[].code` in `
 ## `sudo-failed`
 
 - Message: could not get root access for `{package}`
-- Hint: Run `sudo -v` in a terminal and retry, or move the package to a provider that needs no root.
+- Hint: Run `sudo -v` in a terminal and retry `dots apply --with-sudo`, or move the package to a provider that needs no root.
 
 ## `declined`
 
@@ -383,6 +383,12 @@ Every error dots reports carries one of these stable codes (`errors[].code` in `
 
 - Message: the script provider of `{package}` has no `check`
 - Hint: Add a `check` command to [providers.script] in {file} so dots can tell whether the package is installed.
+- Provenance: `file`
+
+## `requires-sudo-redundant`
+
+- Message: `{package}` sets `requires_sudo` on its `{provider}` provider, which already needs root
+- Hint: Remove `requires_sudo` from {file}: a `{provider}` install is always a sudo step.
 - Provenance: `file`
 
 ## `script-unpinned-fetch`

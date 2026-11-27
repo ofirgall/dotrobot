@@ -48,6 +48,31 @@ $ echo $?
 `--json` data: `{ packages, bundles, errors, warnings }` (counts); the problems are in
 `errors[]` and `warnings[]`.
 
+## `dots apply` and sudo steps
+
+`dots apply` has three modes for the steps that need root (see "Sudo steps" in `providers.md`):
+
+| Command | Sudo steps | Password |
+|---|---|---|
+| `dots apply` | skipped, with everything that depends on them; listed in a warning at the end | never asked |
+| `dots apply --with-sudo` | run, with everything else | asked once at the start (if it fails, root steps fail with `sudo-failed`) |
+| `dots apply --sudo-only` | the only steps run, with their `pre_install`/`post_install` hooks and root settings | asked once at the start |
+
+`--with-sudo` and `--sudo-only` conflict. Skipped steps are not failures: if everything else succeeded the exit code is 0, and nothing skipped is recorded in `state.json` or `dots.lock`, so the next plain apply skips them and warns again. The warning:
+
+```
+[!] 5 steps need sudo and were not applied:
+    + orbstack        brew          requires_sudo
+    + locale          script        needs_root
+    ~ com.apple.foo   defaults setting  root
+    + herdr-thing     brew          depends on orbstack
+  -> dots apply --sudo-only   (or dots apply --with-sudo for everything)
+```
+
+With `--sudo-only`, a sudo step whose ordinary dependency is not installed yet is skipped with the reason "run `dots apply` first"; the ordinary steps are not applied and one line gives their count. Files, ordinary settings and services are left for a plain `dots apply` (run it after `--sudo-only` to finish the sudo packages' files). `dots upgrade` keeps asking for the password once when it needs root. When `dots` runs as root, sudo steps are ordinary: a plain apply runs them and prints no warning.
+
+`--json` (`dots/apply@1`) carries `sudo: { mode: "skip"|"with"|"only", skipped: [{ name, kind, provider, reason }], not_applied_ordinary }`; skipped package steps appear in `results` with status `skipped-sudo` (or `skipped-due-to-dep`, `not-selected` for `--sudo-only`). `dots plan --json` marks each step with `sudo` (the reason, or null) and counts them in `summary.sudo_steps`; the plan's "Heads up" says that N steps need sudo and a plain apply skips them.
+
 ## `dots why <pkg>`
 
 Explain why a package is (or is not) on this machine: every inclusion path as a tree from the

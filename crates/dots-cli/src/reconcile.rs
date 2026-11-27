@@ -270,6 +270,8 @@ pub struct ApplyArgs {
     pub dry_run: bool,
     pub allow_downgrade: bool,
     pub root: Option<PathBuf>,
+    /// What to do with the steps that need sudo.
+    pub sudo: dots_engine::SudoPolicy,
 }
 
 /// Asks on the terminal. Never constructed as interactive under `--no-input`, `--json` or a
@@ -411,7 +413,9 @@ pub(crate) fn apply_inner(
         run_id: run_id.clone(),
         yes: a.yes,
         allow_downgrade: a.allow_downgrade,
-        sudo: p.rc.m.facts.user != "root",
+        // Running as root: sudo steps are ordinary, nothing is primed or skipped.
+        sudo: p.rc.m.facts.user != "root" && !crate::settings_phase::running_as_root(),
+        sudo_policy: a.sudo,
         journal: journal_meta(&p.rc),
         stop: if a.dry_run {
             Arc::new(AtomicBool::new(false))

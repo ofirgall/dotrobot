@@ -158,6 +158,9 @@ pub struct Package {
     pub replaces: Vec<String>,
     pub prefer: Vec<String>,
     pub providers_only: bool,
+    /// The install needs the admin password (a `.pkg` installer, a kernel extension). Without
+    /// `--with-sudo` or `--sudo-only` a plain `dots apply` skips it.
+    pub requires_sudo: bool,
     #[serde(skip)]
     pub providers: BTreeMap<String, ProviderConfig>,
     #[serde(rename = "providers")]
@@ -337,6 +340,8 @@ macro_rules! provider_struct {
             pub bins: Vec<String>,
             pub shim: Option<String>,
             pub when: Option<String>,
+            /// This provider's install needs the admin password (see `Package::requires_sudo`).
+            pub requires_sudo: bool,
             $( pub $f: $t, )*
             pub platform: PlatformTables,
         }
@@ -456,7 +461,8 @@ impl ProviderConfig {
         }
     }
 
-    /// The fields every provider table shares: `name`, `bin`, `bins`, `shim`, `when`.
+    /// The fields every provider table shares: `name`, `bin`, `bins`, `shim`, `when`,
+    /// `requires_sudo`.
     pub fn common(&self) -> ProviderCommon {
         macro_rules! c {
             ($p:expr) => {
@@ -466,6 +472,7 @@ impl ProviderConfig {
                     bins: $p.bins.clone(),
                     shim: $p.shim.clone(),
                     when: $p.when.clone(),
+                    requires_sudo: $p.requires_sudo,
                 }
             };
         }
@@ -497,6 +504,10 @@ impl ProviderConfig {
                         .unwrap_or_default(),
                     shim: s("shim"),
                     when: s("when"),
+                    requires_sudo: table
+                        .get("requires_sudo")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
                 }
             }
         }
@@ -511,6 +522,7 @@ pub struct ProviderCommon {
     pub bins: Vec<String>,
     pub shim: Option<String>,
     pub when: Option<String>,
+    pub requires_sudo: bool,
 }
 
 impl ProviderConfig {

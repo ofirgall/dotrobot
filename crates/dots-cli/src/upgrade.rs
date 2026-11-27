@@ -382,6 +382,8 @@ pub fn run(ctx: &Context, a: &UpgradeArgs<'_>) -> Report {
         dry_run: false,
         allow_downgrade: false,
         root: None,
+        // An upgrade is explicit, so it keeps asking for the password once when it needs root.
+        sudo: dots_engine::SudoPolicy::With,
     };
     let (mut report, written) = apply_inner(ctx, &args, "upgrade", Some(&planner));
     if let Some(out) = info.into_inner() {

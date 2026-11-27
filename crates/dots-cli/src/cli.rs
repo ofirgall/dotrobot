@@ -88,7 +88,7 @@ pub enum Cmd {
     },
     /// Make this machine match the repo
     #[command(
-        override_usage = "dots apply [<pkg|bundle>...] [--files-only|--packages-only] [--yes] [--dry-run] [--allow-downgrade] [--root <path>] [--home <dir>]"
+        override_usage = "dots apply [<pkg|bundle>...] [--files-only|--packages-only] [--with-sudo|--sudo-only] [--yes] [--dry-run] [--allow-downgrade] [--root <path>] [--home <dir>]"
     )]
     Apply {
         #[arg(value_name = "pkg|bundle")]
@@ -105,6 +105,12 @@ pub enum Cmd {
         allow_downgrade: bool,
         #[arg(long, value_name = "path")]
         root: Option<PathBuf>,
+        /// Also run the steps that need sudo, asking for the password once
+        #[arg(long, conflicts_with = "sudo_only")]
+        with_sudo: bool,
+        /// Run only the steps that need sudo (and their hooks), asking for the password once
+        #[arg(long)]
+        sudo_only: bool,
     },
     /// Show what apply would do
     #[command(

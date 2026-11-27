@@ -62,6 +62,14 @@ packages = ["fd", "ripgrep", "bat", "delta", "yazi"]
 
 `dots apply` compares that with your machine, shows a plan, and makes them match. On a Mac it installs with brew. On Ubuntu it uses apt, or cargo when you have no sudo.
 
+Steps that need your password are opt-in. A plain `dots apply` never asks for it and never runs a sudo step: it applies everything else, skips what depends on a skipped step, and ends with a warning that lists each step it did not apply and why. Skipped steps are not failures (exit code 0) and are not recorded, so the next plain apply warns again.
+
+- `dots apply`: no password, no sudo steps; warns about what it skipped.
+- `dots apply --sudo-only`: only the sudo steps (and their install hooks), password once.
+- `dots apply --with-sudo`: everything, password once at the start.
+
+A step needs sudo when a provider runs it as root (apt, a script with `needs_root = true`), when it is a `root = true` system setting, or when its package declares `requires_sudo = true` (for a brew cask whose installer asks for the password: a `.pkg`, a kernel extension). `dots plan` marks these steps and counts them. When `dots` already runs as root, sudo steps are ordinary and a plain apply runs them.
+
 Anything can have platform-specific sections, which go from general to specific: `linux › debian › ubuntu › ubuntu-22.04` (plus CPU architecture and WSL). `[platform.ubuntu]` applies to every Ubuntu, `[platform."ubuntu-22.04"]` overrides just that release, and the most specific one wins.
 
 ## Add someone's bundle

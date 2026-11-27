@@ -21,7 +21,7 @@ mod version;
 
 pub use apply::{
     ApplyConfig, ApplyReport, LockDrop, Mode, NoObserver, NoPrompt, Observer, Prompter,
-    RemovalResult, Status, StepResult, StepStatus, apply, apply_observed,
+    RemovalResult, Status, StepResult, StepStatus, SudoPolicy, apply, apply_observed,
 };
 pub use files::{FileStep, FileStepResult, FilesPhase, FilesRequest, NoFiles, Payload};
 pub use hooks::{HookRequest, HookStep, HookStepResult, HooksPhase, NoHooksPhase};
@@ -32,7 +32,7 @@ pub use phases::{
     NoServicesPhase, NoSettingsPhase, PlanError, RestartResult, ServiceStep, ServiceStepResult,
     ServicesPhase, ServicesRequest, SettingStep, SettingStepResult, SettingsPhase, SettingsRequest,
 };
-pub use plan::{Batch, Inputs, PkgStep, Plan, Scope, StepKind, Switch, plan, select};
+pub use plan::{Batch, Inputs, PkgStep, Plan, Scope, StepKind, SudoItem, Switch, plan, select};
 pub use render::{plan_json, plan_text};
 pub use shims::{OwnedShim, ShimDecl, ShimState, ShimStep, ShimStepResult};
 pub use shims::{declared_for as shim_declared_for, state_of as shim_state};

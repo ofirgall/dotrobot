@@ -25,6 +25,6 @@ scripts/docker-test.sh --repo ~/dotfiles  # apply a real repo, see below
   is OOM-killed inside its own container instead of taking down the VM (OrbStack) and its other
   containers. Image builds (`docker build`) are not limited; run only one at a time.
 - `--repo <path>`: mounts the repo read-only at `/home/dev/dots-repo`, copies it to
-  `~/work/repo`, writes machine.toml, then runs `lint`, `plan`, `apply --yes`, `status`, and
+  `~/work/repo`, writes machine.toml, then runs `lint`, `plan`, `apply --yes --with-sudo`, `status`, and
   `plan --check`, and prints a summary. Machine selection: `DOTS_REPO_PROFILE=name`,
   `DOTS_REPO_BUNDLES=a,b`, else the only `machines/*.toml`, else every bundle.

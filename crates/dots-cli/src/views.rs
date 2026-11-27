@@ -97,8 +97,8 @@ pub fn plan_blocks(plan: &Plan, backup_dir: &str) -> Vec<Block> {
             if s.bootstrap {
                 notes.push("bootstrap");
             }
-            if s.needs_root {
-                notes.push("needs sudo");
+            if s.sudo.is_some() {
+                notes.push("sudo");
             }
             if let Some(n) = &s.note {
                 notes.push(n);
@@ -330,8 +330,9 @@ pub fn plan_blocks(plan: &Plan, backup_dir: &str) -> Vec<Block> {
         )),
         (false, false) => {}
     }
-    if plan.needs_root() {
-        heads.push(Block::callout("Needs your password once (sudo)"));
+    let sudo_n = plan.sudo_count();
+    if sudo_n > 0 {
+        heads.push(Block::callout(sudo_heads_up(sudo_n)));
     }
     let backups = plan
         .files
@@ -367,6 +368,62 @@ pub fn plan_blocks(plan: &Plan, backup_dir: &str) -> Vec<Block> {
     }
     for (p, why) in &plan.unplanned {
         out.push(Block::text(format!("Not planned: {p} ({why})")));
+    }
+    out
+}
+
+/// The plan's heads-up about sudo steps: a plain `dots apply` skips them.
+pub fn sudo_heads_up(n: usize) -> String {
+    let (count, them) = if n == 1 {
+        ("1 step needs sudo".to_string(), "it")
+    } else {
+        (format!("{n} steps need sudo"), "them")
+    };
+    format!(
+        "{count}, so a plain `dots apply` skips {them}: use `dots apply --with-sudo` for everything or `dots apply --sudo-only` for just {them}"
+    )
+}
+
+/// The end-of-run warning of what `apply` left undone because of sudo, as blocks.
+fn sudo_skipped_blocks(r: &ApplyReport) -> Vec<Block> {
+    let n = r.sudo_skipped.len();
+    let mut out = Vec::new();
+    if n > 0 {
+        out.push(Block::callout(if n == 1 {
+            "1 step needs sudo and was not applied:".to_string()
+        } else {
+            format!("{n} steps need sudo and were not applied:")
+        }));
+        let mut t = Table::new()
+            .styled_column("kind", 3, dots_core::Style::Muted)
+            .styled_column("reason", 3, dots_core::Style::Muted);
+        for i in &r.sudo_skipped {
+            let marker = match i.marker {
+                "+" => Marker::Add,
+                "-" => Marker::Remove,
+                _ => Marker::Change,
+            };
+            let kind = if i.what == "setting" {
+                format!("{} setting", i.kind)
+            } else {
+                i.kind.clone()
+            };
+            t.push(
+                Row::new(marker, i.name.clone())
+                    .cell(Cell::muted(kind))
+                    .cell(Cell::muted(i.reason.clone())),
+            );
+        }
+        out.push(Block::Table(t));
+        out.push(Block::hint(
+            "dots apply --sudo-only   (or dots apply --with-sudo for everything)",
+        ));
+    }
+    if r.sudo_unselected > 0 {
+        out.push(Block::text(format!(
+            "{} not applied (--sudo-only runs only the sudo steps); run `dots apply` for them",
+            plural(r.sudo_unselected, "other step", "other steps")
+        )));
     }
     out
 }
@@ -424,6 +481,7 @@ pub fn apply_report(mut report: Report, r: &ApplyReport, backup_dir: &str) -> Re
         && r.services.is_empty()
         && r.hooks.is_empty()
         && r.shims.is_empty()
+        && r.sudo_skipped.is_empty()
         && r.status == Status::Done
     {
         return report.with_headline(
@@ -447,7 +505,17 @@ pub fn apply_report(mut report: Report, r: &ApplyReport, backup_dir: &str) -> Re
         + r.services.iter().filter(|s| !s.ok).count()
         + r.hooks.iter().filter(|h| !h.ok).count()
         + r.shims.iter().filter(|s| !s.ok).count();
-    let total = r.steps.len()
+    // Steps the sudo policy left alone are not "failed to apply": they are listed apart.
+    let sudo_left = r
+        .sudo_skipped
+        .iter()
+        .filter(|i| i.what == "package")
+        .count()
+        + r.steps
+            .iter()
+            .filter(|s| s.status == StepStatus::NotSelected)
+            .count();
+    let total = (r.steps.len() - sudo_left)
         + r.files.len()
         + r.settings.len()
         + r.services.len()
@@ -472,21 +540,40 @@ pub fn apply_report(mut report: Report, r: &ApplyReport, backup_dir: &str) -> Re
                 plural(bad, "problem", "problems")
             ),
         )
+    } else if !r.sudo_skipped.is_empty() {
+        (
+            Tone::Warn,
+            if total == 0 {
+                "Nothing applied   everything left needs sudo".to_string()
+            } else {
+                format!(
+                    "Applied   {done} of {total} succeeded; {} left for sudo",
+                    r.sudo_skipped.len()
+                )
+            },
+        )
     } else {
         (Tone::Ok, format!("Applied   {done} of {total} succeeded"))
     };
     report = report.with_headline(tone, text);
 
-    if !r.steps.is_empty() {
+    if r.steps.iter().any(|s| s.status != StepStatus::NotSelected) {
         let mut t = Table::new()
             .styled_column("provider", 3, dots_core::Style::Muted)
             .column("version", 4)
             .styled_column("time", 2, dots_core::Style::Muted);
-        for s in &r.steps {
+        for s in r
+            .steps
+            .iter()
+            .filter(|s| s.status != StepStatus::NotSelected)
+        {
             let state = match &s.status {
                 StepStatus::Ok => State::Done,
                 StepStatus::Failed => State::Failed,
-                StepStatus::SkippedDueToDep { .. } | StepStatus::NotRun => State::Skipped,
+                StepStatus::SkippedDueToDep { .. }
+                | StepStatus::SkippedSudo { .. }
+                | StepStatus::NotSelected
+                | StepStatus::NotRun => State::Skipped,
                 StepStatus::Deferred => State::Pending,
             };
             let mut row = Row::new(state, s.package.clone())
@@ -496,6 +583,7 @@ pub fn apply_report(mut report: Report, r: &ApplyReport, backup_dir: &str) -> Re
                     StepStatus::SkippedDueToDep { dependency } => format!("needs {dependency}"),
                     StepStatus::Deferred => "interactive: run it in a terminal".into(),
                     StepStatus::NotRun => "not run".into(),
+                    StepStatus::SkippedSudo { reason } => format!("needs sudo: {reason}"),
                     _ => dur(s.dur_ms),
                 }));
             match &s.status {
@@ -666,8 +754,30 @@ pub fn apply_report(mut report: Report, r: &ApplyReport, backup_dir: &str) -> Re
     if !r.todos.is_empty() {
         report.push(Block::hint("dots todo"));
     }
+    for b in sudo_skipped_blocks(r) {
+        report.push(b);
+    }
     if r.status == Status::Interrupted {
         report.push(Block::hint("dots apply"));
     }
     report
+}
+
+#[cfg(test)]
+mod sudo_tests {
+    use super::sudo_heads_up;
+
+    #[test]
+    fn heads_up_says_plain_apply_skips_and_names_both_flags() {
+        let one = sudo_heads_up(1);
+        assert!(one.starts_with("1 step needs sudo, so a plain `dots apply` skips it"));
+        let many = sudo_heads_up(5);
+        assert!(many.starts_with("5 steps need sudo, so a plain `dots apply` skips them"));
+        for t in [one, many] {
+            assert!(
+                t.contains("--with-sudo") && t.contains("--sudo-only"),
+                "{t}"
+            );
+        }
+    }
 }

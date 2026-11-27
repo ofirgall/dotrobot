@@ -209,6 +209,7 @@ fn plan_json_base(plan: &Plan) -> Value {
                 "from": s.from,
                 "to": s.to,
                 "needs_root": s.needs_root,
+                "sudo": s.sudo,
                 "interactive": s.interactive,
                 "bootstrap": s.bootstrap,
                 "note": s.note,
@@ -235,6 +236,7 @@ fn plan_json_base(plan: &Plan) -> Value {
             "provider": b.provider,
             "packages": b.packages,
             "interactive": b.interactive,
+            "sudo": b.sudo,
             "after": b.deps,
             "commands": b.actions.iter().map(|a| json!({
                 "argv": a.argv,
@@ -290,6 +292,7 @@ fn plan_json_base(plan: &Plan) -> Value {
             "shims": plan.shims.len(),
             "hooks": plan.hooks.len(),
             "downgrades": plan.steps.iter().filter(|s| s.kind == StepKind::Downgrade).count(),
+            "sudo_steps": plan.sudo_count(),
             "root_actions": plan.batches.iter().flat_map(|b| &b.actions).filter(|a| a.needs_root).count()
                 + plan.settings.iter().filter(|s| s.root).count(),
         },
@@ -372,10 +375,21 @@ impl ApplyReport {
             "todos": self.todos.iter().map(|t| json!({
                 "package": t.package, "reason": t.reason,
             })).collect::<Vec<_>>(),
+            "sudo": {
+                "mode": self.sudo_policy.as_str(),
+                "skipped": self.sudo_skipped.iter().map(|i| json!({
+                    "name": i.name,
+                    "kind": i.what,
+                    "provider": i.kind,
+                    "reason": i.reason,
+                })).collect::<Vec<_>>(),
+                "not_applied_ordinary": self.sudo_unselected,
+            },
             "summary": {
                 "ok": count("ok"),
                 "failed": count("failed"),
                 "skipped": count("skipped-due-to-dep"),
+                "skipped_sudo": self.sudo_skipped.len(),
                 "deferred": count("deferred"),
                 "not_run": count("not-run"),
                 "files_ok": self.files.iter().filter(|f| f.ok).count(),
@@ -447,7 +461,11 @@ impl ApplyReport {
                     r.package, r.package
                 )),
                 StepStatus::NotRun => out.push_str(&format!("\n  not run  {}", r.package)),
-                StepStatus::Ok => {}
+                StepStatus::SkippedSudo { reason } => out.push_str(&format!(
+                    "\n  skipped  {} (needs sudo: {reason})",
+                    r.package
+                )),
+                StepStatus::NotSelected | StepStatus::Ok => {}
             }
         }
         for f in self.files.iter().filter(|f| !f.ok) {

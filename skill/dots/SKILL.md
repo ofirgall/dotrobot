@@ -66,13 +66,13 @@ If they want to choose, ask in this order. Stop as soon as they say "rest defaul
 3. **Anything to leave out?** Only if they show interest. Becomes machine excludes.
 4. **Required settings** (cannot be skipped): ask each one, using the package's own question text.
 5. **"ask" settings** (have defaults but are worth a glance: theme, font size, ...): group them into one message with defaults pre-filled, e.g. "theme: dark, font size: 13, cursor shader: off. Change anything?"
-6. **Sudo**: if the plan includes system package managers (apt), tell them they'll be asked for their password once. If they don't have sudo, say that `dots` will automatically prefer user-level installs (cargo, uv, GitHub releases).
+6. **Sudo**: if the plan includes sudo steps (apt, root settings, packages with `requires_sudo`), tell them a plain `dots apply` skips them and lists what it skipped; `dots apply --with-sudo` runs everything and `dots apply --sudo-only` runs just those, each asking for the password once. If they don't have sudo, say that `dots` will automatically prefer user-level installs (cargo, uv, GitHub releases).
 7. **Interactive steps and manual todos**: tell them these are deferred to the end and tracked. They can do them later.
 
 Then:
 
 - Show the **plan**: what gets installed, by which package manager, which files get linked or written, what will be backed up. Summarize it; don't dump it unless asked. Point out anything destructive: existing files that will be moved to a backup, uninstalls.
-- **Apply.** It runs installs in parallel, asks for sudo once, and defers interactive steps.
+- **Apply.** It runs installs in parallel, skips sudo steps unless given `--with-sudo` or `--sudo-only` (then it asks for the password once), and defers interactive steps.
 - Report: what succeeded, what failed (with the relevant log tail), pending manual todos, and whether a logout or reboot is needed.
 - Walk through the manual todos **only if the user wants to now**. Never mark a todo done yourself unless its self-check passes or the user confirms they did it.
 

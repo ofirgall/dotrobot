@@ -150,6 +150,9 @@
                   },
                   "provider": {
                     "type": "string"
+                  },
+                  "sudo": {
+                    "type": "boolean"
                   }
                 },
                 "required": [
@@ -520,6 +523,13 @@
                     ],
                     "type": "object"
                   },
+                  "sudo": {
+                    "description": "why a plain `dots apply` skips this step (`requires_sudo`, `needs_root`, ...); null for an ordinary step",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
                   "to": {
                     "type": [
                       "string",
@@ -575,6 +585,10 @@
                   "type": "integer"
                 },
                 "shims": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "sudo_steps": {
                   "minimum": 0,
                   "type": "integer"
                 }
@@ -736,7 +750,9 @@
                   "failed",
                   "skipped-due-to-dep",
                   "deferred",
-                  "not-run"
+                  "not-run",
+                  "skipped-sudo",
+                  "not-selected"
                 ]
               },
               "to": {
@@ -894,6 +910,58 @@
             "plan-failed"
           ]
         },
+        "sudo": {
+          "description": "how sudo steps were handled: `skip` (plain apply), `with` (--with-sudo) or `only` (--sudo-only)",
+          "properties": {
+            "mode": {
+              "enum": [
+                "skip",
+                "with",
+                "only"
+              ]
+            },
+            "not_applied_ordinary": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "skipped": {
+              "description": "steps not applied because they need sudo (or depend on one that was not applied), with the reason",
+              "items": {
+                "properties": {
+                  "kind": {
+                    "enum": [
+                      "package",
+                      "setting"
+                    ]
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "provider": {
+                    "type": "string"
+                  },
+                  "reason": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name",
+                  "kind",
+                  "provider",
+                  "reason"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "mode",
+            "skipped",
+            "not_applied_ordinary"
+          ],
+          "type": "object"
+        },
         "summary": {
           "properties": {
             "deferred": {
@@ -955,6 +1023,10 @@
             "skipped": {
               "minimum": 0,
               "type": "integer"
+            },
+            "skipped_sudo": {
+              "minimum": 0,
+              "type": "integer"
             }
           },
           "required": [
@@ -1009,6 +1081,7 @@
         "hooks",
         "hooks_skipped",
         "todos",
+        "sudo",
         "summary"
       ],
       "type": "object"

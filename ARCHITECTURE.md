@@ -860,7 +860,7 @@ value  = { enabled = false }
 domain = "com.apple.universalaccess"
 key    = "cursorFill"
 value  = { red = 1.0, green = 0.4, blue = 0.0, alpha = 1.0 }
-root   = true                                  # `sudo defaults write`; part of the run's one sudo prompt (§14)
+root   = true                                  # `sudo defaults write`; a sudo step: only `apply --with-sudo` / `--sudo-only` run it (§14.3)
 
 [[registry]]                                   # Windows; implies when = 'os = "windows"'
 key   = 'HKCU\Control Panel\Keyboard'
@@ -1419,7 +1419,9 @@ show   ──► `plan` stops here. `apply` prints it and asks unless --yes or t
    │
 exec   ──► DAG scheduler:
              - providers with exclusive_lock run their batch serially; different providers run in parallel
-             - all root-needing actions are grouped, and sudo is primed ONCE (`sudo -v`) with a keepalive
+             - sudo steps are opt-in (§14.3): a plain apply never primes sudo and never runs one; with
+               --with-sudo or --sudo-only all root-needing actions are grouped and sudo is primed ONCE
+               (`sudo -v`) with a keepalive
              - interactive actions are deferred to the end, serial
              - a failed node fails its dependents; independent branches continue
    │
@@ -1429,11 +1431,23 @@ record ──► journal per action, state.json atomically at the end (and incre
 summary──► ok / failed (with log tails) / skipped-due-to-dep / todos / requires-logout
 ```
 
+### 14.3 Sudo steps are opt-in
+
+A **sudo step** is one `apply` must not run unasked: (a) any provider action marked `needs_root` (apt, a `needs_root` script, a uv `break_system_packages` install into an unwritable directory), or a provider switch whose old-copy removal needs root; (b) a `root = true` system setting (no service runs as root); (c) a package that declares `requires_sudo = true` at package level or in a `[providers.<id>]` block (a brew cask with a `.pkg` installer, a kernel extension). The plan classifies it once (`PkgStep.sudo` holds the reason: `requires_sudo`, `needs_root`, `removes the old copy as root`; `SettingStep.root`), and a batch key includes the flag, so a batch is all sudo or none.
+
+| Mode | Sudo steps | Everything else | Password |
+|---|---|---|---|
+| `dots apply` | skipped | applied; steps that depend on a skipped one (`requires`/`after` edges, batch deps) are skipped transitively | never asked |
+| `--with-sudo` | run | applied | primed once at the start; if that fails, root actions fail with `sudo-failed` as before |
+| `--sudo-only` | the only steps run, plus their `pre_install`/`post_install` hooks and the root settings | not applied (one line gives their count); a sudo step whose ordinary dependency is still missing is skipped with "run `dots apply` first" | primed once |
+
+The engine pre-marks skipped batches dead (`StepStatus::SkippedSudo`), and its existing dependent-skipping fixpoint carries the skip to everything downstream. Because a skipped step has no `Ok` result, its package's files, settings, services and hooks are left alone exactly like those of a failed install, and nothing is written to `state.json`, the lock or the journal. A skip is not a failure: the run is `done` with exit code 0, and ends with a warning that lists every step not applied with its reason. When `dots` runs as root (`Sudo::Unneeded`) sudo steps are ordinary: nothing is primed, skipped or warned about. `dots plan` marks sudo steps with `sudo` and its "Heads up" says that N steps need sudo and a plain apply skips them.
+
 ### 14.2 Commands (complete v1 surface)
 
 ```
 dots init [--from <remote>]           # create dots.toml + machine.toml; optionally bootstrap from a remote repo
-dots apply [pkg|bundle...] [--files-only|--packages-only] [--yes] [--dry-run] [--root P] [--home D]
+dots apply [pkg|bundle...] [--files-only|--packages-only] [--with-sudo|--sudo-only] [--yes] [--dry-run] [--root P] [--home D]
 dots plan  [...same selectors]
 dots status | outdated | why | which | bins | doctor | facts
 dots upgrade [pkg...|--all] [--provider X] [--commit]

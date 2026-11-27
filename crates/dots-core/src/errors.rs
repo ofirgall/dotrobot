@@ -249,7 +249,7 @@ pub static REGISTRY: &[ErrorDef] = &[
     def!(
         "sudo-failed",
         "could not get root access for `{package}`",
-        "Run `sudo -v` in a terminal and retry, or move the package to a provider that needs no root.",
+        "Run `sudo -v` in a terminal and retry `dots apply --with-sudo`, or move the package to a provider that needs no root.",
         []
     ),
     def!(
@@ -412,6 +412,12 @@ pub static REGISTRY: &[ErrorDef] = &[
         "script-no-check",
         "the script provider of `{package}` has no `check`",
         "Add a `check` command to [providers.script] in {file} so dots can tell whether the package is installed.",
+        ["file"]
+    ),
+    def!(
+        "requires-sudo-redundant",
+        "`{package}` sets `requires_sudo` on its `{provider}` provider, which already needs root",
+        "Remove `requires_sudo` from {file}: a `{provider}` install is always a sudo step.",
         ["file"]
     ),
     def!(

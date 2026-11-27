@@ -18,7 +18,7 @@ use crate::phases::{
     RestartResult, ServiceStep, ServiceStepResult, ServicesRequest, SettingStep, SettingStepResult,
     SettingsRequest,
 };
-use crate::plan::{Batch, Inputs, PkgStep, Plan, plan, relative};
+use crate::plan::{Batch, Inputs, PkgStep, Plan, SudoItem, plan, relative};
 use crate::render::plan_text;
 use crate::shims::{self, ShimStep, ShimStepResult};
 use crate::state::{OwnedFile, OwnedPackage, State, Todo};
@@ -89,6 +89,30 @@ pub enum Mode<'a> {
     Live(&'a RunLock),
 }
 
+/// What `apply` does with sudo steps (see [`Plan::sudo_items`]). Running as root (`sudo` below
+/// false) makes sudo steps ordinary: every policy but `Only` runs everything, unprompted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SudoPolicy {
+    /// Plain `dots apply`: never ask for a password, never run a sudo step, skip what depends
+    /// on one and say so at the end.
+    #[default]
+    Skip,
+    /// `--with-sudo`: everything, priming sudo once at the start.
+    With,
+    /// `--sudo-only`: only the sudo steps (and their install hooks), priming sudo once.
+    Only,
+}
+
+impl SudoPolicy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SudoPolicy::Skip => "skip",
+            SudoPolicy::With => "with",
+            SudoPolicy::Only => "only",
+        }
+    }
+}
+
 pub struct ApplyConfig {
     pub run_id: String,
     /// `--yes`.
@@ -96,6 +120,8 @@ pub struct ApplyConfig {
     pub allow_downgrade: bool,
     /// Prime sudo once and prefix root actions with `sudo -n`. False when already root.
     pub sudo: bool,
+    /// Which steps run: see [`SudoPolicy`].
+    pub sudo_policy: SudoPolicy,
     pub journal: JournalMeta,
     /// Set from a SIGINT handler: the run stops after the current action.
     pub stop: Arc<AtomicBool>,
@@ -139,6 +165,13 @@ pub enum StepStatus {
     Deferred,
     /// The run stopped before reaching it.
     NotRun,
+    /// A sudo step a plain `dots apply` leaves alone (or a `--sudo-only` one whose ordinary
+    /// dependency is not installed yet). Not a failure; nothing is recorded.
+    SkippedSudo {
+        reason: String,
+    },
+    /// `--sudo-only` does not apply ordinary steps.
+    NotSelected,
 }
 
 impl StepStatus {
@@ -149,6 +182,8 @@ impl StepStatus {
             StepStatus::SkippedDueToDep { .. } => "skipped-due-to-dep",
             StepStatus::Deferred => "deferred",
             StepStatus::NotRun => "not-run",
+            StepStatus::SkippedSudo { .. } => "skipped-sudo",
+            StepStatus::NotSelected => "not-selected",
         }
     }
 }
@@ -203,6 +238,14 @@ pub struct ApplyReport {
     pub lock_drops: Vec<LockDrop>,
     /// What happened to the old copy of each provider switch.
     pub removals: Vec<RemovalResult>,
+    /// The policy this run had.
+    pub sudo_policy: SudoPolicy,
+    /// Steps not applied because they need sudo, or depend on one that was not applied, each
+    /// with the reason. Empty unless the policy skipped something.
+    pub sudo_skipped: Vec<SudoItem>,
+    /// `--sudo-only`: how many ordinary steps (packages, files, settings, services) were left
+    /// for a plain `dots apply`.
+    pub sudo_unselected: usize,
 }
 
 /// A lock row to delete after a provider switch.
@@ -248,6 +291,9 @@ impl ApplyReport {
             lock_updates: Vec::new(),
             lock_drops: Vec::new(),
             removals: Vec::new(),
+            sudo_policy: SudoPolicy::default(),
+            sudo_skipped: Vec::new(),
+            sudo_unselected: 0,
         }
     }
 }
@@ -871,7 +917,14 @@ pub fn apply_observed(
     let ordinary = plan_v.touches_more_than_owned_files() && !cfg.yes;
     if ordinary || !always.is_empty() {
         if prompter.can_prompt() {
-            if !prompter.confirm(&plan_text(&plan_v)) {
+            let mut text = plan_text(&plan_v);
+            if cfg.sudo && cfg.sudo_policy == SudoPolicy::Skip && plan_v.sudo_count() > 0 {
+                text.push_str(&format!(
+                    "\n{} need sudo and will be skipped (--with-sudo runs them, --sudo-only runs only them)",
+                    plural_steps(plan_v.sudo_count())
+                ));
+            }
+            if !prompter.confirm(&text) {
                 let mut r = ApplyReport::bare(Status::Declined, &cfg.run_id, plan_v);
                 r.errors.push(Diagnostic::from_code("declined", &[]));
                 return r;
@@ -884,6 +937,14 @@ pub fn apply_observed(
     }
 
     execute(inp, cfg, prompter, plan_v, obs, env)
+}
+
+fn plural_steps(n: usize) -> String {
+    if n == 1 {
+        "1 step".to_string()
+    } else {
+        format!("{n} steps")
+    }
 }
 
 fn execute(
@@ -938,7 +999,10 @@ fn execute(
     let can_prompt = prompter.can_prompt() && !cfg.yes;
 
     // One sudo prompt for the whole run.
-    let needs_sudo = cfg.sudo && plan_v.needs_root();
+    // Sudo steps the policy leaves alone (the batches are marked below) never prompt.
+    let skip_sudo = cfg.sudo && cfg.sudo_policy == SudoPolicy::Skip;
+    let only = cfg.sudo_policy == SudoPolicy::Only;
+    let needs_sudo = cfg.sudo && !skip_sudo && (plan_v.needs_root() || plan_v.sudo_count() > 0);
     let sudo_ok = if needs_sudo {
         let cmd = Cmd::new(SUDO).arg("-v").stdin(Stdin::Inherit).timeout(None);
         obs.sudo_prompt(true);
@@ -952,8 +1016,30 @@ fn execute(
 
     let n = plan_v.batches.len();
     let mut status = vec![B::Pending; n];
-    let blocked_by: BTreeMap<usize, usize> = BTreeMap::new();
-    let _ = blocked_by;
+    // Batches left alone by the sudo policy before anything runs, and the batches the end
+    // warning lists (those plus everything that transitively depends on them).
+    let mut unselected: BTreeSet<usize> = BTreeSet::new();
+    let mut listed: BTreeSet<usize> = BTreeSet::new();
+    for b in &plan_v.batches {
+        if skip_sudo && b.sudo {
+            for p in &b.packages {
+                if let Some(step) = plan_v.step(p) {
+                    let reason = step.sudo.clone().unwrap_or_else(|| "needs_root".into());
+                    run.mark(step, StepStatus::SkippedSudo { reason });
+                }
+            }
+            status[b.id] = B::Dead;
+            listed.insert(b.id);
+        } else if only && !b.sudo {
+            for p in &b.packages {
+                if let Some(step) = plan_v.step(p) {
+                    run.mark(step, StepStatus::NotSelected);
+                }
+            }
+            status[b.id] = B::Dead;
+            unselected.insert(b.id);
+        }
+    }
 
     std::thread::scope(|scope| {
         if needs_sudo && sudo_ok {
@@ -984,7 +1070,25 @@ fn execute(
                         continue;
                     }
                     let dead = b.deps.iter().find(|d| status[**d] == B::Dead).copied();
-                    if let Some(d) = dead {
+                    if let Some(d) = dead
+                        && unselected.contains(&d)
+                        && b.sudo
+                    {
+                        // `--sudo-only`: the ordinary package it needs is not installed yet.
+                        for p in &b.packages {
+                            if let Some(step) = plan_v.step(p) {
+                                run.mark(
+                                    step,
+                                    StepStatus::SkippedSudo {
+                                        reason: "run `dots apply` first".into(),
+                                    },
+                                );
+                            }
+                        }
+                        status[b.id] = B::Dead;
+                        listed.insert(b.id);
+                        changed = true;
+                    } else if let Some(d) = dead {
                         let dep_pkg = plan_v.batches[d]
                             .packages
                             .iter()
@@ -1003,11 +1107,16 @@ fn execute(
                                         dependency: dep_pkg.clone(),
                                     },
                                 );
-                                run.warnings.push(Diagnostic::from_code(
-                                    "skipped-due-to-dep",
-                                    &[("package", p), ("dependency", &dep_pkg)],
-                                ));
+                                if !listed.contains(&d) {
+                                    run.warnings.push(Diagnostic::from_code(
+                                        "skipped-due-to-dep",
+                                        &[("package", p), ("dependency", &dep_pkg)],
+                                    ));
+                                }
                             }
+                        }
+                        if listed.contains(&d) {
+                            listed.insert(b.id);
                         }
                         status[b.id] = B::Dead;
                         changed = true;
@@ -1222,7 +1331,7 @@ fn execute(
     // the unit is still linked, is the whole fix: the later services call (below) handles
     // everything else, after config and settings are in place.
     let mut services_done: Vec<ServiceStepResult> = Vec::new();
-    if !interrupted {
+    if !interrupted && !only {
         let teardown: Vec<ServiceStep> = plan_v
             .services
             .iter()
@@ -1260,11 +1369,13 @@ fn execute(
     let run_hooks = |run: &mut Run<'_>,
                      events: &[&str],
                      skip: &dyn Fn(&HookStep, &Run<'_>) -> Option<String>| {
-        for h in plan_v
-            .hooks
-            .iter()
-            .filter(|h| events.contains(&h.event.as_str()))
-        {
+        for h in plan_v.hooks.iter().filter(|h| {
+            events.contains(&h.event.as_str())
+                // `--sudo-only` runs the install hooks of the sudo packages and nothing else.
+                && (!only
+                    || (crate::hooks::is_install_event(&h.event)
+                        && plan_v.step(&h.package).is_some_and(|s| s.sudo.is_some())))
+        }) {
             if stop.load(Ordering::SeqCst) {
                 return;
             }
@@ -1283,7 +1394,7 @@ fn execute(
     // Shims, right after the installs: the shim points at what the install just put on disk.
     let mut shims_done: Vec<ShimStepResult> = Vec::new();
     let mut shims_skipped: Vec<(ShimStep, String)> = Vec::new();
-    if !interrupted {
+    if !interrupted && !only {
         let path_var = hook_ctx
             .env
             .get("PATH")
@@ -1335,13 +1446,13 @@ fn execute(
             None
         }
     };
-    if !interrupted {
+    if !interrupted && !only {
         run_hooks(&mut run, &["pre_files"], &pre_skip);
     }
 
     let mut files_done: Vec<FileStepResult> = Vec::new();
     let mut files_skipped: Vec<(FileStep, String)> = Vec::new();
-    if !plan_v.files.is_empty() && !interrupted {
+    if !plan_v.files.is_empty() && !interrupted && !only {
         let mut steps: Vec<FileStep> = Vec::new();
         for f in &plan_v.files {
             match blocked.get(f.package.as_str()) {
@@ -1416,7 +1527,7 @@ fn execute(
     // Settings, after files and before services: only for packages whose install went through.
     // The run's one prompt primed sudo when anything needs root; when it failed `sudo` is
     // false, so the phase fails root entries instead of running them as the user.
-    let settings_sudo = cfg.sudo && sudo_ok;
+    let settings_sudo = cfg.sudo && sudo_ok && !skip_sudo;
     if !interrupted && !inp.scope.packages_only && !inp.scope.files_only {
         let req = SettingsRequest {
             run_id: &cfg.run_id,
@@ -1433,12 +1544,44 @@ fn execute(
     }
     let mut settings_done: Vec<SettingStepResult> = Vec::new();
     let mut settings_skipped: Vec<(SettingStep, String)> = Vec::new();
+    let mut sudo_skipped_settings: Vec<SudoItem> = Vec::new();
     let mut restarts_done: Vec<RestartResult> = Vec::new();
     if !plan_v.settings.is_empty() && !interrupted {
         let mut steps: Vec<SettingStep> = Vec::new();
+        let item = |s: &SettingStep, reason: String| SudoItem {
+            name: s.label.clone(),
+            what: "setting",
+            kind: s.kind.clone(),
+            marker: if s.action == "delete" { "-" } else { "~" },
+            reason,
+        };
         for s in &plan_v.settings {
             match blocked.get(s.package.as_str()) {
-                Some(dep) => settings_skipped.push((s.clone(), (*dep).to_string())),
+                Some(dep) => {
+                    let sudo_blocked = plan_v
+                        .step(dep)
+                        .and_then(|st| run.results.get(&st.package))
+                        .is_some_and(|r| {
+                            matches!(
+                                r.status,
+                                StepStatus::SkippedSudo { .. } | StepStatus::NotSelected
+                            ) || listed.contains(&plan_v.step(dep).map_or(usize::MAX, |x| x.batch))
+                        });
+                    if sudo_blocked && (skip_sudo || (only && s.root)) {
+                        let reason = if only {
+                            "run `dots apply` first".to_string()
+                        } else if s.root {
+                            "root".to_string()
+                        } else {
+                            format!("depends on {dep}")
+                        };
+                        sudo_skipped_settings.push(item(s, reason));
+                    } else if !(only && !s.root) {
+                        settings_skipped.push((s.clone(), (*dep).to_string()));
+                    }
+                }
+                None if skip_sudo && s.root => sudo_skipped_settings.push(item(s, "root".into())),
+                None if only && !s.root => {}
                 None => steps.push(s.clone()),
             }
         }
@@ -1542,7 +1685,7 @@ fn execute(
     // Services: after config and settings are in place. A service whose config did not land
     // is left alone.
     let mut services_skipped: Vec<(ServiceStep, String)> = Vec::new();
-    if !plan_v.services.is_empty() && !interrupted {
+    if !plan_v.services.is_empty() && !interrupted && !only {
         let bad_cfg: BTreeSet<&str> = files_done
             .iter()
             .filter(|f| !f.ok)
@@ -1607,7 +1750,12 @@ fn execute(
                 None
             }
         };
-        run_hooks(&mut run, &["post_install", "post_files"], &post_skip);
+        let events: &[&str] = if only {
+            &["post_install"]
+        } else {
+            &["post_install", "post_files"]
+        };
+        run_hooks(&mut run, events, &post_skip);
     }
 
     let failed = run.results.values().any(|r| r.status == StepStatus::Failed)
@@ -1623,6 +1771,43 @@ fn execute(
         Status::Failed
     } else {
         Status::Done
+    };
+    // What the sudo policy left undone, for the end-of-run warning.
+    let mut sudo_skipped: Vec<SudoItem> = Vec::new();
+    for s in &plan_v.steps {
+        let Some(r) = run.results.get(&s.package) else {
+            continue;
+        };
+        let reason = match &r.status {
+            StepStatus::SkippedSudo { reason } => reason.clone(),
+            StepStatus::SkippedDueToDep { dependency } if listed.contains(&s.batch) => {
+                format!("depends on {dependency}")
+            }
+            _ => continue,
+        };
+        sudo_skipped.push(SudoItem {
+            name: s.package.clone(),
+            what: "package",
+            kind: s.provider.clone(),
+            marker: if s.kind == crate::plan::StepKind::Install {
+                "+"
+            } else {
+                "~"
+            },
+            reason,
+        });
+    }
+    sudo_skipped.append(&mut sudo_skipped_settings);
+    let sudo_unselected = if only {
+        run.results
+            .values()
+            .filter(|r| r.status == StepStatus::NotSelected)
+            .count()
+            + plan_v.files.len()
+            + plan_v.settings.iter().filter(|s| !s.root).count()
+            + plan_v.services.len()
+    } else {
+        0
     };
     let steps: Vec<StepResult> = plan_v
         .steps
@@ -1662,6 +1847,9 @@ fn execute(
         lock_updates,
         lock_drops,
         removals,
+        sudo_policy: cfg.sudo_policy,
+        sudo_skipped,
+        sudo_unselected,
     }
 }
 

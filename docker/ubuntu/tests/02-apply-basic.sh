@@ -3,7 +3,7 @@
 setup basic
 sudo apt-get remove -y tree >/dev/null 2>&1 || true
 command -v tree >/dev/null && fail "tree should not be installed before apply"
-expect_exit 0 dots apply --yes
+expect_exit 0 dots apply --yes --with-sudo
 command -v tree >/dev/null || fail "apt package 'tree' not installed"
 [ -x "$HOME/.local/bin/hello-dots" ] || fail "script package did not write ~/.local/bin/hello-dots"
 [ "$("$HOME/.local/bin/hello-dots")" = "hello from dots" ] || fail "hello-dots output"

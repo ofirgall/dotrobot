@@ -208,6 +208,7 @@ fn cfg(yes: bool) -> ApplyConfig {
         yes,
         allow_downgrade: false,
         sudo: false,
+        sudo_policy: SudoPolicy::Skip,
         journal: JournalMeta {
             host: "h".into(),
             root: "main".into(),
@@ -796,6 +797,7 @@ fn several_apt_installs_prompt_for_sudo_once() {
     case.ctx.runner = rec.clone();
     let mut c = cfg(true);
     c.sudo = true;
+    c.sudo_policy = SudoPolicy::With;
     let r = case.apply_with(&c, &NoPrompt);
     assert_eq!(r.status, Status::Done, "{:#?}", r.errors);
     // (`list` calls are the harness querying installed state.)
@@ -830,6 +832,7 @@ fn a_failed_sudo_prime_fails_root_actions_only() {
     case.ctx.runner = rec.clone();
     let mut c = cfg(true);
     c.sudo = true;
+    c.sudo_policy = SudoPolicy::With;
     let r = case.apply_with(&c, &NoPrompt);
     assert_eq!(r.status, Status::Failed);
     assert_eq!(status_of(&r, "a"), &StepStatus::Failed);
@@ -1616,6 +1619,7 @@ fn root_settings_share_the_one_sudo_prompt_with_an_apt_install() {
     );
     let mut c = cfg(true);
     c.sudo = true;
+    c.sudo_policy = SudoPolicy::With;
     let r = case.apply_with(&c, &NoPrompt);
     assert_eq!(r.status, Status::Done, "{:#?}", r.errors);
     let primes = rec
@@ -1640,6 +1644,7 @@ fn root_settings_share_the_one_sudo_prompt_with_an_apt_install() {
     case2.settings = &s2;
     let mut c2 = cfg(true);
     c2.sudo = true;
+    c2.sudo_policy = SudoPolicy::With;
     case2.apply_with(&c2, &NoPrompt);
     assert_eq!(
         rec2.lines()
@@ -2151,6 +2156,7 @@ fn a_failed_sudo_prime_tells_the_settings_phase_there_is_no_sudo() {
     case.settings = &settings;
     let mut c = cfg(true);
     c.sudo = true;
+    c.sudo_policy = SudoPolicy::With;
     case.apply_with(&c, &NoPrompt);
     assert_eq!(*settings.sudo_seen.lock().unwrap(), [false]);
     // --no-sudo likewise
@@ -2746,4 +2752,318 @@ fn nothing_is_switched_when_the_same_provider_installed_it() {
     let reg = registry(&[&brew]);
     let case = Case::new(&sb, &reg, &NoFiles);
     assert!(case.plan().steps.iter().all(|s| s.switch.is_none()));
+}
+
+// ------------------------------------------------------------------ sudo steps are opt-in
+
+mod sudo_policy {
+    use super::*;
+
+    /// `plain` (brew); `rootpkg` (apt, with a `post_install` hook); `child` and `grandchild`
+    /// chained on `rootpkg`; `cask` (`requires_sudo` on the package) and `viaprov` (on the
+    /// provider block), both brew; `late` (apt) that needs the ordinary `plain`.
+    fn repo() -> (Sandbox, PathBuf) {
+        let sb = sandbox(
+            &[
+                ("plain", BREW),
+                ("rootpkg", "[providers.apt]"),
+                ("child", "requires = [\"rootpkg\"]\n[providers.brew]"),
+                ("grandchild", "requires = [\"child\"]\n[providers.brew]"),
+                ("cask", "requires_sudo = true\n[providers.brew]"),
+                ("viaprov", "[providers.brew]\nrequires_sudo = true"),
+                ("late", "requires = [\"plain\"]\n[providers.apt]"),
+            ],
+            &[],
+        );
+        let order = sb.root.parent().unwrap().join("order.txt");
+        write(
+            &sb.root.join("packages/rootpkg/package.toml"),
+            &format!(
+                "schema = 1\nname = \"rootpkg\"\n[providers.apt]\n[hooks]\npost_install = \"echo rootpkg >> {}\"\n",
+                order.display()
+            ),
+        );
+        (sb, order)
+    }
+
+    fn run(
+        sb: &Sandbox,
+        brew: &FakeProvider,
+        apt: &FakeProvider,
+        policy: SudoPolicy,
+        root: bool,
+        settings: Option<&FakeSettings>,
+    ) -> (ApplyReport, Arc<RecordingRunner>) {
+        run_with(sb, brew, apt, policy, root, settings, true)
+    }
+
+    /// With `record` false the fakes see the real runner, so what they hold as installed is
+    /// visible to the plan (a recording runner answers every `list` with nothing).
+    fn run_with(
+        sb: &Sandbox,
+        brew: &FakeProvider,
+        apt: &FakeProvider,
+        policy: SudoPolicy,
+        root: bool,
+        settings: Option<&FakeSettings>,
+        record: bool,
+    ) -> (ApplyReport, Arc<RecordingRunner>) {
+        let reg = registry(&[brew, apt]);
+        let rec = Arc::new(RecordingRunner::new());
+        let mut case = Case::new(sb, &reg, &NoFiles);
+        if record {
+            case.ctx.runner = rec.clone();
+        }
+        if let Some(s) = settings {
+            case.settings = s;
+        }
+        let mut c = cfg(true);
+        c.sudo = !root;
+        c.sudo_policy = policy;
+        (case.apply_with(&c, &NoPrompt), rec)
+    }
+
+    fn primes(rec: &RecordingRunner) -> usize {
+        rec.lines()
+            .iter()
+            .filter(|l| *l == "/usr/bin/sudo -v")
+            .count()
+    }
+
+    fn fakes() -> (FakeProvider, FakeProvider) {
+        (
+            FakeProvider::new("brew"),
+            FakeProvider::new("apt").with_caps(apt_caps()),
+        )
+    }
+
+    #[test]
+    fn plan_marks_sudo_steps_with_their_reason() {
+        let (sb, _) = repo();
+        let (brew, apt) = fakes();
+        let reg = registry(&[&brew, &apt]);
+        let case = Case::new(&sb, &reg, &NoFiles);
+        let p = case.plan();
+        let reason = |n: &str| p.step(n).unwrap().sudo.clone();
+        assert_eq!(reason("plain"), None);
+        assert_eq!(reason("child"), None);
+        assert_eq!(reason("rootpkg").as_deref(), Some("needs_root"));
+        assert_eq!(reason("late").as_deref(), Some("needs_root"));
+        // requires_sudo at the package level and on the provider block
+        assert_eq!(reason("cask").as_deref(), Some("requires_sudo"));
+        assert_eq!(reason("viaprov").as_deref(), Some("requires_sudo"));
+        assert_eq!(p.sudo_count(), 4);
+        // A batch is all sudo or none, so the brew formulae never share one with the casks.
+        for b in &p.batches {
+            let n = b
+                .packages
+                .iter()
+                .filter(|x| p.step(x).unwrap().sudo.is_some())
+                .count();
+            assert!(n == 0 || n == b.packages.len(), "{b:?}");
+            assert_eq!(b.sudo, n > 0);
+        }
+        assert_eq!(plan_json(&p)["summary"]["sudo_steps"], 4);
+    }
+
+    #[test]
+    fn plain_apply_skips_sudo_steps_and_their_dependents_and_warns() {
+        let (sb, _) = repo();
+        let (brew, apt) = fakes();
+        let settings = FakeSettings::new(
+            vec![
+                sstep("plain", "defaults:user:1", &[], &[], false),
+                sstep("plain", "defaults:root:1", &[], &[], true),
+            ],
+            Arc::default(),
+        );
+        let (r, rec) = run(&sb, &brew, &apt, SudoPolicy::Skip, false, Some(&settings));
+        // Not a failure.
+        assert_eq!(r.status, Status::Done, "{:#?}", r.errors);
+        assert_eq!(primes(&rec), 0, "{:?}", rec.lines());
+        assert!(
+            !rec.lines().iter().any(|l| l.contains("sudo")),
+            "{:?}",
+            rec.lines()
+        );
+        assert!(apt.executed().is_empty());
+        assert_eq!(status_of(&r, "plain"), &StepStatus::Ok);
+        for p in ["rootpkg", "cask", "viaprov", "late"] {
+            assert!(
+                matches!(status_of(&r, p), StepStatus::SkippedSudo { .. }),
+                "{p}: {:?}",
+                status_of(&r, p)
+            );
+        }
+        for (p, dep) in [("child", "rootpkg"), ("grandchild", "child")] {
+            assert!(
+                matches!(status_of(&r, p), StepStatus::SkippedDueToDep { dependency } if dependency == dep),
+                "{p}: {:?}",
+                status_of(&r, p)
+            );
+        }
+        // The warning lists every step not applied, with the reason.
+        let listed: BTreeMap<&str, &str> = r
+            .sudo_skipped
+            .iter()
+            .map(|i| (i.name.as_str(), i.reason.as_str()))
+            .collect();
+        assert_eq!(listed["rootpkg"], "needs_root");
+        assert_eq!(listed["cask"], "requires_sudo");
+        assert_eq!(listed["viaprov"], "requires_sudo");
+        assert_eq!(listed["child"], "depends on rootpkg");
+        assert_eq!(listed["grandchild"], "depends on child");
+        assert_eq!(listed["defaults:root:1"], "root");
+        assert_eq!(r.sudo_skipped.len(), 7, "{:?}", r.sudo_skipped);
+        // Only the ordinary setting ran, and not under sudo.
+        assert_eq!(
+            settings.log.lock().unwrap().clone(),
+            ["setting defaults:user:1"]
+        );
+        assert_eq!(*settings.sudo_seen.lock().unwrap(), [false]);
+        // Nothing skipped is recorded as done, and its hook did not run.
+        let st = read_state(&sb);
+        let pk = st["packages"].as_object().unwrap();
+        assert_eq!(pk.keys().collect::<Vec<_>>(), ["plain"], "{st}");
+        assert!(!rec.lines().iter().any(|l| l.contains("echo rootpkg")));
+        assert!(r.lock_updates.iter().all(|u| u.package == "plain"));
+        let j = r.to_json();
+        assert_eq!(j["sudo"]["mode"], "skip");
+        assert_eq!(j["sudo"]["skipped"].as_array().unwrap().len(), 7);
+        assert!(j["sudo"]["skipped"][0]["reason"].as_str().is_some());
+
+        // The next plain apply skips them again.
+        let (brew2, apt2) = (
+            FakeProvider::new("brew").with_installed("plain", "1.0.0"),
+            FakeProvider::new("apt").with_caps(apt_caps()),
+        );
+        let (r2, _) = run(&sb, &brew2, &apt2, SudoPolicy::Skip, false, None);
+        assert_eq!(r2.status, Status::Done);
+        assert_eq!(r2.sudo_skipped.len(), 6);
+    }
+
+    #[test]
+    fn with_sudo_runs_everything_and_primes_once() {
+        let (sb, _) = repo();
+        let (brew, apt) = fakes();
+        let settings = FakeSettings::new(
+            vec![sstep("plain", "defaults:root:1", &[], &[], true)],
+            Arc::default(),
+        );
+        let (r, rec) = run(&sb, &brew, &apt, SudoPolicy::With, false, Some(&settings));
+        assert_eq!(r.status, Status::Done, "{:#?}", r.errors);
+        assert!(r.sudo_skipped.is_empty());
+        assert!(
+            r.steps.iter().all(|s| s.status == StepStatus::Ok),
+            "{:?}",
+            r.steps
+        );
+        assert_eq!(primes(&rec), 1);
+        let real: Vec<String> = rec
+            .lines()
+            .into_iter()
+            .filter(|l| !l.ends_with(" list"))
+            .collect();
+        assert_eq!(real[0], "/usr/bin/sudo -v");
+        assert_eq!(*settings.sudo_seen.lock().unwrap(), [true]);
+        assert!(rec.lines().iter().any(|l| l.contains("echo rootpkg")));
+        assert_eq!(read_state(&sb)["packages"].as_object().unwrap().len(), 7);
+    }
+
+    #[test]
+    fn with_sudo_failing_to_prime_fails_sudo_steps_as_before() {
+        let (sb, _) = repo();
+        let (brew, apt) = fakes();
+        let reg = registry(&[&brew, &apt]);
+        let rec = Arc::new(RecordingRunner::new());
+        rec.on(
+            &["/usr/bin/sudo", "-v"],
+            dots_providers::Output::fail(1, "no tty"),
+        );
+        let mut case = Case::new(&sb, &reg, &NoFiles);
+        case.ctx.runner = rec.clone();
+        let mut c = cfg(true);
+        c.sudo = true;
+        c.sudo_policy = SudoPolicy::With;
+        let r = case.apply_with(&c, &NoPrompt);
+        assert_eq!(r.status, Status::Failed);
+        assert_eq!(status_of(&r, "rootpkg"), &StepStatus::Failed);
+        assert!(r.errors.iter().any(|e| e.code == "sudo-failed"));
+    }
+
+    #[test]
+    fn sudo_only_runs_just_sudo_steps_and_skips_those_with_a_missing_ordinary_dependency() {
+        let (sb, _) = repo();
+        let (brew, apt) = fakes();
+        let settings = FakeSettings::new(
+            vec![
+                sstep("plain", "defaults:user:1", &[], &[], false),
+                sstep("rootpkg", "defaults:root:1", &[], &[], true),
+            ],
+            Arc::default(),
+        );
+        let (r, rec) = run(&sb, &brew, &apt, SudoPolicy::Only, false, Some(&settings));
+        assert_eq!(r.status, Status::Done, "{:#?}", r.errors);
+        assert_eq!(primes(&rec), 1);
+        for p in ["rootpkg", "cask", "viaprov"] {
+            assert_eq!(status_of(&r, p), &StepStatus::Ok, "{p}");
+        }
+        for p in ["plain", "child", "grandchild"] {
+            assert_eq!(status_of(&r, p), &StepStatus::NotSelected, "{p}");
+        }
+        // `late` needs `plain`, which is not installed: apply it first.
+        assert_eq!(
+            status_of(&r, "late"),
+            &StepStatus::SkippedSudo {
+                reason: "run `dots apply` first".into()
+            }
+        );
+        assert_eq!(r.sudo_skipped.len(), 1);
+        // plain, child, grandchild, plus the ordinary setting
+        assert_eq!(r.sudo_unselected, 4);
+        // The sudo package's install hook ran; the root setting ran, the ordinary one did not.
+        assert!(rec.lines().iter().any(|l| l.contains("echo rootpkg")));
+        assert_eq!(
+            settings.log.lock().unwrap().clone(),
+            ["setting defaults:root:1"]
+        );
+        assert_eq!(*settings.sudo_seen.lock().unwrap(), [true]);
+        let st = read_state(&sb);
+        let mut names: Vec<&String> = st["packages"].as_object().unwrap().keys().collect();
+        names.sort();
+        assert_eq!(names, ["cask", "rootpkg", "viaprov"], "{st}");
+        assert_eq!(r.to_json()["sudo"]["mode"], "only");
+    }
+
+    #[test]
+    fn sudo_only_runs_a_sudo_step_whose_ordinary_dependency_is_installed() {
+        let (sb, _) = repo();
+        let brew = FakeProvider::new("brew").with_installed("plain", "1.0.0");
+        let apt = FakeProvider::new("apt").with_caps(apt_caps());
+        // (`root: true` so the unrecorded run never calls the real `sudo`.)
+        let (r, _) = run_with(&sb, &brew, &apt, SudoPolicy::Only, true, None, false);
+        assert_eq!(status_of(&r, "late"), &StepStatus::Ok);
+        assert!(r.sudo_skipped.is_empty());
+    }
+
+    #[test]
+    fn running_as_root_makes_sudo_steps_ordinary() {
+        let (sb, _) = repo();
+        let (brew, apt) = fakes();
+        let (r, rec) = run(&sb, &brew, &apt, SudoPolicy::Skip, true, None);
+        assert_eq!(r.status, Status::Done, "{:#?}", r.errors);
+        assert!(
+            r.steps.iter().all(|s| s.status == StepStatus::Ok),
+            "{:?}",
+            r.steps
+        );
+        assert!(r.sudo_skipped.is_empty());
+        assert_eq!(primes(&rec), 0);
+        assert!(
+            !rec.lines().iter().any(|l| l.contains("sudo")),
+            "{:?}",
+            rec.lines()
+        );
+        assert!(rec.lines().iter().any(|l| l.contains("echo rootpkg")));
+    }
 }

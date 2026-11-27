@@ -956,6 +956,36 @@ fn the_launchd_domain_is_the_real_users_not_the_homes_owner() {
 }
 
 #[test]
+fn plan_marks_sudo_steps_and_says_what_plain_apply_does() {
+    let b = sandbox(&[(
+        "ua",
+        "[[defaults]]\ndomain = \"com.apple.universalaccess\"\nkey = \"reduceMotion\"\nvalue = true\nroot = true\n",
+    )]);
+    let o = run(&b, &["plan"]);
+    assert_eq!(o.code, 0, "{} {}", o.stdout, o.stderr);
+    let all = format!("{}{}", o.stdout, o.stderr);
+    assert!(all.contains("(sudo)"), "{all}");
+    assert!(
+        all.contains("1 step needs sudo, so a plain `dots apply` skips it")
+            && all.contains("--with-sudo")
+            && all.contains("--sudo-only"),
+        "{all}"
+    );
+    assert!(!all.contains("Needs your password once"), "{all}");
+    let j = run(&b, &["plan", "--json"]);
+    let v: Value = serde_json::from_str(&j.stdout).unwrap();
+    assert_eq!(v["data"]["summary"]["sudo_steps"], 1);
+    // `--with-sudo` and `--sudo-only` are exclusive.
+    let both = run(&b, &["apply", "--with-sudo", "--sudo-only"]);
+    assert_ne!(both.code, 0);
+    assert!(
+        both.stderr.contains("cannot be used with"),
+        "{}",
+        both.stderr
+    );
+}
+
+#[test]
 fn a_root_setting_without_sudo_fails_and_never_runs_as_the_user() {
     let b = sandbox(&[(
         "ua",
@@ -969,7 +999,19 @@ fn a_root_setting_without_sudo_fails_and_never_runs_as_the_user() {
             b.root.display().to_string()
         ),
     );
-    let o = run(&b, &["apply", "--yes"]);
+    // A plain apply never runs a root step: it warns and exits 0.
+    let plain = run(&b, &["apply", "--yes"]);
+    assert_eq!(plain.code, 0, "{} {}", plain.stdout, plain.stderr);
+    assert!(
+        plain
+            .stdout
+            .contains("1 step needs sudo and was not applied")
+            && plain.stdout.contains("dots apply --sudo-only"),
+        "{}",
+        plain.stdout
+    );
+    // `--with-sudo` tries, and fails because there is no sudo.
+    let o = run(&b, &["apply", "--yes", "--with-sudo"]);
     assert_ne!(o.code, 0, "{} {}", o.stdout, o.stderr);
     assert!(
         b.calls().iter().all(|c| !c.starts_with("defaults write")),

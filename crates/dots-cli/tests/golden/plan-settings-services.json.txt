@@ -61,7 +61,8 @@ exit: 0
       "root_actions": 0,
       "services": 1,
       "settings": 1,
-      "shims": 0
+      "shims": 0,
+      "sudo_steps": 0
     },
     "unplanned": []
   },

@@ -77,6 +77,9 @@ pub struct PkgStep {
     pub from: Option<String>,
     pub to: Option<String>,
     pub needs_root: bool,
+    /// Why this is a sudo step (`requires_sudo`, `needs_root`, `removes the old copy as
+    /// root`); `None` for an ordinary step. A plain `dots apply` skips sudo steps.
+    pub sudo: Option<String>,
     pub interactive: bool,
     /// This package is another package's provider bootstrap.
     pub bootstrap: bool,
@@ -128,6 +131,22 @@ pub struct Batch {
     pub actions: Vec<Action>,
     pub deps: Vec<usize>,
     pub interactive: bool,
+    /// Its packages are sudo steps (a batch is never a mix: sudo is part of its key).
+    pub sudo: bool,
+}
+
+/// One sudo step of a plan, as the warning lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SudoItem {
+    /// The package, or the setting's label.
+    pub name: String,
+    /// `package` or `setting`.
+    pub what: &'static str,
+    /// The provider of a package, the kind (`defaults`) of a setting.
+    pub kind: String,
+    /// `+` install, `~` upgrade, change or setting, `-` removal.
+    pub marker: &'static str,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -175,6 +194,41 @@ impl Plan {
                 .filter_map(|s| s.switch.as_ref())
                 .any(|w| w.remove.iter().any(|a| a.needs_root))
             || self.settings.iter().any(|s| s.root)
+    }
+
+    /// Every sudo step of the plan: packages in plan order, then root settings. (No service
+    /// runs as root; a service has no sudo marker.)
+    pub fn sudo_items(&self) -> Vec<SudoItem> {
+        let mut out: Vec<SudoItem> = self
+            .steps
+            .iter()
+            .filter_map(|s| {
+                Some(SudoItem {
+                    name: s.package.clone(),
+                    what: "package",
+                    kind: s.provider.clone(),
+                    marker: if s.kind == StepKind::Install {
+                        "+"
+                    } else {
+                        "~"
+                    },
+                    reason: s.sudo.clone()?,
+                })
+            })
+            .collect();
+        out.extend(self.settings.iter().filter(|s| s.root).map(|s| SudoItem {
+            name: s.label.clone(),
+            what: "setting",
+            kind: s.kind.clone(),
+            marker: if s.action == "delete" { "-" } else { "~" },
+            reason: "root".into(),
+        }));
+        out
+    }
+
+    pub fn sudo_count(&self) -> usize {
+        self.steps.iter().filter(|s| s.sudo.is_some()).count()
+            + self.settings.iter().filter(|s| s.root).count()
     }
 
     pub fn step(&self, package: &str) -> Option<&PkgStep> {
@@ -470,6 +524,8 @@ fn plan_hooks(inp: &Inputs<'_>, plan: &Plan) -> Vec<HookStep> {
 struct Draft {
     step: PkgStep,
     op: Op,
+    /// May be a sudo step: part of the batch key, so a batch is all sudo or none.
+    sudo_hint: bool,
 }
 
 fn plan_packages(
@@ -618,6 +674,29 @@ fn plan_packages(
         let is_script = choice.id == "script";
         let always_confirm = (is_script && inp.unreviewed.contains(name))
             .then(|| format!("`{name}` runs a script from a source you have not reviewed"));
+        let switch = plan_switch(inp, &owned, name, &choice.id);
+        let provider_caps_root = inp
+            .registry
+            .get_for(&choice.id, name)
+            .is_some_and(|p| p.caps().needs_root);
+        let uv_system = matches!(cfg, Some(ProviderConfig::Uv(u)) if u.break_system_packages);
+        let sudo = if pkg.is_some_and(|p| p.requires_sudo)
+            || cfg.is_some_and(|c| c.common().requires_sudo)
+        {
+            Some("requires_sudo".to_string())
+        } else if needs_root_cfg || provider_caps_root {
+            Some("needs_root".to_string())
+        } else if switch
+            .as_ref()
+            .is_some_and(|w| w.remove.iter().any(|a| a.needs_root))
+        {
+            Some("removes the old copy as root".to_string())
+        } else {
+            None
+        };
+        // Known only once the provider planned its actions (uv checks the target directory);
+        // until then it keeps such a package apart from the ordinary ones.
+        let sudo_hint = sudo.is_some() || uv_system;
         let op = Op {
             kind: op_kind,
             spec,
@@ -634,15 +713,17 @@ fn plan_packages(
                     from: installed.map(|i| i.version.clone()),
                     to: version,
                     needs_root: needs_root_cfg,
+                    sudo,
                     interactive,
                     bootstrap: bootstrap_targets.contains(name.as_str()),
                     always_confirm,
                     note,
                     deps: Vec::new(),
                     batch: 0,
-                    switch: plan_switch(inp, &owned, name, &choice.id),
+                    switch,
                 },
                 op,
+                sudo_hint,
             },
         );
     }
@@ -687,7 +768,7 @@ fn plan_packages(
         }
     }
 
-    type Key = (String, Option<String>, usize, Option<String>);
+    type Key = (String, Option<String>, usize, Option<String>, bool);
     let mut keyed: Vec<(Key, Vec<String>)> = Vec::new();
     for n in &order {
         let d = &drafts[*n];
@@ -698,6 +779,7 @@ fn plan_packages(
             level[*n],
             // an interactive step is alone in its batch
             d.step.interactive.then(|| (*n).clone()),
+            d.sudo_hint,
         );
         match keyed.iter_mut().find(|(k, _)| *k == key) {
             Some((_, v)) => v.push((*n).clone()),
@@ -713,7 +795,7 @@ fn plan_packages(
             batch_of.insert(p.clone(), i);
         }
     }
-    for (i, ((provider, instance, _, inter), pkgs)) in keyed.iter().enumerate() {
+    for (i, ((provider, instance, _, inter, _), pkgs)) in keyed.iter().enumerate() {
         let provider_impl = inp
             .registry
             .get_for(provider, pkgs.first().map_or("", String::as_str));
@@ -753,6 +835,7 @@ fn plan_packages(
             actions,
             deps: deps.into_iter().collect(),
             interactive: inter.is_some(),
+            sudo: false,
         });
     }
 
@@ -764,7 +847,13 @@ fn plan_packages(
             .iter()
             .any(|a| a.needs_root && a.ops.iter().any(|o| o.spec.name == d.step.native));
         d.step.needs_root = d.step.needs_root || by_action;
+        if by_action && d.step.sudo.is_none() {
+            d.step.sudo = Some("needs_root".into());
+        }
         d.step.batch = batch_of[name];
+    }
+    for b in &mut plan.batches {
+        b.sudo = b.packages.iter().any(|p| drafts[p].step.sudo.is_some());
     }
     // Actions of root-needing script packages are marked too.
     for b in &mut plan.batches {

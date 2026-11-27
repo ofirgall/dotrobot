@@ -460,6 +460,7 @@ fn plan_data_schema() -> Value {
                         "from": nullable_str,
                         "to": nullable_str,
                         "needs_root": { "type": "boolean" },
+                        "sudo": { "type": ["string", "null"], "description": "why a plain `dots apply` skips this step (`requires_sudo`, `needs_root`, ...); null for an ordinary step" },
                         "interactive": { "type": "boolean" },
                         "bootstrap": { "type": "boolean" },
                         "note": nullable_str,
@@ -479,6 +480,7 @@ fn plan_data_schema() -> Value {
                         "provider": { "type": "string" },
                         "packages": { "type": "array", "items": { "type": "string" } },
                         "interactive": { "type": "boolean" },
+                        "sudo": { "type": "boolean" },
                         "after": { "type": "array", "items": { "type": "integer" } },
                         "commands": {
                             "type": "array",
@@ -608,7 +610,8 @@ fn plan_data_schema() -> Value {
                     "shims": { "type": "integer", "minimum": 0 },
                     "hooks": { "type": "integer", "minimum": 0 },
                     "downgrades": { "type": "integer", "minimum": 0 },
-                    "root_actions": { "type": "integer", "minimum": 0 }
+                    "root_actions": { "type": "integer", "minimum": 0 },
+                    "sudo_steps": { "type": "integer", "minimum": 0 }
                 }
             }
         }
@@ -622,11 +625,34 @@ fn apply_data_schema() -> Value {
     json!({
         "type": "object",
         "required": ["status", "run", "dry_run", "plan", "results", "files", "settings", "restarts",
-                     "services", "shims", "hooks", "hooks_skipped", "todos", "summary"],
+                     "services", "shims", "hooks", "hooks_skipped", "todos", "sudo", "summary"],
         "properties": {
             "status": {
                 "enum": ["done", "failed", "interrupted", "dry-run",
                          "confirmation-required", "declined", "plan-failed"]
+            },
+            "sudo": {
+                "type": "object",
+                "description": "how sudo steps were handled: `skip` (plain apply), `with` (--with-sudo) or `only` (--sudo-only)",
+                "required": ["mode", "skipped", "not_applied_ordinary"],
+                "properties": {
+                    "mode": { "enum": ["skip", "with", "only"] },
+                    "skipped": {
+                        "type": "array",
+                        "description": "steps not applied because they need sudo (or depend on one that was not applied), with the reason",
+                        "items": {
+                            "type": "object",
+                            "required": ["name", "kind", "provider", "reason"],
+                            "properties": {
+                                "name": { "type": "string" },
+                                "kind": { "enum": ["package", "setting"] },
+                                "provider": { "type": "string" },
+                                "reason": { "type": "string" }
+                            }
+                        }
+                    },
+                    "not_applied_ordinary": { "type": "integer", "minimum": 0 }
+                }
             },
             "run": { "type": "string" },
             "dry_run": { "type": "boolean" },
@@ -658,7 +684,7 @@ fn apply_data_schema() -> Value {
                         "action": { "enum": ["install", "upgrade", "downgrade"] },
                         "from": nullable_str,
                         "to": nullable_str,
-                        "status": { "enum": ["ok", "failed", "skipped-due-to-dep", "deferred", "not-run"] },
+                        "status": { "enum": ["ok", "failed", "skipped-due-to-dep", "deferred", "not-run", "skipped-sudo", "not-selected"] },
                         "dependency": { "type": "string" },
                         "log": nullable_str,
                         "error": nullable_str,
@@ -783,6 +809,7 @@ fn apply_data_schema() -> Value {
                     "ok": { "type": "integer", "minimum": 0 },
                     "failed": { "type": "integer", "minimum": 0 },
                     "skipped": { "type": "integer", "minimum": 0 },
+                    "skipped_sudo": { "type": "integer", "minimum": 0 },
                     "deferred": { "type": "integer", "minimum": 0 },
                     "not_run": { "type": "integer", "minimum": 0 },
                     "files_ok": { "type": "integer", "minimum": 0 },

@@ -1,6 +1,6 @@
 Usage: dots init [--from <source>] [--root <path>] [--defaults]
 
-Usage: dots apply [<pkg|bundle>...] [--files-only|--packages-only] [--yes] [--dry-run] [--allow-downgrade] [--root <path>] [--home <dir>]
+Usage: dots apply [<pkg|bundle>...] [--files-only|--packages-only] [--with-sudo|--sudo-only] [--yes] [--dry-run] [--allow-downgrade] [--root <path>] [--home <dir>]
 
 Usage: dots plan [<pkg|bundle>...] [--files-only|--packages-only] [--check]
 

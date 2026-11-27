@@ -34,7 +34,7 @@ macro_rules! provider {
     ($( ($k:literal, $t:expr) ),* $(,)?) => {
         Ty::Obj(&[
             ("name", Ty::Str), ("bin", Ty::Str), ("bins", STRS),
-            ("shim", Ty::Str), ("when", Ty::Str),
+            ("shim", Ty::Str), ("when", Ty::Str), ("requires_sudo", Ty::Bool),
             $( ($k, $t), )*
         ])
     };
@@ -267,6 +267,7 @@ pub const PACKAGE: Ty = Ty::Obj(&[
     ("replaces", STRS),
     ("prefer", STRS),
     ("providers_only", Ty::Bool),
+    ("requires_sudo", Ty::Bool),
     ("providers", Ty::Providers),
     ("files", Ty::List(&FILE_ENTRY)),
     ("defaults", Ty::List(&DEFAULTS_ENTRY)),

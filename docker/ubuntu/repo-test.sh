@@ -42,7 +42,7 @@ step() { # step <label> <cmd...>; records exit code in R_<label>
 
 step lint dots lint
 step plan dots plan
-step apply dots apply --yes
+step apply dots apply --yes --with-sudo
 step status dots status
 step recheck dots plan --check
 

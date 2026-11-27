@@ -415,6 +415,24 @@ impl Linter<'_> {
                         .with_provenance(prov(&format!("package:{pn}"), &file, at));
                 self.warn(d);
             }
+            // `requires_sudo` on a provider whose installs are root steps anyway.
+            for (id, cfg) in &p.providers {
+                let root_anyway =
+                    id == "apt" || matches!(cfg, ProviderConfig::Script(s) if s.needs_root);
+                if cfg.common().requires_sudo && root_anyway {
+                    let file = format!("packages/{pn}/package.toml");
+                    let at = p
+                        .spans
+                        .get(&format!("providers.{id}.requires_sudo"))
+                        .copied();
+                    let d = Diagnostic::from_code(
+                        "requires-sudo-redundant",
+                        &[("package", pn), ("provider", id), ("file", &file)],
+                    )
+                    .with_provenance(prov(&format!("package:{pn}"), &file, at));
+                    self.warn(d);
+                }
+            }
             if let Some(ProviderConfig::Script(s)) = p.providers.get("script") {
                 let file = format!("packages/{pn}/package.toml");
                 if let Some(f) = &s.fetch
