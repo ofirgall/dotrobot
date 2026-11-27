@@ -49,7 +49,9 @@ requires_sudo = true              # or on one provider block only
 
 Use `requires_sudo` for a step that is not run as root by `dots` but still needs the admin password: a brew cask with a `.pkg` installer, a kernel extension. A plain `dots apply` skips sudo steps (and the steps that depend on them); `--with-sudo` runs everything; `--sudo-only` runs only the sudo steps. A package's hooks follow its install step: when the install is skipped so are its hooks. `dots lint` warns when `requires_sudo` is set on a provider that is always root anyway (`apt`, a `needs_root` script). The step's batch never mixes sudo and ordinary packages of one provider, so a cask that needs the password does not hold back the formulae next to it.
 
-A provider may also implement `stale_reason(ctx, spec)`: for an installed package the version rules leave alone, it returns why the package must be upgraded anyway (apt: its declared `repo` is not configured yet, so it still comes from the distribution archive). The plan shows the reason and upgrades the package; the default is no reason. It must read local state only.
+A provider may also implement `stale_reason(ctx, spec)`: for an installed package the version rules leave alone, it returns why the package must be upgraded anyway (apt: its declared `repo` is not configured yet, so it still comes from the distribution archive; cargo: the crate was installed from a different source than the declared `git` or `path`, such as a local build when the repo wants a fork). The plan shows the reason and upgrades the package; the default is no reason. It must read local state only.
+
+A provider may also implement `retry_each(action)`: when a batched install or upgrade of several packages exits non-zero, it returns the per-package actions to run instead (apt and brew do). The engine first asks `installed()` which packages of the failed batch are present and marks those ok (`brew install --cask a b c` stops at the first failure and leaves the packages before it installed and the ones after it untried), then runs the retries for the rest one at a time. Only the packages that still fail are failures, each with its own log. Without `retry_each` the packages the failed command did install are still kept, and the rest fail together with the batch. Packages that fail with the same error are reported once in the summary, listed under it.
 
 ### Conformance kit
 
@@ -194,8 +196,10 @@ Parse modes for `installed`:
   an object (name to version string, or to an object with `version`); `.` is the root;
 - `regex:<re>`: applied to each line, with named groups `name` and `version` (or groups 1 and 2).
 
-Placeholders are filled from the spec and the facts: `{name}`, `{source}` (the package's
-`source`, or its name), `{version}`, `{version|latest}` (a default when no version is requested;
+Placeholders are filled from the spec and the facts: `{name}` (the provider-native name: the
+package's `[providers.<id>] name`, else the package name), `{source}` (the `source` key of the
+package's `[providers.<id>]` block, else the spec-level source, else the native name; in
+`{names}` each entry follows the same rule), `{version}`, `{version|latest}` (a default when no version is requested;
 a bare `{version}` without one is an error), `{bin}`, `{names}` (batch only), `{os}`, `{arch}`,
 `{distro}`, `{home}`, `{user}` and `{hostname}`. Other braces, such as an awk body, are left alone.
 

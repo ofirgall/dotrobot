@@ -348,3 +348,83 @@ fn availability_without_a_context_probes_available_once() {
     // Without a probe context nothing is guessed: only the facts count.
     assert_eq!(go().availability(&facts), Availability::Unsupported);
 }
+
+/// `[providers.herdr-plugin] name = "herdr-workspace-move"` / `source = "ofirgall/..."`: the
+/// block's `source` option is what `{source}` stands for, and `{name}` is the native name.
+#[test]
+fn source_placeholder_prefers_the_provider_block_source() {
+    let mut t = go_table();
+    t["install"] = json!("herdr plugin install {source} --yes");
+    let p = CustomProvider::new(
+        CustomDef::from_json("herdr-plugin", &t).unwrap(),
+        &Facts::default(),
+    );
+    let op = |spec: Spec| Op {
+        kind: OpKind::Install,
+        spec,
+        version: None,
+    };
+    let line = |spec: Spec| p.plan(&[op(spec)]).unwrap()[0].argv.join(" ");
+
+    // The block's `source` wins over the spec-level one and over the name.
+    let both = Spec {
+        source: Some("spec/level".into()),
+        ..Spec::new("herdr-workspace-move").opt("source", "ofirgall/herdr-workspace-move")
+    };
+    assert_eq!(
+        line(both),
+        "herdr plugin install ofirgall/herdr-workspace-move --yes"
+    );
+    // Then the spec-level source, then the name.
+    let spec_level = Spec {
+        source: Some("spec/level".into()),
+        ..Spec::new("herdr-workspace-move")
+    };
+    assert_eq!(line(spec_level), "herdr plugin install spec/level --yes");
+    assert_eq!(
+        line(Spec::new("herdr-workspace-move")),
+        "herdr plugin install herdr-workspace-move --yes"
+    );
+}
+
+#[test]
+fn name_is_the_native_name_even_when_source_is_set() {
+    let mut t = go_table();
+    t["install"] = json!("herdr plugin install {source} --as {name}");
+    let p = CustomProvider::new(
+        CustomDef::from_json("herdr-plugin", &t).unwrap(),
+        &Facts::default(),
+    );
+    // The package is `herdr-collie`; its block names the native `herdr.collie`.
+    let spec = Spec::new("herdr.collie").opt("source", "ofirgall/herdr-collie");
+    let a = p
+        .plan(&[Op {
+            kind: OpKind::Install,
+            spec,
+            version: None,
+        }])
+        .unwrap();
+    assert_eq!(
+        a[0].argv.join(" "),
+        "herdr plugin install ofirgall/herdr-collie --as herdr.collie"
+    );
+}
+
+#[test]
+fn batched_names_use_the_block_source_too() {
+    let mut t = go_table();
+    t["install"] = json!("gem install {names}");
+    t["batch"] = json!(true);
+    let p = CustomProvider::new(CustomDef::from_json("gem", &t).unwrap(), &Facts::default());
+    let a = p
+        .plan(&[
+            Op {
+                kind: OpKind::Install,
+                spec: Spec::new("a").opt("source", "x/a"),
+                version: None,
+            },
+            install_op("b", None, None),
+        ])
+        .unwrap();
+    assert_eq!(a[0].argv, ["gem", "install", "x/a", "b"]);
+}

@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use dots_core::{Diagnostic, ExitCode, Report};
 use dots_engine::{
     ApplyConfig, ApplyReport, Inputs, JournalMeta, Mode, Observer, Prompter, RunLock, Scope,
-    Status, StepResult, apply_observed, new_run_id, plan, plan_json,
+    Status, apply_observed, new_run_id, plan, plan_json,
 };
 use dots_resolve::resolve_full;
 
@@ -432,8 +432,11 @@ pub(crate) fn apply_inner(
         None => Mode::DryRun,
     };
     let ui = dots_ui::Ui::from_process(&ctx.opts, &dots_core::ProcessEnv);
-    let progress = (!ctx.opts.json && !ctx.opts.quiet && !a.dry_run && ui.stderr_tty)
-        .then(|| LiveProgress::new(&ui));
+    // Progress streams on stderr, also when it is a pipe (and under `--json`, whose stdout
+    // stays one document); `--quiet` only drops the stderr lines. The live log is always kept.
+    let progress = (!a.dry_run).then(|| {
+        crate::stream::LiveProgress::new(&ui, !ctx.opts.quiet, pctx.log_dir.join("run.log"))
+    });
     let mut env = dots_env::EnvCtx::new(&ctx.dirs.home);
     env.vars = dots_files::resolve_path_vars(&p.rc.repo.manifest.paths, p.rc.chain.levels());
     let report = apply_observed(
@@ -490,156 +493,4 @@ fn to_report(
     report.errors = r.errors.clone();
     report.warnings = warnings;
     report
-}
-
-/// Live progress on stderr, only when stderr is a terminal (never under `--json`, `--quiet`
-/// or a pipe, so captured output stays stable).
-struct LiveProgress {
-    p: dots_ui::Progress,
-    batches: std::sync::Mutex<std::collections::BTreeMap<usize, dots_ui::TaskId>>,
-}
-
-impl LiveProgress {
-    fn new(ui: &dots_ui::Ui) -> Self {
-        LiveProgress {
-            p: dots_ui::Progress::stderr(ui),
-            batches: Default::default(),
-        }
-    }
-}
-
-impl Drop for LiveProgress {
-    fn drop(&mut self) {
-        self.p.finish_all();
-    }
-}
-
-impl Observer for LiveProgress {
-    fn planned(&self, plan: &dots_engine::Plan) {
-        self.p.set_total(
-            plan.steps.len()
-                + plan.files.len()
-                + plan.settings.len()
-                + plan.services.len()
-                + plan.shims.len()
-                + plan.hooks.len(),
-        );
-    }
-
-    fn sudo_prompt(&self, begin: bool) {
-        if begin {
-            self.p.suspend();
-        } else {
-            self.p.resume();
-        }
-    }
-
-    fn batch_started(&self, b: &dots_engine::Batch) {
-        let id = self.p.start(&b.packages.join(", "), &b.provider);
-        self.batches.lock().unwrap().insert(b.id, id);
-    }
-
-    fn batch_finished(&self, b: &dots_engine::Batch, results: &[StepResult]) {
-        use dots_core::State;
-        use dots_engine::StepStatus;
-        let Some(id) = self.batches.lock().unwrap().remove(&b.id) else {
-            return;
-        };
-        let (state, detail) = if results.iter().all(|r| r.status == StepStatus::Ok) {
-            (State::Done, "installed".to_string())
-        } else {
-            (State::Failed, "see the summary below".to_string())
-        };
-        let dur = results.iter().map(|r| r.dur_ms).sum::<u64>();
-        self.p.finish(
-            id,
-            state,
-            &detail,
-            Some(std::time::Duration::from_millis(dur)),
-        );
-    }
-
-    fn file_done(&self, r: &dots_engine::FileStepResult) {
-        use dots_core::State;
-        let id = self.p.start(&r.step.dst, &r.step.kind);
-        let (state, detail) = if r.ok {
-            (State::Done, r.step.action.clone())
-        } else {
-            (State::Failed, r.detail.clone().unwrap_or_default())
-        };
-        self.p.finish(
-            id,
-            state,
-            &detail,
-            Some(std::time::Duration::from_millis(r.dur_ms)),
-        );
-    }
-
-    fn setting_done(&self, r: &dots_engine::SettingStepResult) {
-        use dots_core::State;
-        let id = self.p.start(&r.step.label, &r.step.kind);
-        let (state, detail) = if r.ok {
-            // An ok step with a note was skipped (its tool is still missing).
-            (
-                State::Done,
-                r.detail.clone().unwrap_or_else(|| r.step.detail.clone()),
-            )
-        } else {
-            (State::Failed, r.detail.clone().unwrap_or_default())
-        };
-        self.p.finish(
-            id,
-            state,
-            &detail,
-            Some(std::time::Duration::from_millis(r.dur_ms)),
-        );
-    }
-
-    fn shim_done(&self, r: &dots_engine::ShimStepResult) {
-        use dots_core::State;
-        let id = self.p.start(&r.step.dst, "shim");
-        let (state, detail) = if r.ok {
-            (State::Done, r.step.action.clone())
-        } else {
-            (State::Failed, r.detail.clone().unwrap_or_default())
-        };
-        self.p.finish(
-            id,
-            state,
-            &detail,
-            Some(std::time::Duration::from_millis(r.dur_ms)),
-        );
-    }
-
-    fn hook_done(&self, r: &dots_engine::HookStepResult) {
-        use dots_core::State;
-        let id = self.p.start(&r.step.package, &r.step.event);
-        let (state, detail) = if r.ok {
-            (State::Done, r.step.short())
-        } else {
-            (State::Failed, r.detail.clone().unwrap_or_default())
-        };
-        self.p.finish(
-            id,
-            state,
-            &detail,
-            Some(std::time::Duration::from_millis(r.dur_ms)),
-        );
-    }
-
-    fn service_done(&self, r: &dots_engine::ServiceStepResult) {
-        use dots_core::State;
-        let id = self.p.start(&r.step.name, &r.step.manager);
-        let (state, detail) = if r.ok {
-            (State::Done, r.step.action.clone())
-        } else {
-            (State::Failed, r.detail.clone().unwrap_or_default())
-        };
-        self.p.finish(
-            id,
-            state,
-            &detail,
-            Some(std::time::Duration::from_millis(r.dur_ms)),
-        );
-    }
 }

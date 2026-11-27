@@ -22,6 +22,9 @@ struct State {
     installed_calls: usize,
     /// Package names whose install/upgrade fails.
     failing: Vec<String>,
+    /// A failing name stops the command where it stands (brew): the names before it in the
+    /// command are installed, the ones after it are never tried.
+    partial: bool,
     /// Installed packages `stale_reason` reports (until an install or upgrade of them runs).
     stale: BTreeMap<String, String>,
 }
@@ -80,9 +83,30 @@ impl Runner for FakeBackend {
                 None => (a.clone(), None),
             })
             .collect();
-        if let Some((n, _)) = targets.iter().find(|(n, _)| st.failing.contains(n)) {
+        let bad = targets.iter().position(|(n, _)| st.failing.contains(n));
+        let targets = if let Some(at) = bad {
+            let n = targets[at].0.clone();
+            if !st.partial {
+                return Ok(Output::fail(1, &format!("fake: {n} failed to {verb}")));
+            }
+            // Do what came before the failing name, then stop.
+            for (name, version) in targets.into_iter().take(at) {
+                let version = version
+                    .or_else(|| st.latest.get(&name).cloned())
+                    .unwrap_or_else(|| "1.0.0".to_string());
+                st.installed.insert(
+                    name,
+                    Installed {
+                        version,
+                        pinned: false,
+                        source: None,
+                    },
+                );
+            }
             return Ok(Output::fail(1, &format!("fake: {n} failed to {verb}")));
-        }
+        } else {
+            targets
+        };
         for (name, version) in targets {
             match kind {
                 OpKind::Install | OpKind::Upgrade => {
@@ -196,6 +220,13 @@ impl FakeProvider {
 
     pub fn failing_on(self, name: &str) -> Self {
         self.state.lock().unwrap().failing.push(name.into());
+        self
+    }
+
+    /// A failing name stops a batched command where it stands: earlier names in the command
+    /// are installed, later ones are never tried.
+    pub fn stopping_at_failures(self) -> Self {
+        self.state.lock().unwrap().partial = true;
         self
     }
 

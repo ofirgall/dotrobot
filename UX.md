@@ -258,6 +258,19 @@ How each part works:
 - **Terminal progress**: OSC 9;4 sets the tab/taskbar progress in ghostty, Windows Terminal, WezTerm and ConEmu, and the window title shows `dots: 6/11`. Both are cleared on exit, including on Ctrl-C and on panic, via a drop guard.
 - **Sudo prompt**: the live region is suspended and cleared, the password prompt appears normally, and the region resumes. The prompt is never drawn over.
 - **Interactive tasks** run last, with the live region torn down and a header line (`── kv needs you ──`) before handing over the terminal.
+- **Streamed lines (any output, TTY or not).** Progress is not held back for the final report. A line is written when a step starts and one when it finishes (package or names, provider and action, ok or `[FAIL]`, duration), flushed line by line on stderr, so a pipe, `ssh` without a tty or CI sees a 10-minute run move. Off a TTY the lines are plain ASCII with no spinner, color or cursor movement; on a TTY the live region is kept and the finished lines scroll up as above. Each line is written whole, so steps running in parallel never interleave fragments.
+- **Failures print at once.** The failing step's line is followed by its error (the tail of the tool's output) and `log: <path>`. Packages that failed with the same error, one batched command, are listed under it once.
+- **Live log.** The first line names the run log, `~/.local/state/dots/logs/<run-id>/run.log`. Every streamed line is appended there as plain text with the elapsed time (`mm:ss`) in front and flushed at once, so `tail -f` from another terminal follows the run.
+- **`--quiet` and `--json`.** `--quiet` suppresses the streamed lines (the log is still written). With `--json` the lines go to stderr and stdout stays the single JSON document.
+
+  ```
+   run log: /home/me/.local/state/dots/logs/r-3f9a1c/run.log  (follow it with `tail -f`)
+   [..] cloudflare-warp, flameshot, hiddenbar  brew install
+   [FAIL] cloudflare-warp, flameshot, hiddenbar  brew install  failed: 1 of 3 failed  1m 42s
+           cloudflare-warp: `brew install --cask cloudflare-warp` failed
+             sudo: a terminal is required to read the password
+           log: /home/me/.local/state/dots/logs/r-3f9a1c/cloudflare-warp.install.log
+  ```
 - **Ctrl-C once**: "Stopping after current steps… (Ctrl-C again to force)". Running steps finish, the journal is written, and it ends with a summary of what was and wasn't done. **Twice**: kill the children and record them as `interrupted`.
 
 ### 4.6 Apply summary (and failures)

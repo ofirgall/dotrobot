@@ -26,6 +26,7 @@ mod services_phase;
 mod settings_phase;
 mod show;
 mod status;
+mod stream;
 mod upgrade;
 mod views;
 mod why;

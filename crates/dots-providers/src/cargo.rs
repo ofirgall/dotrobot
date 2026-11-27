@@ -103,6 +103,13 @@ pub(crate) fn exec_action(
     })
 }
 
+/// `CARGO_NET_GIT_FETCH_WITH_CLI=true` for every cargo command, unless the user's environment
+/// already says something. cargo's built-in libgit2 cannot use the ssh agent or a gitconfig
+/// `url.<ssh>.insteadOf` rewrite ("no authentication methods succeeded"); the `git` CLI can.
+fn fetch_with_cli(ctx: &Ctx) -> Option<&'static str> {
+    (!ctx.env.contains_key(FETCH_WITH_CLI)).then_some("true")
+}
+
 fn cargo_home(home: &Path, env: &BTreeMap<String, String>) -> PathBuf {
     match env.get("CARGO_HOME").filter(|v| !v.is_empty()) {
         Some(c) => PathBuf::from(c),
@@ -190,6 +197,9 @@ impl Provider for CargoProvider {
         let mut cmd = Cmd::new(&bin)
             .args(["install", "--list"])
             .envs(&command_env(ctx, bin.parent()));
+        if let Some(v) = fetch_with_cli(ctx) {
+            cmd.env.insert(FETCH_WITH_CLI.into(), v.into());
+        }
         cmd.env.insert(
             "CARGO_HOME".into(),
             cargo_home(&ctx.home, &ctx.env)
@@ -226,9 +236,12 @@ impl Provider for CargoProvider {
             if s.opts.contains_key("git") || s.opts.contains_key("path") {
                 continue;
             }
-            let cmd = Cmd::new(&bin)
+            let mut cmd = Cmd::new(&bin)
                 .args(["search", "--limit", "1", &s.name])
                 .envs(&command_env(ctx, bin.parent()));
+            if let Some(v) = fetch_with_cli(ctx) {
+                cmd.env.insert(FETCH_WITH_CLI.into(), v.into());
+            }
             let out = ctx.runner.run(&cmd)?;
             if !out.success() {
                 continue;
@@ -248,6 +261,12 @@ impl Provider for CargoProvider {
             }
         }
         Ok(map)
+    }
+
+    fn stale_reason(&self, ctx: &Ctx, spec: &Spec) -> Option<String> {
+        let wanted = Wanted::of(spec)?;
+        let raw = installed_source(&cargo_home(&ctx.home, &ctx.env), &spec.name)?;
+        wanted.mismatch(&raw)
     }
 
     fn plan(&self, ops: &[Op]) -> Result<Vec<Action>> {
@@ -287,6 +306,11 @@ impl Provider for CargoProvider {
                                 return Err(ProviderError::Other(format!(
                                     "cargo: `{name}` is installed from git; pin it with rev=, not a version"
                                 )));
+                            }
+                            if op.kind == OpKind::Upgrade {
+                                // Replaces an install from another source (a local path, a
+                                // fork), which cargo refuses without it.
+                                a.push("--force".into());
                             }
                             a.extend(["--git".into(), git.clone()]);
                             if let Some(rev) = o.get("rev") {
@@ -339,12 +363,12 @@ impl Provider for CargoProvider {
         };
         let action = &resolve_bare(action, idx, "cargo", resolve_bin(&ctx.home, &ctx.env))?;
         let bin_dir = Path::new(&action.argv[idx]).parent().map(Path::to_path_buf);
-        let out = exec_action(
-            ctx,
-            action,
-            bin_dir.as_deref(),
-            &[("CARGO_HOME", &home.to_string_lossy())],
-        )?;
+        let home_str = home.to_string_lossy();
+        let mut extra: Vec<(&str, &str)> = vec![("CARGO_HOME", &home_str)];
+        if let Some(v) = fetch_with_cli(ctx) {
+            extra.push((FETCH_WITH_CLI, v));
+        }
+        let out = exec_action(ctx, action, bin_dir.as_deref(), &extra)?;
         if !out.success && !ctx.dry_run && action.argv.iter().any(|a| a == "--locked") {
             let text = out
                 .log
@@ -415,6 +439,118 @@ impl Provider for CargoProvider {
         out.sort_by(|a, b| (&a.package, &a.bin).cmp(&(&b.package, &b.bin)));
         Ok(out)
     }
+}
+
+/// The raw install source of crate `name` (`git+https://...#<sha>`, `path+file:///...`,
+/// `registry+...`) from `.crates2.json`, or `.crates.toml` when that is missing. `None`: not
+/// installed, or neither file can be read.
+fn installed_source(cargo_home: &Path, name: &str) -> Option<String> {
+    let of_key = |key: &str| -> Option<String> {
+        let mut it = key.splitn(3, ' ');
+        if it.next()? != name {
+            return None;
+        }
+        it.next()?;
+        Some(it.next()?.trim_matches(['(', ')']).to_string())
+    };
+    if let Ok(text) = std::fs::read_to_string(cargo_home.join(".crates2.json"))
+        && let Ok(json) = serde_json::from_str::<serde_json::Value>(&text)
+        && let Some(installs) = json.get("installs").and_then(|v| v.as_object())
+    {
+        return installs.keys().find_map(|k| of_key(k));
+    }
+    // `.crates.toml`: `[v1]` then `"name 1.0.0 (source)" = ["bin"]`.
+    let text = std::fs::read_to_string(cargo_home.join(".crates.toml")).ok()?;
+    text.lines().find_map(|l| {
+        let key = l.trim().strip_prefix('"')?.split_once('"')?.0;
+        of_key(key)
+    })
+}
+
+/// What a spec declares about where its crate comes from (`git` or `path`).
+enum Wanted {
+    Git { url: String, rev: Option<String> },
+    Path(PathBuf),
+}
+
+impl Wanted {
+    fn of(spec: &Spec) -> Option<Wanted> {
+        if let Some(dir) = pathsrc::source_dir(spec) {
+            return Some(Wanted::Path(dir));
+        }
+        Some(Wanted::Git {
+            url: spec.get("git")?.to_string(),
+            rev: spec.get("rev").map(str::to_string),
+        })
+    }
+
+    fn describe(&self) -> String {
+        match self {
+            Wanted::Git { url, rev } => {
+                let n = normalize_git_url(url);
+                let short = n.strip_prefix("github.com/").unwrap_or(&n);
+                match rev {
+                    Some(r) => format!("git {short}@{}", &r[..r.len().min(7)]),
+                    None => format!("git {short}"),
+                }
+            }
+            Wanted::Path(p) => format!("path {}", p.display()),
+        }
+    }
+
+    /// Why an install from `raw` is not what the spec declares, or `None` when it is.
+    fn mismatch(&self, raw: &str) -> Option<String> {
+        let differs = match self {
+            Wanted::Path(dir) => match raw.strip_prefix("path+file://") {
+                Some(p) => !same_dir(Path::new(p), dir),
+                None => true,
+            },
+            Wanted::Git { url, rev } => match raw.strip_prefix("git+") {
+                None => true,
+                Some(g) => {
+                    let (before, sha) = g.split_once('#').unwrap_or((g, ""));
+                    let (inst_url, query) = before.split_once('?').unwrap_or((before, ""));
+                    let inst_rev = query
+                        .split('&')
+                        .find_map(|kv| kv.strip_prefix("rev="))
+                        .unwrap_or("");
+                    normalize_git_url(inst_url) != normalize_git_url(url)
+                        || rev.as_ref().is_some_and(|r| {
+                            let matches = |s: &str| {
+                                !s.is_empty() && (s.starts_with(r.as_str()) || r.starts_with(s))
+                            };
+                            // Nothing recorded to compare with: leave it alone.
+                            (!sha.is_empty() || !inst_rev.is_empty())
+                                && !matches(sha)
+                                && !matches(inst_rev)
+                        })
+                }
+            },
+        };
+        differs.then(|| format!("installed from {raw}, repo wants {}", self.describe()))
+    }
+}
+
+fn same_dir(a: &Path, b: &Path) -> bool {
+    let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let trim = |p: PathBuf| PathBuf::from(p.to_string_lossy().trim_end_matches('/'));
+    trim(canon(a)) == trim(canon(b))
+}
+
+/// `host/owner/repo` for any spelling of a git url: `https://`, `ssh://git@`, `git@host:`,
+/// with or without `.git` and a trailing slash, case-insensitive.
+fn normalize_git_url(url: &str) -> String {
+    let u = url.trim().trim_start_matches("git+");
+    let u = match u.split_once("://") {
+        Some((_, rest)) => rest.to_string(),
+        // scp-like `git@github.com:owner/repo`
+        None => u.replacen(':', "/", 1),
+    };
+    let u = u.rsplit_once('@').map_or(u.as_str(), |(_, rest)| rest);
+    u.trim_end_matches('/')
+        .trim_end_matches(".git")
+        .trim_end_matches('/')
+        .to_lowercase()
 }
 
 /// Does cargo output show a rustc compile failure (as opposed to a network or resolve error)?

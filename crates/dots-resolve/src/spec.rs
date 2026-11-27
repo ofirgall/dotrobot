@@ -113,6 +113,21 @@ pub fn spec_for_in(native: &str, cfg: Option<&ProviderConfig>, pkg_dir: Option<&
                 s = s.opt("rev", r);
             }
         }
+        // A user-defined provider: its block's own keys (`source`, ...) are options the
+        // declaration's placeholders read. The common keys are handled elsewhere.
+        Some(ProviderConfig::Custom { table, .. }) => {
+            for (k, v) in table.as_object().into_iter().flatten() {
+                if matches!(k.as_str(), "name" | "bin" | "bins" | "shim" | "when") {
+                    continue;
+                }
+                match v {
+                    serde_json::Value::String(t) => s = s.opt(k, t),
+                    serde_json::Value::Bool(x) => s = s.opt(k, b(*x)),
+                    serde_json::Value::Number(n) => s = s.opt(k, &n.to_string()),
+                    _ => {}
+                }
+            }
+        }
         _ => {}
     }
     if let Some(d) = pkg_dir

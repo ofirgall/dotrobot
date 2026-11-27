@@ -131,3 +131,18 @@ fn script_fetch_loads() {
     assert_eq!(f.url.as_deref(), Some("https://sh.rustup.rs"));
     assert_eq!(f.sha256.as_deref(), Some("abc"));
 }
+
+/// A user-defined provider's block keys reach the spec: `source` becomes the `source` option
+/// (what `{source}` expands to), `name` stays the native name.
+#[test]
+fn custom_provider_block_keys_reach_the_spec() {
+    let (_d, repo) = load(
+        "schema = 1\nname = \"x\"\n[providers.herdr-plugin]\nname = \"herdr.x\"\nsource = \"ofirgall/herdr-x\"\nstrict = true\n",
+    );
+    let cfg = repo.packages["x"].providers.get("herdr-plugin");
+    let s = spec_for_in("herdr.x", cfg, None);
+    assert_eq!(s.name, "herdr.x");
+    assert_eq!(s.get("source"), Some("ofirgall/herdr-x"));
+    assert_eq!(s.get("strict"), Some("true"));
+    assert_eq!(s.get("name"), None, "common keys are not options");
+}
