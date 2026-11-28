@@ -445,6 +445,7 @@ impl RepoFiles<'_> {
                 .unwrap_or_else(|| "env.sh, env.fish, env.ps1 and the shell rc line".to_string()),
             owned: existed,
             action: if existed { "update" } else { "create" }.into(),
+            early: false,
             payload: Payload::new(Planned::Env),
         })
     }
@@ -468,6 +469,12 @@ impl RepoFiles<'_> {
         .map(|_| ())
         .map_err(|e| e.to_string())
     }
+}
+
+/// `path` is a symlink whose target does not exist.
+fn is_dangling_link(path: &std::path::Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink())
+        && std::fs::metadata(path).is_err()
 }
 
 impl FilesPhase for RepoFiles<'_> {
@@ -497,7 +504,12 @@ impl FilesPhase for RepoFiles<'_> {
                 let owned = s.action != Action::Replace
                     && s.action != Action::Remove
                     && ledger.get(&s.dst, s.mode, &s.package).is_some();
+                let early = s.mode == Mode::Link
+                    && s.action != Action::Remove
+                    && s.error.is_none()
+                    && is_dangling_link(&s.dst);
                 FileStep {
+                    early,
                     package: s.package.clone(),
                     dst: tilde(&s.dst, req.home),
                     kind: mode_word(s.mode).into(),
@@ -559,5 +571,25 @@ impl FilesPhase for RepoFiles<'_> {
             });
         }
         Ok(())
+    }
+}
+
+#[cfg(all(test, unix))]
+mod dangling_tests {
+    use super::is_dangling_link;
+
+    #[test]
+    fn only_a_link_to_a_missing_target_is_dangling() {
+        let d = std::env::temp_dir().join(format!("dots-dangling-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let (file, good, bad) = (d.join("f"), d.join("good"), d.join("bad"));
+        std::fs::write(&file, "x").unwrap();
+        std::os::unix::fs::symlink(&file, &good).unwrap();
+        std::os::unix::fs::symlink(d.join("gone"), &bad).unwrap();
+        assert!(!is_dangling_link(&file));
+        assert!(!is_dangling_link(&good));
+        assert!(!is_dangling_link(&d.join("missing")));
+        assert!(is_dangling_link(&bad));
+        std::fs::remove_dir_all(&d).unwrap();
     }
 }

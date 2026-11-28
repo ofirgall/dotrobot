@@ -443,6 +443,65 @@ fn config_after_install() {
 }
 
 #[test]
+fn dangling_link_repairs_run_before_the_package_phase() {
+    let sb = sandbox(PKGS, &[]);
+    let (brew, cargo) = (FakeProvider::new("brew"), FakeProvider::new("cargo"));
+    let reg = registry(&[&brew, &cargo]);
+    let mut early = fstep("rg", "~/.gitconfig", false);
+    early.early = true;
+    let mut files = FakeFiles::new(vec![fstep("fd", "~/.fdrc", false), early]);
+    files.execs_seen = Some(brew.clone());
+    let case = Case::new(&sb, &reg, &files);
+    let p = case.plan();
+    // The plan lists both as ordinary file changes.
+    assert_eq!(p.files.len(), 2);
+    let r = case.apply(true);
+    assert_eq!(r.status, Status::Done);
+    // The repair ran before brew executed; the ordinary link after it, once, not twice.
+    assert_eq!(
+        files.log.lock().unwrap().clone(),
+        vec!["~/.gitconfig@0", "~/.fdrc@1"]
+    );
+    assert_eq!(r.files.len(), 2);
+    assert_eq!(r.files[0].step.dst, "~/.gitconfig");
+    let ops: Vec<_> = read_journal(&sb)
+        .iter()
+        .filter(|e| e["op"] == "link")
+        .map(|e| e["to"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(ops, ["~/.gitconfig", "~/.fdrc"]);
+}
+
+#[test]
+fn files_that_are_not_dangling_links_stay_in_the_files_phase() {
+    let sb = sandbox(PKGS, &[]);
+    let (brew, cargo) = (FakeProvider::new("brew"), FakeProvider::new("cargo"));
+    let reg = registry(&[&brew, &cargo]);
+    let mut files = FakeFiles::new(vec![fstep("rg", "~/.gitconfig", false)]);
+    files.execs_seen = Some(brew.clone());
+    let case = Case::new(&sb, &reg, &files);
+    let r = case.apply(true);
+    assert_eq!(r.status, Status::Done);
+    assert_eq!(files.log.lock().unwrap().clone(), vec!["~/.gitconfig@1"]);
+}
+
+#[test]
+fn packages_only_still_repairs_dangling_links_and_nothing_else() {
+    let sb = sandbox(PKGS, &[]);
+    let (brew, cargo) = (FakeProvider::new("brew"), FakeProvider::new("cargo"));
+    let reg = registry(&[&brew, &cargo]);
+    let mut early = fstep("rg", "~/.gitconfig", false);
+    early.early = true;
+    let mut files = FakeFiles::new(vec![fstep("fd", "~/.fdrc", false), early]);
+    files.execs_seen = Some(brew.clone());
+    let mut case = Case::new(&sb, &reg, &files);
+    case.scope.packages_only = true;
+    let r = case.apply(true);
+    assert_eq!(r.status, Status::Done);
+    assert_eq!(files.log.lock().unwrap().clone(), vec!["~/.gitconfig@0"]);
+}
+
+#[test]
 fn files_of_a_failed_package_are_not_applied() {
     let sb = sandbox(PKGS, &[]);
     let brew = FakeProvider::new("brew").failing_on("fd");

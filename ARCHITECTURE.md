@@ -1425,7 +1425,10 @@ diff   ──► Plan: typed actions with deps
    │
 show   ──► `plan` stops here. `apply` prints it and asks unless --yes or the plan only touches files.
    │
-exec   ──► DAG scheduler:
+exec   ──► repair sub-phase: `link` steps whose dst is a dangling symlink are applied first, before any
+             package step (a broken link such as `~/.gitconfig` makes `cargo install --git` fail);
+             `--packages-only` runs this sub-phase too, nothing else of the files phase
+         DAG scheduler:
              - providers with exclusive_lock run their batch serially; different providers run in parallel
              - sudo steps are opt-in (§14.3): a plain apply never primes sudo and never runs one; with
                --with-sudo or --sudo-only all root-needing actions are grouped and sudo is primed ONCE

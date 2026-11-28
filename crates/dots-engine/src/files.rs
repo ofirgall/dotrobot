@@ -56,6 +56,9 @@ pub struct FileStep {
     /// `create`, `update`, `replace`, `remove` or `failed` (empty when the phase has no such
     /// notion). A step that changes nothing is never planned.
     pub action: String,
+    /// The step repairs a broken destination (a link to a missing target) that package steps
+    /// would trip over, so `apply` runs it before the package phase instead of after it.
+    pub early: bool,
     pub payload: Payload,
 }
 

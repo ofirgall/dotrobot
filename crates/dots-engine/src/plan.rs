@@ -392,6 +392,23 @@ pub fn plan(inp: &Inputs<'_>, run_id: &str) -> Result<Plan, Vec<Diagnostic>> {
             )]
         })?;
     }
+    // `--packages-only` still repairs dangling links (they break the installs themselves).
+    if inp.scope.packages_only {
+        let req = FilesRequest {
+            run_id,
+            packages: &plan.packages,
+            home: &inp.dirs.home,
+            state_dir: &inp.dirs.state,
+            dry_run: true,
+        };
+        plan.files = inp.files.plan(&req).map_err(|e| {
+            vec![Diagnostic::from_code(
+                "plan-failed",
+                &[("package", "files"), ("detail", &e)],
+            )]
+        })?;
+        plan.files.retain(|f| f.early);
+    }
     if !inp.scope.packages_only && !inp.scope.files_only {
         let sreq = SettingsRequest {
             run_id,

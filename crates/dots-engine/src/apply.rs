@@ -1138,6 +1138,42 @@ fn execute(
     } else {
         true
     };
+
+    // Repair sub-phase: links whose destination is a dangling symlink are replaced BEFORE any
+    // package step. A broken link makes tools that stat the path fail (`cargo install --git`
+    // stats `~/.gitconfig`), and the repo's link is exactly what fixes it. Everything else
+    // stays in the files phase after the installs. A package with a `pre_files` hook keeps
+    // its steps for that phase, so the hook still runs first.
+    let mut files_done: Vec<FileStepResult> = Vec::new();
+    let mut early_done: BTreeSet<(String, String, String)> = BTreeSet::new();
+    if !only && !stop.load(Ordering::SeqCst) {
+        let early: Vec<FileStep> = plan_v
+            .files
+            .iter()
+            .filter(|f| {
+                f.early
+                    && !plan_v
+                        .hooks
+                        .iter()
+                        .any(|h| h.event == "pre_files" && h.package == f.package)
+            })
+            .cloned()
+            .collect();
+        if !early.is_empty() {
+            for f in &early {
+                early_done.insert((f.package.clone(), f.dst.clone(), f.kind.clone()));
+            }
+            apply_file_steps(
+                inp,
+                cfg,
+                obs,
+                &mut run,
+                &plan_v.packages,
+                &early,
+                &mut files_done,
+            );
+        }
+    }
     let (ka_stop_tx, ka_stop_rx) = mpsc::channel::<()>();
 
     let n = plan_v.batches.len();
@@ -1592,11 +1628,14 @@ fn execute(
         run_hooks(&mut run, &["pre_files"], &pre_skip);
     }
 
-    let mut files_done: Vec<FileStepResult> = Vec::new();
     let mut files_skipped: Vec<(FileStep, String)> = Vec::new();
     if !plan_v.files.is_empty() && !interrupted && !only {
         let mut steps: Vec<FileStep> = Vec::new();
         for f in &plan_v.files {
+            // Already applied (or failed) in the repair sub-phase.
+            if early_done.contains(&(f.package.clone(), f.dst.clone(), f.kind.clone())) {
+                continue;
+            }
             match blocked.get(f.package.as_str()) {
                 Some(dep) => files_skipped.push((f.clone(), (*dep).to_string())),
                 // A failed `pre_files` hook leaves the package's files alone.
@@ -1609,61 +1648,7 @@ fn execute(
                 None => steps.push(f.clone()),
             }
         }
-        let req = FilesRequest {
-            run_id: &cfg.run_id,
-            packages: &eligible,
-            home: &inp.dirs.home,
-            state_dir: &inp.dirs.state,
-            dry_run: false,
-        };
-        obs.files_started(steps.len());
-        let res = inp.files.apply(&req, &steps, &mut |r: FileStepResult| {
-            obs.file_done(&r);
-            if r.ok && r.step.action == "remove" {
-                run.state.files.remove(&r.step.dst);
-                run.save();
-            } else if r.ok {
-                run.state.files.insert(
-                    r.step.dst.clone(),
-                    OwnedFile {
-                        package: r.step.package.clone(),
-                        kind: r.step.kind.clone(),
-                        run: cfg.run_id.clone(),
-                        ts: rfc3339(SystemTime::now()),
-                    },
-                );
-                run.save();
-            }
-            run.journal(Entry {
-                op: r.step.kind.clone(),
-                pkg: r.step.package.clone(),
-                provider: None,
-                from: None,
-                to: Some(r.step.dst.clone()),
-                exit: i32::from(!r.ok),
-                dur_ms: r.dur_ms,
-                log: None,
-            });
-            if !r.ok {
-                run.errors.push(Diagnostic::from_code(
-                    "write-failed",
-                    &[
-                        ("path", &r.step.dst),
-                        (
-                            "detail",
-                            r.detail.as_deref().unwrap_or("file action failed"),
-                        ),
-                    ],
-                ));
-            }
-            files_done.push(r);
-        });
-        if let Err(e) = res {
-            run.errors.push(Diagnostic::from_code(
-                "plan-failed",
-                &[("package", "files"), ("detail", &e)],
-            ));
-        }
+        apply_file_steps(inp, cfg, obs, &mut run, &eligible, &steps, &mut files_done);
     }
 
     // Settings, after files and before services: only for packages whose install went through.
@@ -1992,6 +1977,74 @@ fn execute(
         sudo_policy: cfg.sudo_policy,
         sudo_skipped,
         sudo_unselected,
+    }
+}
+
+/// Apply `steps` through the files phase: record ownership, journal each one, turn failures
+/// into errors and collect the results into `files_done`.
+fn apply_file_steps(
+    inp: &Inputs<'_>,
+    cfg: &ApplyConfig,
+    obs: &dyn Observer,
+    run: &mut Run<'_>,
+    packages: &[String],
+    steps: &[FileStep],
+    files_done: &mut Vec<FileStepResult>,
+) {
+    let req = FilesRequest {
+        run_id: &cfg.run_id,
+        packages,
+        home: &inp.dirs.home,
+        state_dir: &inp.dirs.state,
+        dry_run: false,
+    };
+    obs.files_started(steps.len());
+    let res = inp.files.apply(&req, steps, &mut |r: FileStepResult| {
+        obs.file_done(&r);
+        if r.ok && r.step.action == "remove" {
+            run.state.files.remove(&r.step.dst);
+            run.save();
+        } else if r.ok {
+            run.state.files.insert(
+                r.step.dst.clone(),
+                OwnedFile {
+                    package: r.step.package.clone(),
+                    kind: r.step.kind.clone(),
+                    run: cfg.run_id.clone(),
+                    ts: rfc3339(SystemTime::now()),
+                },
+            );
+            run.save();
+        }
+        run.journal(Entry {
+            op: r.step.kind.clone(),
+            pkg: r.step.package.clone(),
+            provider: None,
+            from: None,
+            to: Some(r.step.dst.clone()),
+            exit: i32::from(!r.ok),
+            dur_ms: r.dur_ms,
+            log: None,
+        });
+        if !r.ok {
+            run.errors.push(Diagnostic::from_code(
+                "write-failed",
+                &[
+                    ("path", &r.step.dst),
+                    (
+                        "detail",
+                        r.detail.as_deref().unwrap_or("file action failed"),
+                    ),
+                ],
+            ));
+        }
+        files_done.push(r);
+    });
+    if let Err(e) = res {
+        run.errors.push(Diagnostic::from_code(
+            "plan-failed",
+            &[("package", "files"), ("detail", &e)],
+        ));
     }
 }
 
