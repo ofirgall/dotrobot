@@ -105,6 +105,15 @@ pub fn spec_for_in(native: &str, cfg: Option<&ProviderConfig>, pkg_dir: Option<&
                 s = s.opt("break_system_packages", "true");
             }
         }
+        Some(ProviderConfig::Plain { config: c, .. }) => {
+            if let Some(o) = &c.installer_override {
+                s = s.opt("override", o);
+            }
+            if !c.args.is_empty() {
+                // Unit separator: arguments may contain any visible character.
+                s = s.opt("args", &c.args.join("\u{1f}"));
+            }
+        }
         Some(ProviderConfig::Git(c)) => {
             if let Some(u) = &c.url {
                 s = s.opt("url", u);

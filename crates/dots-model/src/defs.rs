@@ -94,6 +94,7 @@ const SCRIPT: Ty = provider!(
     ("fetch", Ty::Table(&[("url", Ty::Str), ("sha256", Ty::Str)]))
 );
 const PLAIN: Ty = provider!(("id", Ty::Str));
+const WINGET: Ty = provider!(("id", Ty::Str), ("override", Ty::Str), ("args", STRS));
 const BROWSER_EXT: Ty = provider!(
     ("chrome", Ty::Str),
     ("edge", Ty::Str),
@@ -122,7 +123,8 @@ pub fn provider_ty(id: &str) -> Option<&'static Ty> {
         "git" => &GIT,
         "github-release" => &GITHUB_RELEASE,
         "script" => &SCRIPT,
-        "winget" | "scoop" | "mas" | "pacman" | "dnf" => &PLAIN,
+        "winget" => &WINGET,
+        "scoop" | "mas" | "pacman" | "dnf" => &PLAIN,
         "browser-ext" => &BROWSER_EXT,
         "agent-skill" => &AGENT_SKILL,
         _ => return None,

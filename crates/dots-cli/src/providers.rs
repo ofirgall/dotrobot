@@ -17,6 +17,7 @@ use dots_providers::custom::{CustomDef, CustomProvider};
 use dots_providers::git::GitProvider;
 use dots_providers::script::{ScriptConfig, ScriptEnv, ScriptProvider};
 use dots_providers::uv::UvProvider;
+use dots_providers::winget::WingetProvider;
 use dots_providers::{Ctx, Registry};
 use dots_resolve::InstalledMap;
 
@@ -191,6 +192,9 @@ pub fn shared_registry(ctx: &Ctx) -> Registry {
     }
     if enabled(ctx, "git") {
         r.register(Box::new(GitProvider::for_ctx(ctx)));
+    }
+    if enabled(ctx, "winget") {
+        r.register(Box::new(WingetProvider::for_ctx(ctx)));
     }
     r
 }

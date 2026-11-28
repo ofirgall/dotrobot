@@ -99,6 +99,18 @@ pub(crate) fn exec_action(
     prefix: Option<&Path>,
     extra_env: &[(&str, &str)],
 ) -> Result<Outcome> {
+    exec_action_ok(ctx, action, prefix, extra_env, &[])
+}
+
+/// As [`exec_action`], counting the exit statuses in `also_ok` as success (a package manager
+/// that exits non-zero for "already installed").
+pub(crate) fn exec_action_ok(
+    ctx: &Ctx,
+    action: &Action,
+    prefix: Option<&Path>,
+    extra_env: &[(&str, &str)],
+    also_ok: &[i32],
+) -> Result<Outcome> {
     if ctx.dry_run {
         return Ok(Outcome {
             success: true,
@@ -129,7 +141,7 @@ pub(crate) fn exec_action(
         .and_then(|()| std::fs::write(&path, text))
         .map_err(|e| ProviderError::Other(format!("cannot write {}: {e}", path.display())))?;
     Ok(Outcome {
-        success: out.success(),
+        success: out.success() || also_ok.contains(&out.status),
         log: Some(path),
     })
 }

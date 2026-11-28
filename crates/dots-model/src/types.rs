@@ -403,7 +403,13 @@ pub struct ScriptFetch {
     pub url: Option<String>,
     pub sha256: Option<String>,
 }
-provider_struct!(PlainProvider { id: Option<String> });
+// winget also reads `override` (passed as `--override`: installer arguments, e.g. the
+// vcbuildtools workloads) and `args` (extra arguments for install and upgrade).
+provider_struct!(PlainProvider {
+    id: Option<String>,
+    installer_override: Option<String>,
+    args: Vec<String>,
+});
 provider_struct!(BrowserExt {
     chrome: Option<String>,
     edge: Option<String>,
@@ -488,7 +494,13 @@ impl ProviderConfig {
             Self::Git(p) => c!(p),
             Self::GithubRelease(p) => c!(p),
             Self::Script(p) => c!(p),
-            Self::Plain { config: p, .. } => c!(p),
+            // `id` is the package manager's own identifier (`winget`'s `Git.Git`): it names the
+            // package there unless `name` says otherwise.
+            Self::Plain { config: p, .. } => {
+                let mut c = c!(p);
+                c.name = c.name.or_else(|| p.id.clone());
+                c
+            }
             Self::BrowserExt(p) => c!(p),
             Self::AgentSkill(p) => c!(p),
             Self::Custom { table, .. } => {
@@ -539,10 +551,19 @@ impl ProviderConfig {
             "git" => Self::Git(serde_json::from_value(v)?),
             "github-release" => Self::GithubRelease(serde_json::from_value(v)?),
             "script" => Self::Script(serde_json::from_value(v)?),
-            "winget" | "scoop" | "mas" | "pacman" | "dnf" => Self::Plain {
-                id: id.to_string(),
-                config: serde_json::from_value(v)?,
-            },
+            "winget" | "scoop" | "mas" | "pacman" | "dnf" => {
+                // `override` is a keyword: the field is `installer_override`.
+                let mut v = v;
+                if let Some(o) = v.as_object_mut()
+                    && let Some(x) = o.remove("override")
+                {
+                    o.insert("installer_override".into(), x);
+                }
+                Self::Plain {
+                    id: id.to_string(),
+                    config: serde_json::from_value(v)?,
+                }
+            }
             "browser-ext" => Self::BrowserExt(serde_json::from_value(v)?),
             "agent-skill" => Self::AgentSkill(serde_json::from_value(v)?),
             _ => Self::Custom {

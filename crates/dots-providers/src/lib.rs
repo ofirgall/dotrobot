@@ -19,6 +19,7 @@ pub(crate) mod pathsrc;
 mod runner;
 pub mod script;
 pub mod uv;
+pub mod winget;
 pub use fetch::{CurlFetcher, Fetcher};
 pub use runner::{
     Cmd, DEFAULT_TIMEOUT, LineSink, Output, RealRunner, Runner, Stdin, with_line_sink, with_tty,
