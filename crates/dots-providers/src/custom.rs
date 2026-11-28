@@ -24,11 +24,6 @@ use crate::{
     Provider, ProviderError, Result, Spec, Support,
 };
 
-/// The shell a declarative provider's command lines run in.
-fn sh_path() -> PathBuf {
-    crate::script::platform_shell().0
-}
-
 /// How to read the output of the `installed` command.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Parse {
@@ -79,6 +74,9 @@ pub struct CustomDef {
     pub install: String,
     /// One action for all ops; `install` must then contain `{names}`.
     pub batch: bool,
+    /// The shell the command lines run in: `bash`, `sh` or `pwsh`. Default: `/bin/sh` on unix,
+    /// PowerShell on Windows. A repo that wants bash on Windows (Git Bash) says so here.
+    pub shell: Option<String>,
 }
 
 impl CustomDef {
@@ -95,6 +93,7 @@ impl CustomDef {
             "version",
             "install",
             "batch",
+            "shell",
         ];
         if let Some(k) = obj.keys().find(|k| !KEYS.contains(&k.as_str())) {
             return Err(err(format!("unknown key `{k}`")));
@@ -131,8 +130,15 @@ impl CustomDef {
         if batch && !install.contains("{names}") {
             return Err(err("`batch = true` needs `{names}` in `install`".into()));
         }
+        let shell = text("shell")?;
+        if let Some(s) = &shell
+            && !matches!(s.as_str(), "bash" | "sh" | "pwsh")
+        {
+            return Err(err(format!("unknown shell `{s}` (want bash, sh or pwsh)")));
+        }
         Ok(CustomDef {
             id: id.to_string(),
+            shell,
             available: text("available")?,
             bootstrap: text("bootstrap")?,
             installed_cmd,
@@ -211,10 +217,10 @@ fn shell_quote(s: &str) -> String {
 }
 
 /// A plain command line becomes an argv; anything with shell syntax runs under `sh -c`.
-fn to_argv(line: &str) -> Vec<String> {
+fn to_argv(line: &str, shell: Option<&str>) -> Vec<String> {
     let shelly = |c: char| "|&;<>()$`\\\"'*?[]{}~#!\n".contains(c);
     if line.chars().any(shelly) {
-        let (sh, flags) = crate::script::platform_shell();
+        let (sh, flags) = crate::script::shell_command(shell);
         let mut v = vec![sh.to_string_lossy().into_owned()];
         v.extend(flags.iter().map(|f| f.to_string()));
         v.push(line.to_string());
@@ -292,8 +298,13 @@ impl CustomProvider {
         v
     }
 
+    /// The shell the command lines run in (`shell` in the declaration).
+    fn sh_path(&self) -> PathBuf {
+        crate::script::shell_command(self.def.shell.as_deref()).0
+    }
+
     fn sh(&self, ctx: &Ctx, line: &str) -> Cmd {
-        let (sh, flags) = crate::script::platform_shell();
+        let (sh, flags) = crate::script::shell_command(self.def.shell.as_deref());
         Cmd::new(sh)
             .args(flags.iter().copied())
             .arg(line)
@@ -413,7 +424,7 @@ impl Provider for CustomProvider {
         }
         if facts.providers.get(self.id) == Some(&true) {
             Availability::Ready {
-                bin_path: sh_path(),
+                bin_path: self.sh_path(),
             }
         } else {
             Availability::Unsupported
@@ -423,7 +434,7 @@ impl Provider for CustomProvider {
     fn availability_in(&self, ctx: &Ctx, _facts: &Facts) -> Availability {
         let Some(cmd) = &self.def.available else {
             return Availability::Ready {
-                bin_path: sh_path(),
+                bin_path: self.sh_path(),
             };
         };
         match ctx.runner.run(&self.sh(ctx, cmd)) {
@@ -432,7 +443,7 @@ impl Provider for CustomProvider {
                 let bin_path = if Path::new(bin).is_absolute() {
                     PathBuf::from(bin)
                 } else {
-                    sh_path()
+                    self.sh_path()
                 };
                 Availability::Ready { bin_path }
             }
@@ -532,7 +543,7 @@ impl Provider for CustomProvider {
         let action = |ops: Vec<Op>, line: String| Action {
             kind: ops[0].kind,
             ops,
-            argv: to_argv(&line),
+            argv: to_argv(&line, self.def.shell.as_deref()),
             needs_root: false,
         };
         if self.def.batch {

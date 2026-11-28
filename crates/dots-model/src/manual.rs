@@ -76,6 +76,9 @@ pub struct ManualAction {
     pub after: After,
     /// A shell command; exit 0 means the step is done.
     pub check: Option<String>,
+    /// The shell `check` runs in: `bash`, `sh` or `pwsh`. Default: `/bin/sh` on unix,
+    /// PowerShell on Windows.
+    pub shell: Option<String>,
     pub requires: Vec<Requires>,
     /// Bump it when the steps change: the action is pending again on every machine.
     pub revision: u32,
@@ -102,6 +105,7 @@ struct Front {
     when: Option<String>,
     after: Option<String>,
     check: Option<String>,
+    shell: Option<String>,
     #[serde(default)]
     requires: Vec<String>,
     revision: Option<u32>,
@@ -191,6 +195,14 @@ pub fn parse(
     if front.check.as_deref().is_some_and(|c| c.trim().is_empty()) {
         return Err(problem(Some(2), "`check` is empty"));
     }
+    if let Some(s) = front.shell.as_deref()
+        && !matches!(s, "bash" | "sh" | "pwsh")
+    {
+        return Err(problem(
+            Some(2),
+            format!("unknown `shell` `{s}` (want bash, sh or pwsh)"),
+        ));
+    }
     let revision = front.revision.unwrap_or(1);
     if revision == 0 {
         return Err(problem(Some(2), "`revision` starts at 1"));
@@ -202,6 +214,7 @@ pub fn parse(
         when: front.when,
         after,
         check: front.check,
+        shell: front.shell,
         requires,
         revision,
         interactive: front.interactive,
@@ -235,6 +248,15 @@ mod tests {
             [Requires::Logout, Requires::RestartApp("Safari".into())]
         );
         assert_eq!(a.body, "1. Do it\n");
+    }
+
+    #[test]
+    fn shell_is_bash_sh_or_pwsh() {
+        let a = p("---\ntitle: T\ncheck: \"true\"\nshell: pwsh\n---\nbody").unwrap();
+        assert_eq!(a.shell.as_deref(), Some("pwsh"));
+        let err = p("---\ntitle: T\nshell: zsh\n---\nbody").unwrap_err();
+        assert!(err.detail.contains("shell"), "{err:?}");
+        assert_eq!(p("---\ntitle: T\n---\nbody").unwrap().shell, None);
     }
 
     #[test]

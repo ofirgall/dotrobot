@@ -105,22 +105,10 @@ pub fn run_check(action: &ManualAction, env: &std::collections::BTreeMap<String,
         return false;
     };
     let dir = action.path.parent().and_then(Path::parent);
-    // The package's shell: `/bin/sh` on unix, PowerShell on Windows (as for script packages).
-    #[cfg(unix)]
-    let mut cmd = {
-        let mut c = Command::new("/bin/sh");
-        c.args(["-c", check]);
-        c
-    };
-    #[cfg(windows)]
-    let mut cmd = {
-        let Some(pwsh) = dots_providers::script::windows_pwsh() else {
-            return false;
-        };
-        let mut c = Command::new(pwsh);
-        c.args(["-NoProfile", "-NonInteractive", "-Command", check]);
-        c
-    };
+    // `shell:` in the front matter, else `/bin/sh` on unix and PowerShell on Windows.
+    let (sh, flags) = dots_providers::script::shell_command(action.shell.as_deref());
+    let mut cmd = Command::new(sh);
+    cmd.args(flags.iter().copied()).arg(check);
     cmd.env_clear()
         .envs(env)
         .env("DOTS_PKG", &action.package)

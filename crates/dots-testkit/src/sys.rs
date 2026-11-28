@@ -67,13 +67,22 @@ pub fn canonical(p: impl AsRef<std::path::Path>) -> std::path::PathBuf {
     }
 }
 
-/// On Windows the default script shell is PowerShell, but the fixtures written for these
-/// tests are bash: give each script provider table `shell = "bash"` (Git for Windows' bash).
-/// Unchanged elsewhere, and for text without a script provider.
+/// On Windows the default shell is PowerShell, but the fixtures written for these tests are
+/// bash: give each script provider table `shell = "bash"` and each manual action with a
+/// `check` a `shell: bash` front-matter line (Git for Windows' bash). Unchanged elsewhere and
+/// for other text.
 pub fn bash_on_windows(text: &str) -> String {
-    if cfg!(windows) && text.contains("[providers.script]") && !text.contains("shell = ") {
-        text.replace("[providers.script]", "[providers.script]\nshell = \"bash\"")
-    } else {
-        text.to_string()
+    if !cfg!(windows) {
+        return text.to_string();
     }
+    if text.contains("[providers.script]") && !text.contains("shell = ") {
+        return text.replace("[providers.script]", "[providers.script]\nshell = \"bash\"");
+    }
+    if let Some(rest) = text.strip_prefix("---\n")
+        && text.contains("\ncheck:")
+        && !text.contains("\nshell:")
+    {
+        return format!("---\nshell: bash\n{rest}");
+    }
+    text.to_string()
 }

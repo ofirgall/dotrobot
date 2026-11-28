@@ -429,3 +429,20 @@ fn sh(line: &'static str) -> Vec<&'static str> {
     v.push(line);
     v
 }
+
+#[test]
+fn shell_key_picks_the_shell_and_is_validated() {
+    let mut t = go_table();
+    t["install"] = json!("go install {source}@{version|latest} | cat");
+    t["shell"] = json!("bash");
+    let p = CustomProvider::new(CustomDef::from_json("go", &t).unwrap(), &Facts::default());
+    let a = p.plan(&[install_op("y", Some("x/y"), None)]).unwrap();
+    // Shell text runs in the shell the declaration names (when it is installed here), else
+    // the platform's.
+    let (want, flags) = dots_providers::script::shell_command(Some("bash"));
+    assert_eq!(a[0].argv[0], want.to_string_lossy());
+    assert_eq!(a[0].argv[1..=flags.len()], *flags);
+    t["shell"] = json!("zsh");
+    let err = CustomDef::from_json("go", &t).unwrap_err().to_string();
+    assert!(err.contains("unknown shell"), "{err}");
+}

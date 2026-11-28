@@ -174,7 +174,6 @@ fn skip_hides_it_until_the_revision_increases() {
 }
 
 #[test]
-#[cfg(unix)]
 fn a_check_closes_the_action_as_auto() {
     let b = sandbox("");
     install_k(&b);
@@ -193,7 +192,6 @@ fn a_check_closes_the_action_as_auto() {
 }
 
 #[test]
-#[cfg(unix)]
 fn an_always_action_opens_again_when_its_check_stops_passing() {
     let b = sandbox("");
     install_k(&b);
@@ -250,7 +248,6 @@ fn status_and_plan_report_pending_manual_actions() {
 }
 
 #[test]
-#[cfg(unix)]
 fn apply_runs_the_checks_and_ends_with_the_summary() {
     let b = sandbox("");
     manual(
@@ -323,7 +320,6 @@ fn hook_runs(b: &Sb) -> usize {
 }
 
 #[test]
-#[cfg(unix)]
 fn an_adopted_package_runs_its_post_install_hook_once() {
     let b = sandbox(HOOK);
     // Already installed outside dots: adopted, no install step.

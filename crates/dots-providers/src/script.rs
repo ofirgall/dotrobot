@@ -187,6 +187,54 @@ fn windows_git_shell(kind: &str) -> Option<PathBuf> {
     found.or_else(|| (kind == "bash").then(|| windows_git_shell("sh")).flatten())
 }
 
+/// Where a shell kind (`bash`, `sh` or `pwsh`) lives on this machine, from known locations
+/// (never via `PATH`), with the flags that make it run a command line.
+pub fn shell_for(kind: &str) -> Option<(PathBuf, &'static [&'static str])> {
+    const PWSH_FLAGS: &[&str] = &["-NoProfile", "-NonInteractive", "-Command"];
+    let flags: &'static [&'static str] = if kind == "pwsh" { PWSH_FLAGS } else { &["-c"] };
+    shell_path_for(kind).map(|p| (p, flags))
+}
+
+#[cfg(windows)]
+fn shell_path_for(kind: &str) -> Option<PathBuf> {
+    if kind == "pwsh" {
+        windows_pwsh()
+    } else {
+        windows_git_shell(kind)
+    }
+}
+
+#[cfg(not(windows))]
+fn shell_path_for(kind: &str) -> Option<PathBuf> {
+    let cands: &[&str] = match kind {
+        "bash" => &[
+            "/bin/bash",
+            "/usr/bin/bash",
+            "/opt/homebrew/bin/bash",
+            "/usr/local/bin/bash",
+        ],
+        "sh" => &["/bin/sh", "/usr/bin/sh"],
+        _ => &[
+            "/usr/local/bin/pwsh",
+            "/opt/homebrew/bin/pwsh",
+            "/usr/bin/pwsh",
+        ],
+    };
+    let found = cands.iter().map(PathBuf::from).find(|c| c.is_file());
+    // A box without bash still runs a script written for plain sh.
+    found.or_else(|| {
+        (kind == "bash")
+            .then(|| ["/bin/sh", "/usr/bin/sh"].map(PathBuf::from))
+            .and_then(|c| c.into_iter().find(|p| p.is_file()))
+    })
+}
+
+/// The shell for a line of shell text: `kind` when one is named and found, else the platform
+/// shell ([`platform_shell`]).
+pub fn shell_command(kind: Option<&str>) -> (PathBuf, &'static [&'static str]) {
+    kind.and_then(shell_for).unwrap_or_else(platform_shell)
+}
+
 /// The shell that runs a command line, as `(program, flags before the line)`: `/bin/sh -c`
 /// on unix, PowerShell on Windows (the same lookup as the script provider). For callers that
 /// have a line of shell text and no package shell setting (hooks, declarative providers).
@@ -597,41 +645,7 @@ impl ScriptProvider {
 
     /// Absolute path of the shell, from known locations (never via `PATH`).
     fn shell_path(&self) -> Option<PathBuf> {
-        let kind = self.shell_kind();
-        #[cfg(windows)]
-        if kind == "pwsh" {
-            windows_pwsh()
-        } else {
-            windows_git_shell(kind)
-        }
-        #[cfg(not(windows))]
-        self.unix_shell_path(kind)
-    }
-
-    #[cfg(not(windows))]
-    fn unix_shell_path(&self, kind: &str) -> Option<PathBuf> {
-        let cands: &[&str] = match kind {
-            "bash" => &[
-                "/bin/bash",
-                "/usr/bin/bash",
-                "/opt/homebrew/bin/bash",
-                "/usr/local/bin/bash",
-            ],
-            "sh" => &["/bin/sh", "/usr/bin/sh"],
-            _ => &[
-                "/usr/local/bin/pwsh",
-                "/opt/homebrew/bin/pwsh",
-                "/usr/bin/pwsh",
-                "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
-            ],
-        };
-        let found = cands.iter().map(PathBuf::from).find(|c| c.is_file());
-        // A box without bash still runs a script written for plain sh.
-        found.or_else(|| {
-            (kind == "bash")
-                .then(|| ["/bin/sh", "/usr/bin/sh"].map(PathBuf::from))
-                .and_then(|c| c.into_iter().find(|p| p.is_file()))
-        })
+        shell_for(self.shell_kind()).map(|(p, _)| p)
     }
 
     /// A value that is one token naming an existing file in the package directory (`install =
