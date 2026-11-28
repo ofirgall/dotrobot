@@ -32,8 +32,8 @@ pub use diff3::{Conflict, Merged, merge3};
 pub use directives::lint_layers;
 pub use fragments::{FRAGMENT_OWNER, FragmentSource, compose_fragments, lint_collisions};
 pub use fsops::{
-    Stage, atomic_symlink, atomic_write, atomic_write_follow, atomic_write_hooked, resolve_link,
-    sha256_hex,
+    LinkKind, Stage, atomic_symlink, atomic_write, atomic_write_follow, atomic_write_hooked,
+    make_link, refuse_symlinks, resolve_link, sha256_hex, symlinks_refused,
 };
 pub use ledger::{Ledger, Record};
 pub use merge::{DELETE_MARKER, Node, Strategy};

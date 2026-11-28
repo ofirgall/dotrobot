@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::fsops::atomic_write;
+use crate::fsops::{LinkKind, atomic_write};
 use crate::model::Mode;
 
 /// What dots wrote for one destination.
@@ -28,6 +28,10 @@ pub struct Record {
     pub created: bool,
     pub marker: Option<String>,
     pub comment: Option<String>,
+    /// What `link`/`render` created at `dst`: a symlink, or on Windows without the privilege a
+    /// hardlink (files) or junction (directories). Absent in older ledgers: a symlink.
+    #[serde(default, skip_serializing_if = "LinkKind::is_symlink")]
+    pub link_kind: LinkKind,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]

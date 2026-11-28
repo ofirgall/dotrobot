@@ -5,7 +5,7 @@ use std::path::Path;
 
 use dots_core::report::Diagnostic;
 
-use crate::fsops::{lexists, sha256_hex, sha256_path};
+use crate::fsops::{LinkKind, lexists, sha256_hex, sha256_path};
 use crate::ledger::{Ledger, Record};
 use crate::model::{
     Action, BackupKind, FileState, FileStatus, FileStep, FilesCtx, Mode, Resolution, ResolvedFile,
@@ -125,6 +125,28 @@ pub fn build_step(file: &ResolvedFile, ctx: &FilesCtx) -> FileStep {
     step
 }
 
+/// State of a destination that is a hardlink of `target` (see `LinkKind::Hardlink`).
+fn observe_hardlink(step: &FileStep, rec: &Record, target: &Path) -> FileState {
+    let Some(h) = sha256_path(&step.dst) else {
+        return FileState::Dangling;
+    };
+    if step.mode == Mode::Link {
+        return if crate::fsops::same_content(&step.dst, target) {
+            FileState::Ok
+        } else {
+            FileState::Modified
+        };
+    }
+    match &rec.sha256 {
+        Some(r) if *r != h => FileState::Modified,
+        Some(r) if Some(r) != step.sha256.as_ref() => FileState::Stale,
+        // The rendered file was rewritten (same content or not): the hardlink must be remade
+        // to follow it.
+        _ if !crate::fsops::same_content(&step.dst, target) => FileState::Stale,
+        _ => FileState::Ok,
+    }
+}
+
 /// Observe the on-disk state of a step's destination.
 pub fn observe(step: &FileStep, rec: Option<&Record>, ctx: &FilesCtx) -> FileState {
     let dst = &step.dst;
@@ -193,6 +215,12 @@ pub fn observe(step: &FileStep, rec: Option<&Record>, ctx: &FilesCtx) -> FileSta
                     None if Some(&h) == step.sha256.as_ref() => FileState::Ok,
                     None => FileState::Stale,
                 }
+            } else if let Some(r) =
+                rec.filter(|r| r.link_kind == LinkKind::Hardlink && meta.is_file())
+            {
+                // A hardlink made where symlinks are refused: it is the link while its
+                // content is the target's. (A write by rename leaves it on the old file.)
+                observe_hardlink(step, r, target)
             } else if meta.is_dir() || rec.is_none() {
                 FileState::Conflict
             } else {

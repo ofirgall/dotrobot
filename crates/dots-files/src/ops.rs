@@ -6,7 +6,9 @@ use std::path::Path;
 
 use dots_core::report::Diagnostic;
 
-use crate::fsops::{atomic_symlink, atomic_write, ensure_parents, lexists, remove_any, sha256_hex};
+use crate::fsops::{
+    LinkKind, atomic_write, ensure_parents, lexists, make_link, remove_any, sha256_hex,
+};
 use crate::ledger::{Ledger, Record, key};
 use crate::model::{
     Action, BackupKind, FileOutcome, FileState, FileStep, FilesCtx, Mode, OutcomeStatus,
@@ -156,18 +158,19 @@ fn write(step: &FileStep, ctx: &FilesCtx) -> FileOutcome {
     }
 
     let mut created = existing.as_ref().is_some_and(|r| r.created);
+    let mut link_kind = LinkKind::Symlink;
     let res: std::io::Result<()> = (|| match step.mode {
         Mode::Dir => {
             created |= !step.dst.is_dir();
             fs::create_dir_all(&step.dst)
         }
-        Mode::Link => link(step, ctx),
+        Mode::Link => link(step, ctx).map(|k| link_kind = k),
         Mode::Copy => atomic_write(&step.dst, step.content.as_deref().unwrap_or_default()),
         Mode::Render => {
             let g = step.gen_path.as_deref().unwrap_or(&step.dst);
             ensure_parents(g)?;
             atomic_write(g, step.content.as_deref().unwrap_or_default())?;
-            link(step, ctx)
+            link(step, ctx).map(|k| link_kind = k)
         }
         Mode::Terminfo => {
             let dir = step.dst.parent().unwrap_or(Path::new("."));
@@ -206,6 +209,7 @@ fn write(step: &FileStep, ctx: &FilesCtx) -> FileOutcome {
             created,
             marker: step.marker.clone(),
             comment: step.comment.clone(),
+            link_kind,
         },
     );
     if let Err(e) = ledger.save(&ctx.state) {
@@ -214,17 +218,28 @@ fn write(step: &FileStep, ctx: &FilesCtx) -> FileOutcome {
     out
 }
 
-fn link(step: &FileStep, ctx: &FilesCtx) -> std::io::Result<()> {
+fn link(step: &FileStep, ctx: &FilesCtx) -> std::io::Result<LinkKind> {
     let target = step.link_target.as_deref().unwrap_or(Path::new(""));
     // Fresh sandboxes have no `active` yet: point it at the checkout, once.
     if target.starts_with(ctx.active_dir()) && !lexists(&ctx.active_dir()) {
         fs::create_dir_all(&ctx.state)?;
-        atomic_symlink(&ctx.root, &ctx.active_dir())?;
+        make_link(&ctx.root, &ctx.active_dir())?;
     }
     if fs::read_link(&step.dst).ok().as_deref() == Some(target) {
-        return Ok(());
+        return Ok(if is_junction_dst(&step.dst) {
+            LinkKind::Junction
+        } else {
+            LinkKind::Symlink
+        });
     }
-    atomic_symlink(target, &step.dst)
+    make_link(target, &step.dst)
+}
+
+/// On Windows a junction reads back like a symlink; only the ledger says which it is. This is
+/// for the no-change path of [`link`]: a directory destination read back as a link is a
+/// junction when symlinks are refused.
+fn is_junction_dst(dst: &Path) -> bool {
+    cfg!(windows) && dst.is_dir() && crate::fsops::symlinks_refused()
 }
 
 /// Insert or replace the managed block in `text`.
@@ -315,6 +330,14 @@ fn remove(step: &FileStep, ctx: &FilesCtx) -> FileOutcome {
         Mode::Link | Mode::Render => {
             if fs::symlink_metadata(dst).is_ok_and(|m| m.file_type().is_symlink()) {
                 crate::fsops::remove_link(dst)?;
+            } else if rec.link_kind == LinkKind::Hardlink
+                && rec
+                    .link_target
+                    .as_deref()
+                    .is_some_and(|t| crate::fsops::same_content(dst, t))
+            {
+                // Ours: a hardlink that still reads as the file it was made from.
+                fs::remove_file(dst)?;
             } else if lexists(dst) {
                 return Ok(false); // replaced by something that is not ours
             }

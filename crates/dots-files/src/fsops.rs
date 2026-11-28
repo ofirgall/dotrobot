@@ -89,6 +89,120 @@ pub fn atomic_write_hooked(
     res
 }
 
+/// What a link at a destination really is. Windows can refuse symlinks to an account without
+/// the privilege (Developer Mode off, not elevated); dots then falls back to a hardlink for a
+/// file and a junction for a directory, and records which it made so status and removal know.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LinkKind {
+    #[default]
+    Symlink,
+    /// A second name for the target file. It shares the file's content, but not its fate: a
+    /// replace-by-rename of the target (every dots write) leaves the hardlink on the old file,
+    /// so status compares content and the next apply re-links.
+    Hardlink,
+    /// A directory junction (`mklink /J`).
+    Junction,
+}
+
+impl LinkKind {
+    pub fn is_symlink(&self) -> bool {
+        *self == LinkKind::Symlink
+    }
+
+    pub fn word(&self) -> &'static str {
+        match self {
+            LinkKind::Symlink => "symlink",
+            LinkKind::Hardlink => "hardlink",
+            LinkKind::Junction => "junction",
+        }
+    }
+}
+
+/// Set once a symlink attempt is refused for lack of privilege: later links of this run go
+/// straight to the fallback.
+static SYMLINKS_REFUSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// `ERROR_PRIVILEGE_NOT_HELD`: Windows' answer to a symlink request from an account that may
+/// not create them.
+#[cfg(windows)]
+fn privilege_refused(e: &io::Error) -> bool {
+    e.raw_os_error() == Some(1314)
+}
+
+/// Create `link` -> `target` (replacing what is at `link`), as a symlink when the system lets
+/// this account, else, on Windows, a hardlink for a file target or a junction for a directory.
+pub fn make_link(target: &Path, link: &Path) -> io::Result<LinkKind> {
+    #[cfg(windows)]
+    {
+        use std::sync::atomic::Ordering;
+        if !SYMLINKS_REFUSED.load(Ordering::Relaxed) {
+            match atomic_symlink(target, link) {
+                Err(e) if privilege_refused(&e) => SYMLINKS_REFUSED.store(true, Ordering::Relaxed),
+                other => return other.map(|()| LinkKind::Symlink),
+            }
+        }
+        fallback_link(target, link)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = &SYMLINKS_REFUSED;
+        atomic_symlink(target, link).map(|()| LinkKind::Symlink)
+    }
+}
+
+#[cfg(windows)]
+fn fallback_link(target: &Path, link: &Path) -> io::Result<LinkKind> {
+    let tmp = tmp_name(link);
+    let _ = remove_link(&tmp);
+    let _ = fs::remove_file(&tmp);
+    let kind = if target.is_dir() {
+        let out = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&tmp)
+            .arg(target)
+            .stdin(std::process::Stdio::null())
+            .output()?;
+        if !out.status.success() {
+            return Err(io::Error::other(format!(
+                "cannot create a junction: {}",
+                String::from_utf8_lossy(&out.stdout).trim()
+            )));
+        }
+        LinkKind::Junction
+    } else {
+        fs::hard_link(target, &tmp)?;
+        LinkKind::Hardlink
+    };
+    if fs::symlink_metadata(link).is_ok_and(|m| m.file_type().is_symlink()) {
+        remove_link(link)?;
+    }
+    fs::rename(&tmp, link)
+        .inspect_err(|_| {
+            let _ = remove_link(&tmp);
+        })
+        .map(|()| kind)
+}
+
+/// Behave as an account that may not create symlinks: every link goes to the fallback. For
+/// tests (a developer machine usually can create them).
+pub fn refuse_symlinks() {
+    SYMLINKS_REFUSED.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether a symlink attempt was refused for lack of privilege earlier in this process.
+pub fn symlinks_refused() -> bool {
+    SYMLINKS_REFUSED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Do `a` and `b` hold the same bytes? (How a hardlink is told from a stale copy.)
+pub fn same_content(a: &Path, b: &Path) -> bool {
+    match (fs::read(a), fs::read(b)) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => false,
+    }
+}
+
 #[cfg(unix)]
 fn symlink(target: &Path, link: &Path) -> io::Result<()> {
     std::os::unix::fs::symlink(target, link)

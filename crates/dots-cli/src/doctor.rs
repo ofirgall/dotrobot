@@ -351,16 +351,99 @@ fn can_symlink(_: &Path) -> bool {
     true
 }
 
-fn symlinks(l: &Loaded, dirs: &Dirs) -> Vec<Finding> {
-    if l.rc.m.facts.os == "windows" && !can_symlink(&dirs.cache) {
-        return vec![finding(
-            "symlinks",
-            Sev::Error,
-            "this account cannot create symbolic links",
-            "turn on Developer Mode in Windows settings, or run from an elevated shell",
-        )];
+/// Windows only: is Developer Mode on (it lets a normal account create symlinks)?
+#[cfg(windows)]
+fn developer_mode() -> Option<bool> {
+    let out = std::process::Command::new("reg")
+        .args([
+            "query",
+            r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock",
+            "/v",
+            "AllowDevelopmentWithoutDevLicense",
+        ])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return Some(false);
     }
-    Vec::new()
+    Some(String::from_utf8_lossy(&out.stdout).contains("0x1"))
+}
+
+/// Windows only: is this process elevated? `whoami /groups` lists the High mandatory level
+/// (`S-1-16-12288`) for an elevated token.
+#[cfg(windows)]
+fn elevated() -> bool {
+    std::process::Command::new("whoami")
+        .arg("/groups")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("S-1-16-12288"))
+}
+
+#[cfg(not(windows))]
+fn developer_mode() -> Option<bool> {
+    None
+}
+
+#[cfg(not(windows))]
+fn elevated() -> bool {
+    false
+}
+
+/// Symlinks on Windows. dots falls back to hardlinks (files) and junctions (directories) when
+/// this account cannot create symlinks, so that is a warning with the way out, not an error.
+/// A session at High integrity (elevated) cannot follow a symlink a normal (Medium) session
+/// made: Windows answers "the path cannot be traversed because it contains an untrusted mount
+/// point". Links dots owns that fail that way are reported.
+fn symlinks(l: &Loaded, dirs: &Dirs) -> Vec<Finding> {
+    if l.rc.m.facts.os != "windows" {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    if !can_symlink(&dirs.cache) {
+        let dm = match developer_mode() {
+            Some(false) => "Developer Mode is off",
+            Some(true) => "Developer Mode is on, yet symlinks are refused",
+            None => "Developer Mode status unknown",
+        };
+        out.push(finding(
+            "symlinks",
+            Sev::Warn,
+            format!(
+                "this account cannot create symbolic links ({dm}); dots uses hardlinks for files and junctions for directories instead"
+            ),
+            "turn on Developer Mode (Settings > System > For developers) for real symlinks, or run from an elevated shell",
+        ));
+    }
+    if elevated() {
+        let led = dots_files::Ledger::load(&dirs.state);
+        let untrusted: Vec<String> = led
+            .owned
+            .values()
+            .filter(|r| {
+                r.link_kind.is_symlink()
+                    && matches!(r.mode, dots_files::Mode::Link | dots_files::Mode::Render)
+            })
+            .filter(|r| {
+                std::fs::symlink_metadata(&r.dst).is_ok_and(|m| m.file_type().is_symlink())
+                    && std::fs::metadata(&r.dst).is_err_and(|e| e.raw_os_error() == Some(448))
+            })
+            .map(|r| tilde(&r.dst, &dirs.home))
+            .collect();
+        if !untrusted.is_empty() {
+            out.push(finding(
+                "symlinks",
+                Sev::Warn,
+                format!(
+                    "this shell is elevated and cannot follow symlinks made by a normal shell ({}): Windows calls them untrusted mount points",
+                    untrusted.join(", ")
+                ),
+                "run dots from a normal (non-elevated) shell, or from an elevated one consistently, and `dots apply` again to remake them",
+            ));
+        }
+    }
+    out
 }
 
 fn platform_keys(l: &Loaded) -> Vec<Finding> {
