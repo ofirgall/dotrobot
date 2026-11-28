@@ -2042,6 +2042,85 @@ fn a_mismatched_git_crate_plans_an_upgrade_not_a_downgrade() {
     assert_eq!(downgrades, 0);
     assert_eq!(p.steps.len(), 1);
     assert_eq!(p.steps[0].kind, StepKind::Upgrade);
+    // The upgrade moves the install, so the row is rewritten with it.
+    assert!(p.lock[0].rewrite && p.lock[0].has_step, "{:?}", p.lock);
+}
+
+/// A git crate rebuilt at a new rev keeps its version; the row must take the new rev (it used
+/// to stay on the old one, and the next plan saw nothing to do).
+#[test]
+fn a_rebuilt_git_crate_records_its_new_rev_in_the_lock() {
+    let body = "[providers.cargo]\ngit = \"https://github.com/ofirgall/herdr\"";
+    let sb = sandbox(&[("herdr", body)], &[]);
+    own(&sb, "herdr", "cargo", "0.9.5");
+    let cargo = FakeProvider::new("cargo")
+        .with_installed("herdr", "0.9.5")
+        .with_source("herdr", "6644aaaaaaaa")
+        .with_source_after("herdr", "8ea9d418bbbb")
+        .with_stale("herdr", "installed rev 6644aaaa != 8ea9d418");
+    let reg = registry(&[&cargo]);
+    let mut case = Case::new(&sb, &reg, &NoFiles);
+    let mut row = lock_row("herdr", "cargo", "0.9.5");
+    row.rev = Some("6644aaaaaaaa".into());
+    case.lock.upsert(row);
+    let p = case.plan();
+    assert_eq!(p.steps.len(), 1);
+    assert!(p.lock[0].rewrite && p.lock[0].has_step, "{:?}", p.lock);
+    let r = case.apply(true);
+    assert_eq!(r.status, Status::Done, "{:#?}", r.errors);
+    assert_eq!(r.lock_updates.len(), 1, "{:?}", r.lock_updates);
+    assert_eq!(r.lock_updates[0].rev.as_deref(), Some("8ea9d418bbbb"));
+}
+
+/// The Windows cutover case: the row recorded an older path build (0.8.2), the spec now pins a
+/// rev that is already installed (0.9.5). The row names another rev, so it pins nothing: no
+/// downgrade, and the row is rewritten to the install.
+#[test]
+fn a_row_for_another_rev_than_the_pinned_one_is_not_a_downgrade_target() {
+    let body = "[providers.cargo]\ngit = \"https://github.com/ofirgall/herdr\"\nrev = \"664400008b1118feb7d05fd942e42428d64e949e\"";
+    let sb = sandbox(&[("herdr", body)], &[]);
+    own(&sb, "herdr", "cargo", "0.9.5");
+    let cargo = FakeProvider::new("cargo")
+        .with_installed("herdr", "0.9.5")
+        .with_source(
+            "herdr",
+            "https://github.com/ofirgall/herdr?rev=664400008b1118feb7d05fd942e42428d64e949e#664400008b1118feb7d05fd942e42428d64e949e",
+        );
+    let reg = registry(&[&cargo]);
+    let mut case = Case::new(&sb, &reg, &NoFiles);
+    let mut row = lock_row("herdr", "cargo", "0.8.2");
+    row.rev = Some("/C:/Users/Ofir/workspace/personal/herdr".into());
+    case.lock.upsert(row);
+    let p = case.plan();
+    assert!(p.steps.is_empty(), "{:?}", p.steps);
+    assert!(
+        p.lock.iter().any(|l| l.rewrite && !l.has_step),
+        "{:?}",
+        p.lock
+    );
+}
+
+/// A row already stale (same version, old rev) while the install is at the new rev is healed.
+#[test]
+fn a_lock_row_with_an_old_rev_is_rewritten_to_the_installed_rev() {
+    let body = "[providers.cargo]\ngit = \"https://github.com/ofirgall/herdr\"";
+    let sb = sandbox(&[("herdr", body)], &[]);
+    own(&sb, "herdr", "cargo", "0.9.5");
+    let cargo = FakeProvider::new("cargo")
+        .with_installed("herdr", "0.9.5")
+        .with_source("herdr", "8ea9d418bbbb");
+    let reg = registry(&[&cargo]);
+    let mut case = Case::new(&sb, &reg, &NoFiles);
+    let mut row = lock_row("herdr", "cargo", "0.9.5");
+    row.rev = Some("6644aaaaaaaa".into());
+    case.lock.upsert(row);
+    let p = case.plan();
+    assert!(p.steps.is_empty(), "{:?}", p.steps);
+    assert!(
+        p.lock.iter().any(|l| l.rewrite && !l.has_step),
+        "{:?}",
+        p.lock
+    );
 }
 
 #[test]
@@ -3373,5 +3452,66 @@ mod sudo_policy {
             rec.lines()
         );
         assert!(rec.lines().iter().any(|l| l.contains("echo rootpkg")));
+    }
+}
+
+mod env_of_installed_deps {
+    use super::*;
+
+    const A_ENV: &str = "[env]\nvars = { X = \"from-a\" }\n[providers.brew]";
+
+    /// `a` (with `[env]`) is installed already; `b` requires it and installs now. Returns the
+    /// environment each `install` command ran with, by its line.
+    fn run(targets: &[&str]) -> Vec<(String, BTreeMap<String, String>)> {
+        let pkgs = vec![("a", A_ENV), ("b", "requires = [\"a\"]\n[providers.brew]")];
+        let sb = sandbox(&pkgs, &[]);
+        let brew = FakeProvider::new("brew");
+        let reg = registry(&[&brew]);
+        let rec = Arc::new(RecordingRunner::new());
+        let bin = if cfg!(windows) {
+            "C:\\fake\\bin\\brew"
+        } else {
+            "/fake/bin/brew"
+        };
+        rec.on(&[bin, "list"], dots_providers::Output::ok("a\t1\tfalse\n"));
+        let mut case = Case::new(&sb, &reg, &NoFiles);
+        case.ctx.runner = rec.clone();
+        case.scope.targets = targets.iter().map(|t| t.to_string()).collect();
+        let lock = RunLock::acquire(&sb.dirs.run_lock()).unwrap();
+        let env = dots_env::EnvCtx::new(&sb.dirs.home);
+        case.with(|i| {
+            let r = apply_observed(
+                i,
+                &cfg(true),
+                &NoPrompt,
+                Mode::Live(&lock),
+                &NoObserver,
+                Some(env.clone()),
+            );
+            assert_eq!(r.status, Status::Done, "{:#?}", r.errors);
+        });
+        rec.commands()
+            .into_iter()
+            .filter(|c| c.args.iter().any(|a| a == "install"))
+            .map(|c| (c.line(), c.env))
+            .collect()
+    }
+
+    #[test]
+    fn an_already_installed_dependency_contributes_its_env() {
+        let runs = run(&[]);
+        assert_eq!(runs.len(), 1, "{runs:?}");
+        assert!(
+            runs[0].0.contains('b') && !runs[0].0.contains(" a"),
+            "{runs:?}"
+        );
+        assert_eq!(runs[0].1.get("X").map(String::as_str), Some("from-a"));
+    }
+
+    #[test]
+    fn a_targeted_apply_sees_the_env_of_its_installed_dependencies() {
+        let runs = run(&["b"]);
+        assert_eq!(runs.len(), 1, "{runs:?}");
+        assert_eq!(runs[0].1.get("X").map(String::as_str), Some("from-a"));
     }
 }

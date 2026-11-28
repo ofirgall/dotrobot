@@ -39,6 +39,8 @@ struct State {
     stale: BTreeMap<String, String>,
     /// `list` (the `installed` query) fails.
     query_fails: bool,
+    /// The source (a git rev) an install or upgrade of the name leaves behind.
+    source_after: BTreeMap<String, String>,
 }
 
 /// Cloneable handle; clones share state, so tests keep one to inspect after handing another over.
@@ -74,7 +76,10 @@ impl Runner for FakeBackend {
             let lines: String = st
                 .installed
                 .iter()
-                .map(|(n, i)| format!("{n}\t{}\t{}\n", i.version, i.pinned))
+                .map(|(n, i)| {
+                    let src = i.source.as_deref().unwrap_or_default();
+                    format!("{n}\t{}\t{}\t{src}\n", i.version, i.pinned)
+                })
                 .collect();
             return Ok(Output::ok(&lines));
         }
@@ -130,12 +135,13 @@ impl Runner for FakeBackend {
                         .or_else(|| st.latest.get(&name).cloned())
                         .unwrap_or_else(|| "1.0.0".to_string());
                     let pinned = st.installed.get(&name).is_some_and(|i| i.pinned);
+                    let source = st.source_after.get(&name).cloned();
                     st.installed.insert(
                         name,
                         Installed {
                             version,
                             pinned,
-                            source: None,
+                            source,
                         },
                     );
                 }
@@ -233,6 +239,24 @@ impl FakeProvider {
         self
     }
 
+    /// The installed `name` was built from `rev` (a git source).
+    pub fn with_source(self, name: &str, rev: &str) -> Self {
+        if let Some(i) = self.state.lock().unwrap().installed.get_mut(name) {
+            i.source = Some(rev.into());
+        }
+        self
+    }
+
+    /// An install or upgrade of `name` leaves it built from `rev`.
+    pub fn with_source_after(self, name: &str, rev: &str) -> Self {
+        self.state
+            .lock()
+            .unwrap()
+            .source_after
+            .insert(name.into(), rev.into());
+        self
+    }
+
     /// The `installed` query fails (the provider "could not be queried").
     pub fn failing_query(self) -> Self {
         self.state.lock().unwrap().query_fails = true;
@@ -310,7 +334,7 @@ impl Provider for FakeProvider {
                     Installed {
                         version: v.to_string(),
                         pinned: p == "true",
-                        source: None,
+                        source: it.next().filter(|s| !s.is_empty()).map(String::from),
                     },
                 ))
             })

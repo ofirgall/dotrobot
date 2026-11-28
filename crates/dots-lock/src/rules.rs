@@ -108,6 +108,12 @@ fn rev_eq(a: &str, b: &str) -> bool {
     a == b || (a.len().min(b.len()) >= 7 && (a.starts_with(b) || b.starts_with(a)))
 }
 
+/// Does an installed source name a git checkout (`https://...?rev=<sha>#<sha>`, or a bare sha)
+/// rather than a local directory?
+fn is_git_source(s: &str) -> bool {
+    s.contains("?rev=") || s.contains('#') || is_sha(s)
+}
+
 fn is_sha(s: &str) -> bool {
     s.len() >= 7 && s.chars().all(|c| c.is_ascii_hexdigit())
 }
@@ -123,6 +129,15 @@ pub fn lock_satisfies(spec: &Spec, l: &Locked<'_>) -> bool {
 
 /// Is `installed` what the row locks?
 pub fn matches_lock(l: &Locked<'_>, installed: &str, installed_rev: Option<&str>) -> bool {
+    // A version match alone is not enough when both revs are known: a rebuilt git crate keeps
+    // its version while its rev moves. Only a git source carries a rev to compare: a path
+    // crate's source is its directory, and its row's rev is the version's build suffix.
+    if let (Some(r), Some(ir)) = (l.rev, installed_rev)
+        && is_git_source(ir)
+        && !rev_eq(ir, r)
+    {
+        return false;
+    }
     let by_version = l
         .version
         .is_some_and(|v| v == installed || same(installed, v));
@@ -327,6 +342,50 @@ mod tests {
 
     fn spec(s: &str) -> Spec {
         Spec::parse(s).unwrap()
+    }
+
+    #[test]
+    fn a_same_version_with_another_rev_does_not_match_the_row() {
+        let l = Locked {
+            version: Some("0.9.5"),
+            rev: Some("6644aaaaaaaa"),
+            git_ref: Some("main"),
+        };
+        assert!(matches_lock(&l, "0.9.5", Some("6644aaaaaaaa")));
+        assert!(!matches_lock(&l, "0.9.5", Some("8ea9d418bbbb")));
+        // Without an installed rev to compare, the version still decides.
+        assert!(matches_lock(&l, "0.9.5", None));
+        // The real cargo source form.
+        let g = Locked {
+            version: Some("0.9.5"),
+            rev: Some("https://github.com/o/herdr?rev=6644aaaa#6644aaaa"),
+            git_ref: None,
+        };
+        assert!(matches_lock(
+            &g,
+            "0.9.5",
+            Some("https://github.com/o/herdr?rev=6644aaaa#6644aaaa")
+        ));
+        assert!(!matches_lock(
+            &g,
+            "0.9.5",
+            Some("https://github.com/o/herdr?rev=8ea9d418#8ea9d418")
+        ));
+    }
+
+    #[test]
+    fn a_path_crate_row_matches_despite_its_directory_source() {
+        // A path crate: the source is its directory, the row's rev is the build suffix.
+        let l = Locked {
+            version: Some("0.1.0.1+87aa6082"),
+            rev: Some("87aa6082"),
+            git_ref: None,
+        };
+        assert!(matches_lock(
+            &l,
+            "0.1.0.1+87aa6082",
+            Some("/Users/me/crate")
+        ));
     }
 
     fn locked(v: &str) -> Locked<'_> {

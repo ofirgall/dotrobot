@@ -543,6 +543,17 @@ fn is_source_bound(spec: &dots_providers::Spec) -> bool {
     spec.opts.contains_key("git") || spec.opts.contains_key("path")
 }
 
+/// Does a row's rev (the install source, `https://...?rev=<full>#<short>`, or a bare sha) name
+/// the pinned `want`?
+fn row_names_rev(row: Option<&str>, want: &str) -> bool {
+    let Some(row) = row else { return false };
+    if row.contains(want) {
+        return true;
+    }
+    let sha = row.rsplit_once('#').map_or(row, |(_, s)| s);
+    sha.len() >= 7 && (want.starts_with(sha) || sha.starts_with(want))
+}
+
 /// What `apply` does about one package's version: the lock rules ([`rules::decide`]) plus the
 /// two corrections that depend on the provider and the source. `status` asks this same
 /// question, so it can never report a drift that `apply` would not act on.
@@ -560,6 +571,25 @@ fn is_source_bound(spec: &dots_providers::Spec) -> bool {
 /// - A version the provider cannot report ([`rules::UNKNOWN_VERSION`]) is never recorded and
 ///   never a drift on its own.
 pub fn decide_package(f: &Facts<'_>, spec: &dots_providers::Spec) -> rules::Decision {
+    // A git source pinned to a rev the row does not name: the spec moved past the row (or the
+    // row recorded some other install), so it pins nothing and is rewritten to what ends up
+    // installed. Without this an older row reads as a downgrade target.
+    let unpinned;
+    let f = match (spec.opts.get("rev"), f.locked.as_ref()) {
+        (Some(want), Some(l)) if spec.opts.contains_key("git") && !row_names_rev(l.rev, want) => {
+            unpinned = Facts {
+                spec: f.spec,
+                locked: None,
+                installed: f.installed,
+                installed_rev: f.installed_rev,
+                owned: f.owned,
+                offered: f.offered,
+                exact: f.exact,
+            };
+            &unpinned
+        }
+        _ => f,
+    };
     let mut d = rules::decide(f);
     if is_source_bound(spec)
         && !spec.opts.contains_key("rev")
@@ -683,7 +713,7 @@ fn plan_packages(
             })
             .flatten()
         });
-        let decision = match inp.locks.and_then(|l| l.upgrade.get(name)) {
+        let mut decision = match inp.locks.and_then(|l| l.upgrade.get(name)) {
             Some(t) => rules::Decision {
                 step: Some(rules::Step {
                     kind: if installed_v.is_some() {
@@ -714,31 +744,10 @@ fn plan_packages(
             ),
         };
         let source_bound = is_source_bound(&spec);
-        if decision.rewrite || decision.adopt || decision.drift.is_some() {
-            plan.lock.push(LockStep {
-                package: name.clone(),
-                provider: choice.id.clone(),
-                native: choice.native_name.clone(),
-                platform: platform.clone(),
-                from: row.map(|r| r.shown()),
-                to: decision.expected.clone(),
-                rewrite: decision.rewrite,
-                adopt: decision.adopt,
-                drift: decision.drift.clone(),
-                has_step: decision.step.is_some(),
-                installed: installed.map(|i| i.version.clone()),
-                installed_source: installed.and_then(|i| i.source.clone()),
-                spec: Some(spec.clone()),
-                git_ref: match &pr.wanted {
-                    dots_model::vspec::Spec::Git(r) => Some(r.clone()),
-                    _ => None,
-                },
-            });
-        }
         // Installed and fine by the version rules, but the provider says something it declares
         // is missing on this machine (an apt repository): upgrade from there.
         let mut note = None;
-        let decided = match decision.step {
+        let decided = match decision.step.take() {
             Some(step) => Some(step),
             None if installed.is_some() => inp
                 .registry
@@ -753,6 +762,32 @@ fn plan_packages(
                 }),
             None => None,
         };
+        // A stale-reason step moves the install, so the row must follow what ends up installed
+        // (a rebuilt git crate otherwise keeps the old rev in its row).
+        if note.is_some() {
+            decision.rewrite = true;
+        }
+        if decision.rewrite || decision.adopt || decision.drift.is_some() {
+            plan.lock.push(LockStep {
+                package: name.clone(),
+                provider: choice.id.clone(),
+                native: choice.native_name.clone(),
+                platform: platform.clone(),
+                from: row.map(|r| r.shown()),
+                to: decision.expected.clone(),
+                rewrite: decision.rewrite,
+                adopt: decision.adopt,
+                drift: decision.drift.clone(),
+                has_step: decided.is_some(),
+                installed: installed.map(|i| i.version.clone()),
+                installed_source: installed.and_then(|i| i.source.clone()),
+                spec: Some(spec.clone()),
+                git_ref: match &pr.wanted {
+                    dots_model::vspec::Spec::Git(r) => Some(r.clone()),
+                    _ => None,
+                },
+            });
+        }
         let Some(step) = decided else { continue };
         // (A source-bound package takes its version from the source.)
         let (kind, op_kind, version) = match step.kind {
