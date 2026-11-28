@@ -3,6 +3,7 @@
 //! Each test refuses symlinks first (a developer machine can usually create them), which is
 //! why they live in a binary of their own.
 #![cfg(windows)]
+#![allow(clippy::cloned_ref_to_slice_refs)]
 
 use std::fs;
 use std::path::PathBuf;

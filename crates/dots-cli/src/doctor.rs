@@ -178,7 +178,8 @@ fn env(l: &Loaded, dirs: &Dirs) -> Vec<Finding> {
         .env
         .get("SHELL")
         .and_then(|s| Shell::detect(s))
-        .or_else(|| Shell::detect(&l.rc.m.facts.shell));
+        .or_else(|| Shell::detect(&l.rc.m.facts.shell))
+        .or_else(|| (l.rc.m.facts.os == "windows").then_some(Shell::PowerShell));
     if let Some(s) = shell {
         let rc = default_rc(s, &dirs.home);
         let target = dots_core::paths::canonicalize(&rc).unwrap_or_else(|_| rc.clone());

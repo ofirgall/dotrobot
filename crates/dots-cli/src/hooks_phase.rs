@@ -10,6 +10,8 @@ use dots_providers::script::{ScriptConfig, ScriptEnv, ScriptProvider};
 use dots_providers::{Cmd, Ctx};
 
 pub struct RepoHooks<'a> {
+    /// The loaded repo: a package's `[providers.script] shell` is the shell of its hooks.
+    pub repo: &'a dots_model::Repo,
     pub facts: &'a Facts,
     pub dirs: &'a Dirs,
     pub root: &'a Path,
@@ -32,7 +34,16 @@ impl HooksPhase for RepoHooks<'_> {
         };
         // Only the runtime (shell, environment) of the script provider is used; the install
         // and check commands are never run.
+        let shell =
+            self.repo
+                .packages
+                .get(req.package)
+                .and_then(|p| match p.providers.get("script") {
+                    Some(dots_model::ProviderConfig::Script(s)) => s.shell.clone(),
+                    _ => None,
+                });
         let cfg = ScriptConfig {
+            shell,
             check: Some("true".into()),
             install: Some("true".into()),
             versionless: true,

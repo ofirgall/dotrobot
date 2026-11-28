@@ -46,6 +46,7 @@ fn hooks_phase<'a>(
     settings: &'a dots_config::Settings,
 ) -> crate::hooks_phase::RepoHooks<'a> {
     crate::hooks_phase::RepoHooks {
+        repo: &p.rc.repo,
         facts: &p.rc.m.facts,
         dirs,
         root: &p.rc.m.root,

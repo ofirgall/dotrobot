@@ -165,16 +165,22 @@ fn winget_exit_codes_for_nothing_to_do_are_success() {
 
 #[test]
 fn latest_reads_winget_show_one_package_at_a_time() {
+    // An absolute path on every OS (`/w/winget` has no drive on Windows).
+    let bin = if cfg!(windows) {
+        "C:\\w\\winget.exe"
+    } else {
+        "/w/winget"
+    };
     let rec = Arc::new(RecordingRunner::new());
     rec.on(
-        &["/w/winget", "show", "--id", "Git.Git"],
+        &[bin, "show", "--id", "Git.Git"],
         Output::ok("Found Git [Git.Git]\nVersion: 2.48.0\n"),
     );
     let ctx = Ctx {
         runner: rec.clone(),
         ..Ctx::default()
     };
-    let p = WingetProvider::with_bin("/w/winget");
+    let p = WingetProvider::with_bin(bin);
     let m = p.latest(&ctx, &[Spec::new("Git.Git")]).unwrap();
     assert_eq!(m["Git.Git"].version, "2.48.0");
     assert!(rec.lines()[0].contains("--exact"), "{:?}", rec.lines());
@@ -195,8 +201,13 @@ fn latest_reads_winget_show_one_package_at_a_time() {
 #[test]
 fn availability_is_unsupported_without_winget() {
     let tmp = tempfile::tempdir().unwrap();
+    // `LOCALAPPDATA` points into the empty sandbox, so the machine's own winget is not found.
     let ctx = Ctx {
         home: tmp.path().into(),
+        env: BTreeMap::from([(
+            "LOCALAPPDATA".to_string(),
+            tmp.path().to_string_lossy().into_owned(),
+        )]),
         ..Ctx::default()
     };
     let facts = dots_facts::Facts::default();

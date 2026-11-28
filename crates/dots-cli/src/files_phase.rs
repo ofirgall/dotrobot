@@ -374,6 +374,9 @@ impl RepoFiles<'_> {
             .ok()
             .and_then(|s| Shell::detect(&s))
             .or_else(|| Shell::detect(&self.rc.m.facts.shell))
+            // A Windows session reached through cmd.exe (or any shell dots has no env file
+            // for) still has PowerShell as the shell people use.
+            .or_else(|| (self.rc.m.facts.os == "windows").then_some(Shell::PowerShell))
     }
 
     fn env_ctx(&self, home: &Path) -> EnvCtx {

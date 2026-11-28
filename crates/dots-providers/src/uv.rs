@@ -61,7 +61,7 @@ fn remove_dir_argv(dir: &str) -> Vec<String> {
 }
 
 fn default_venv_root(home: &Path) -> PathBuf {
-    home.join(".local/share/dots/venvs")
+    crate::cargo::native(&home.join(".local/share/dots/venvs"))
 }
 
 fn revs_file(ctx: &Ctx) -> PathBuf {

@@ -41,16 +41,22 @@ pub(crate) const SYSTEM_PATH: &str = r"C:\Windows\System32;C:\Windows";
 pub(crate) fn first_file(candidates: impl IntoIterator<Item = PathBuf>) -> Option<PathBuf> {
     candidates.into_iter().find_map(|p| {
         if p.is_file() {
-            return Some(p);
+            return Some(native(&p));
         }
         if cfg!(windows) {
             let mut exe = p.into_os_string();
             exe.push(".exe");
             let exe = PathBuf::from(exe);
-            return exe.is_file().then_some(exe);
+            return exe.is_file().then(|| native(&exe));
         }
         None
     })
+}
+
+/// `p` with the platform's separators throughout: a path built by joining `"bin/cargo"` onto
+/// a Windows home mixes `\` and `/`, which works but reads badly in plans and logs.
+pub(crate) fn native(p: &Path) -> PathBuf {
+    p.components().collect()
 }
 
 /// A Windows program directory (`ProgramFiles`, `LOCALAPPDATA`, ...) joined with `sub`:

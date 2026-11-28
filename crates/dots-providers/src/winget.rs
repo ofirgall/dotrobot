@@ -49,15 +49,19 @@ fn resolve_bin(ctx_home: &Path, env: &BTreeMap<String, String>) -> Option<PathBu
         c.push(Path::new(l).join("Microsoft/WindowsApps/winget.exe"));
     }
     c.push(ctx_home.join("AppData/Local/Microsoft/WindowsApps/winget.exe"));
+    // Without a `LOCALAPPDATA` in the context, the machine's own.
     #[cfg(windows)]
-    c.extend(crate::cargo::windows_dirs(
-        &["LOCALAPPDATA"],
-        r"Microsoft\WindowsApps\winget.exe",
-    ));
+    if !env.contains_key("LOCALAPPDATA") {
+        c.extend(crate::cargo::windows_dirs(
+            &["LOCALAPPDATA"],
+            r"Microsoft\WindowsApps\winget.exe",
+        ));
+    }
     // An app execution alias is a reparse point `metadata` cannot follow: its existence is
     // enough.
     c.into_iter()
         .find(|p| p.is_file() || std::fs::symlink_metadata(p).is_ok())
+        .map(|p| crate::cargo::native(&p))
 }
 
 #[derive(Debug, Clone)]
