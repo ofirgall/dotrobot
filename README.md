@@ -4,12 +4,12 @@
 
 **Add someone else's bundle to your dotfiles: their tools and configs on your machine, your tweaks on top, their improvements whenever you `dots pull`.**
 
-<sub>repo: <code>dotrobot</code> · CLI: <code>dots</code> · single Rust binary · macOS & Linux first · MIT</sub>
+<sub>repo: <code>dotrobot</code> · CLI: <code>dots</code> · single Rust binary · macOS, Linux & Windows · MIT</sub>
 
 </div>
 
 > [!IMPORTANT]
-> **Spec-first: nothing to install yet.** This README is the v1 spec, and the console blocks show specified output. The full design is in [ARCHITECTURE.md](ARCHITECTURE.md) and [UX.md](UX.md), and progress is in the [roadmap](#roadmap).
+> **Early: v0.2.** `dots` runs [my dotfiles](https://github.com/ofirgall/dotfiles) on macOS, Linux and Windows: packages, configs, settings, services, the lock file and manual steps. Sharing is not built yet: `dots add`, `dots search` and `dots pull` are v0.3, and the blocks that show them are the spec. Everything else on this page is tested against the real binary. Install with `cargo install --git https://github.com/ofirgall/dotrobot dots-cli`. The full design is in [ARCHITECTURE.md](ARCHITECTURE.md) and [UX.md](UX.md).
 
 ## Why
 
@@ -20,7 +20,7 @@ Dotfiles tools today make you choose:
 
 And sharing a setup still means copy-paste: once you take someone's config, their updates never reach you again. Submodules and chezmoi externals can track another repo, but only as whole files. Change one line and you've forked it for good.
 
-`dots` installs software with the package managers you already have (brew, apt, cargo, uv, npm), links and generates your configs, and lets you **add** another person's bundle: you follow their setup at a pinned commit, override anything, and pull their updates when you choose.
+`dots` installs software with the package managers you already have (brew, apt, cargo, uv, winget), links and generates your configs, and lets you **add** another person's bundle: you follow their setup at a pinned commit, override anything, and pull their updates when you choose.
 
 ```text
 work-macbook (machine)
@@ -204,16 +204,16 @@ dots apply
 
 **Can a repo I add from run code on my machine?** Only with your consent. Its commit is pinned, so nothing changes until you run `dots pull`. That update shows script diffs first. Set `scripts = "deny"` on an upstream to take only its declarative packages (brew/apt/cargo installs, configs) and none of its scripts. Scripts are not sandboxed: when you allow them, they run as you.
 
-**Coming from dotbot?** `dots import dotbot install.conf.yaml` converts your links, and turns shell steps into script packages that are flagged until they have checks.
+**Coming from dotbot?** `dots import dotbot install.conf.yaml` (planned) converts your links, and turns shell steps into script packages that are flagged until they have checks.
 </details>
 
 ## Roadmap
 
 - [x] Architecture, terminal UX, agent skill
 - [x] **v0.1**: packages, bundles, brew/apt/cargo/uv, links and generated configs, `status`/`plan`/`apply`
-- [ ] **v0.2**: overrides, settings, platform rules, lock file
-- [ ] **v0.3**: `add`/`pull`, manual steps, worktree trials
-- [ ] Later: Windows (winget, scoop), browser extensions, dotbot importer
+- [x] **v0.2**: overrides, settings, platform rules, lock file, manual steps (`dots todo`), services, Windows (winget, scripts)
+- [ ] **v0.3**: `add`/`search`/`pull`, worktree trials (`dots try`)
+- [ ] Later: scoop, browser extensions, dotbot importer (`dots import`)
 
 Watch the repo to follow along, or open an issue to challenge the design while it's still cheap to change.
 
@@ -221,17 +221,17 @@ Watch the repo to follow along, or open an issue to challenge the design while i
 
 |  | [stow] | [dotbot] | [yadm] | [chezmoi] | [home-manager] | **dots** |
 |---|:-:|:-:|:-:|:-:|:-:|:-:|
-| Available today | ✅ | ✅ | ✅ | ✅ | ✅ | spec only |
+| Available today | ✅ | ✅ | ✅ | ✅ | ✅ | v0.2, early |
 | Links or manages config files | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Per-OS / per-host config | — | conditional links | alt files, templates | templates | Nix | layers, `dots:if`, platform rules |
-| Installs software | — | shell steps | bootstrap script | `run_` scripts | Nix packages | brew, apt, cargo, uv, npm… |
+| Installs software | — | shell steps | bootstrap script | `run_` scripts | Nix packages | brew, apt, cargo, uv, winget… |
 | Shows installed / outdated packages | — | — | — | — | — | ✅ |
 | Version lock | — | — | — | — | flake.lock | `dots.lock` |
-| Reuse someone's setup and keep their updates | — | — | — | externals (whole files) | import modules | `dots add` + overrides |
+| Reuse someone's setup and keep their updates | — | — | — | externals (whole files) | import modules | `dots add` + overrides (v0.3) |
 | Tracked manual steps | — | — | — | — | — | ✅ |
 | Preview what would be overwritten | `--simulate` | — | — | `diff` | `build` + diff | `--dry-run`, incl. non-managed files |
 | Secrets | — | — | encryption | password managers | third-party | not in scope |
-| Windows | — | ✅ | — | ✅ | — | planned |
+| Windows | — | ✅ | — | ✅ | — | ✅ |
 | Needs | Perl | Python | bash, git | single binary | Nix | single binary |
 
 [stow]: https://www.gnu.org/software/stow/
