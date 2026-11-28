@@ -18,7 +18,7 @@ struct Sandbox {
 
 fn write(p: &Path, text: &str) {
     std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-    std::fs::write(p, text).unwrap();
+    std::fs::write(p, dots_testkit::bash_on_windows(text)).unwrap();
 }
 
 /// `pkgs`: (name, install command). Each is a script package that checks for
@@ -57,7 +57,8 @@ fn sandbox(pkgs: &[(&str, &str)]) -> Sandbox {
 fn cmd(b: &Sandbox, args: &[&str]) -> Command {
     let mut c = Command::new(env!("CARGO_BIN_EXE_dots"));
     c.env_clear()
-        .env("PATH", "/usr/bin:/bin")
+        .envs(dots_testkit::system_env())
+        .env("PATH", dots_testkit::system_path())
         .env("DOTS_PROVIDERS", "script")
         .env("HOME", b.tmp.path().join("sentinel"))
         .current_dir(b.tmp.path())

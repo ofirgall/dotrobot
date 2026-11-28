@@ -12,7 +12,7 @@ struct Sb {
 
 fn write(p: &Path, text: &str) {
     std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-    std::fs::write(p, text).unwrap();
+    std::fs::write(p, dots_testkit::bash_on_windows(text)).unwrap();
 }
 
 fn sandbox() -> Sb {
@@ -66,7 +66,8 @@ default = "unused"
 fn run(b: &Sb, args: &[&str]) -> (i32, String) {
     let o = Command::new(env!("CARGO_BIN_EXE_dots"))
         .env_clear()
-        .env("PATH", "/usr/bin:/bin")
+        .envs(dots_testkit::system_env())
+        .env("PATH", dots_testkit::system_path())
         .env("DOTS_PROVIDERS", "script")
         .env("HOME", b.tmp.path().join("sentinel"))
         .current_dir(b.tmp.path())

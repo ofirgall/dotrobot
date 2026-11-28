@@ -1,5 +1,6 @@
 //! Regressions for bugs found migrating a real dotfiles repo: package hooks run, provider
 //! shims are created and checked, a directory without `package.toml` is a lint warning.
+#![cfg_attr(not(unix), allow(dead_code, unused_imports))] // helpers of unix-only tests
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -12,7 +13,7 @@ struct Sb {
 
 fn write(p: &Path, text: &str) {
     std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-    std::fs::write(p, text).unwrap();
+    std::fs::write(p, dots_testkit::bash_on_windows(text)).unwrap();
 }
 
 fn sandbox(pkgs: &[(&str, &str)]) -> Sb {
@@ -46,9 +47,10 @@ fn sandbox(pkgs: &[(&str, &str)]) -> Sb {
 }
 
 fn run(b: &Sb, args: &[&str]) -> (i32, String) {
-    let path = format!("{}/pathbin:/usr/bin:/bin", b.home.display());
+    let path = dots_testkit::path_with(b.home.join("pathbin"));
     let o = Command::new(env!("CARGO_BIN_EXE_dots"))
         .env_clear()
+        .envs(dots_testkit::system_env())
         .env("PATH", path)
         .env("DOTS_PROVIDERS", "script")
         .env("HOME", b.tmp.path().join("sentinel"))
@@ -80,6 +82,7 @@ post_files = "echo \"$DOTS_PKG $DOTS_HOOK $HOME\" > $HOME/hook.out"
 "#;
 
 #[test]
+#[cfg(unix)]
 fn a_post_files_hook_runs_with_the_script_environment_and_a_dry_run_does_not() {
     let b = sandbox(&[("x", HOOKED)]);
     let out = b.home.join("hook.out");
@@ -120,6 +123,7 @@ install = "mkdir -p $HOME/pathbin; printf '#!/bin/sh\\n' > $HOME/pathbin/fdfind;
 "#;
 
 #[test]
+#[cfg(unix)]
 fn a_provider_shim_is_created_and_status_notices_when_it_goes_missing() {
     let b = sandbox(&[("fd", SHIMMED)]);
     let link = b.home.join(".local/bin/fd");
@@ -173,9 +177,10 @@ fn sandbox_with(extra: &str, pkgs: &[(&str, &str)]) -> Sb {
 }
 
 fn run_with(b: &Sb, providers: &str, args: &[&str]) -> (i32, String) {
-    let path = format!("{}/pathbin:/usr/bin:/bin", b.home.display());
+    let path = dots_testkit::path_with(b.home.join("pathbin"));
     let o = Command::new(env!("CARGO_BIN_EXE_dots"))
         .env_clear()
+        .envs(dots_testkit::system_env())
         .env("PATH", path)
         .env("DOTS_PROVIDERS", providers)
         .env("HOME", b.tmp.path().join("sentinel"))
@@ -202,6 +207,7 @@ fn run_with(b: &Sb, providers: &str, args: &[&str]) -> (i32, String) {
 /// another package of the same run is "will be available": it is planned after that package
 /// (via `bootstrap`), not rejected with `no-provider-satisfies`, and apply installs both.
 #[test]
+#[cfg(unix)]
 fn a_declarative_provider_whose_tool_comes_from_a_package_in_the_run_is_planned_after_it() {
     let list = "@TMP@/mytool.list";
     let b = sandbox_with(
@@ -269,6 +275,7 @@ fn script_commands_see_the_env_path_directories_of_active_packages() {
     std::fs::create_dir_all(&bin).unwrap();
     let exe = bin.join("mytool");
     std::fs::write(&exe, "#!/bin/sh\necho 3.2.1\n").unwrap();
+    #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();

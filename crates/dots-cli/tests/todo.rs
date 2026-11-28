@@ -3,6 +3,7 @@
 //! `plan` and `apply` summaries, `lint`, and the `post_install` hook of an adopted package.
 //!
 //! A script package is "installed" while `$HOME/<name>.ver` exists.
+#![cfg_attr(not(unix), allow(dead_code, unused_imports))] // helpers of unix-only tests
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -18,7 +19,7 @@ struct Sb {
 
 fn write(p: &Path, text: &str) {
     std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-    std::fs::write(p, text).unwrap();
+    std::fs::write(p, dots_testkit::bash_on_windows(text)).unwrap();
 }
 
 /// A package `k` (script provider, installed once `$HOME/k.ver` exists) with `extra` keys.
@@ -62,7 +63,8 @@ struct Out {
 fn run(b: &Sb, args: &[&str]) -> Out {
     let o = Command::new(env!("CARGO_BIN_EXE_dots"))
         .env_clear()
-        .env("PATH", "/usr/bin:/bin")
+        .envs(dots_testkit::system_env())
+        .env("PATH", dots_testkit::system_path())
         .env("DOTS_PROVIDERS", "script")
         .env("HOME", b.tmp.path().join("sentinel"))
         .current_dir(b.tmp.path())
@@ -172,6 +174,7 @@ fn skip_hides_it_until_the_revision_increases() {
 }
 
 #[test]
+#[cfg(unix)]
 fn a_check_closes_the_action_as_auto() {
     let b = sandbox("");
     install_k(&b);
@@ -190,6 +193,7 @@ fn a_check_closes_the_action_as_auto() {
 }
 
 #[test]
+#[cfg(unix)]
 fn an_always_action_opens_again_when_its_check_stops_passing() {
     let b = sandbox("");
     install_k(&b);
@@ -246,6 +250,7 @@ fn status_and_plan_report_pending_manual_actions() {
 }
 
 #[test]
+#[cfg(unix)]
 fn apply_runs_the_checks_and_ends_with_the_summary() {
     let b = sandbox("");
     manual(
@@ -318,6 +323,7 @@ fn hook_runs(b: &Sb) -> usize {
 }
 
 #[test]
+#[cfg(unix)]
 fn an_adopted_package_runs_its_post_install_hook_once() {
     let b = sandbox(HOOK);
     // Already installed outside dots: adopted, no install step.

@@ -20,7 +20,7 @@ struct Sb {
 
 fn write(p: &Path, text: &str) {
     std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-    std::fs::write(p, text).unwrap();
+    std::fs::write(p, dots_testkit::bash_on_windows(text)).unwrap();
 }
 
 #[cfg(unix)]
@@ -152,7 +152,8 @@ struct Out {
 fn run(b: &Sb, args: &[&str]) -> Out {
     let o = Command::new(env!("CARGO_BIN_EXE_dots"))
         .env_clear()
-        .env("PATH", "/usr/bin:/bin")
+        .envs(dots_testkit::system_env())
+        .env("PATH", dots_testkit::system_path())
         .env("SHELL", "/bin/zsh")
         .env("DOTS_PROVIDERS", "script")
         .env("DOTS_SYSTEM_TOOLS", &b.tools)
@@ -789,7 +790,8 @@ fn real_uid() -> String {
 fn run_with_home(b: &Sb, home: &Path, args: &[&str]) -> Out {
     let o = Command::new(env!("CARGO_BIN_EXE_dots"))
         .env_clear()
-        .env("PATH", "/usr/bin:/bin")
+        .envs(dots_testkit::system_env())
+        .env("PATH", dots_testkit::system_path())
         .env("SHELL", "/bin/zsh")
         .env("DOTS_PROVIDERS", "script")
         .env("DOTS_SYSTEM_TOOLS", &b.tools)

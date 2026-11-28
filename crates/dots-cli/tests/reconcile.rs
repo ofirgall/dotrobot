@@ -21,7 +21,7 @@ impl Box_ {
 
 fn write(p: &Path, text: &str) {
     std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-    std::fs::write(p, text).unwrap();
+    std::fs::write(p, dots_testkit::bash_on_windows(text)).unwrap();
 }
 
 /// `pkgs`: (name, extra package.toml keys, install command, requires).
@@ -63,7 +63,8 @@ fn touch(name: &str) -> String {
 fn cmd(b: &Box_, args: &[&str]) -> Command {
     let mut c = Command::new(env!("CARGO_BIN_EXE_dots"));
     c.env_clear()
-        .env("PATH", "/usr/bin:/bin")
+        .envs(dots_testkit::system_env())
+        .env("PATH", dots_testkit::system_path())
         .env("DOTS_PROVIDERS", "script")
         .env("HOME", b.tmp.path().join("sentinel"))
         .current_dir(b.tmp.path())
@@ -293,6 +294,7 @@ fn a_second_concurrent_apply_exits_75_with_lock_busy() {
 }
 
 #[test]
+#[cfg(unix)]
 fn sigint_stops_after_the_current_action_and_exits_130() {
     let b = sandbox(&[
         (

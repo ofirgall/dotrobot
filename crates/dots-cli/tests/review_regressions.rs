@@ -12,7 +12,7 @@ struct Sb {
 
 fn write(p: &Path, text: &str) {
     std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-    std::fs::write(p, text).unwrap();
+    std::fs::write(p, dots_testkit::bash_on_windows(text)).unwrap();
 }
 
 fn sandbox(packages: &[(&str, &str)], machine_extra: &str) -> Sb {
@@ -45,7 +45,8 @@ fn sandbox(packages: &[(&str, &str)], machine_extra: &str) -> Sb {
 fn run(b: &Sb, args: &[&str]) -> (i32, String) {
     let o = Command::new(env!("CARGO_BIN_EXE_dots"))
         .env_clear()
-        .env("PATH", "/usr/bin:/bin")
+        .envs(dots_testkit::system_env())
+        .env("PATH", dots_testkit::system_path())
         .env("SHELL", "/bin/zsh")
         .env("DOTS_PROVIDERS", "script")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
@@ -219,9 +220,17 @@ dst = "{home}/.config/odd.conf"
 "#;
     let b = sandbox(&[("nvim", pkg)], "");
     let root = b.tmp.path().join("repo/packages/nvim/files");
+    // The directive must hold on the machine running the test.
+    let host = if cfg!(windows) {
+        "windows"
+    } else if cfg!(target_os = "macos") {
+        "macos"
+    } else {
+        "linux"
+    };
     write(
         &root.join("init.lua"),
-        "-- dots:if os = \"macos\"\nx = 1\n-- dots:end\n",
+        &format!("-- dots:if os = \"{host}\"\nx = 1\n-- dots:end\n"),
     );
     write(
         &root.join("odd.conf"),

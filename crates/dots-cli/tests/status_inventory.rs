@@ -1,6 +1,7 @@
 //! Task 4.8: every `status-inventory` scenario through the real binary in a `--home` sandbox
 //! with script packages (no package manager is touched), plus plain and JSON goldens and the
 //! 100-package benchmark.
+#![cfg_attr(not(unix), allow(dead_code, unused_imports))] // helpers of unix-only tests
 
 mod common;
 
@@ -31,7 +32,7 @@ impl Sb {
 
 fn write(p: &Path, text: &str) {
     std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-    std::fs::write(p, text).unwrap();
+    std::fs::write(p, dots_testkit::bash_on_windows(text)).unwrap();
 }
 
 fn exe(p: &Path) {
@@ -99,6 +100,7 @@ struct Out {
 fn cmd(b: &Sb, path: &str, args: &[&str]) -> Command {
     let mut c = Command::new(env!("CARGO_BIN_EXE_dots"));
     c.env_clear()
+        .envs(dots_testkit::system_env())
         .env("PATH", path)
         .env("SHELL", "/bin/zsh")
         .env("DOTS_PROVIDERS", "script")
@@ -122,7 +124,7 @@ fn run_path(b: &Sb, path: &str, args: &[&str]) -> Out {
 }
 
 fn run(b: &Sb, args: &[&str]) -> Out {
-    run_path(b, "/usr/bin:/bin", args)
+    run_path(b, &dots_testkit::system_path(), args)
 }
 
 fn json(o: &Out) -> Value {
@@ -288,6 +290,7 @@ fn bare_dots_groups_attention_by_kind_and_exits_like_status() {
 }
 
 #[test]
+#[cfg(unix)]
 fn all_includes_inert_and_excluded_rows() {
     let pkgs = vec![
         script("a", "1.0.0", ""),
@@ -659,6 +662,7 @@ fn bins_sandbox() -> (Sb, String) {
 }
 
 #[test]
+#[cfg(unix)]
 fn an_unowned_executable_is_an_unknown_owner() {
     let (b, path) = bins_sandbox();
     let o = run_path(&b, &path, &["bins", "--unknown"]);
@@ -684,6 +688,7 @@ fn an_unowned_executable_is_an_unknown_owner() {
 }
 
 #[test]
+#[cfg(unix)]
 fn managed_binaries_name_their_package_and_provider() {
     let (b, path) = bins_sandbox();
     let d = json(&run_path(&b, &path, &["bins", "--managed", "--json"]));
@@ -713,6 +718,7 @@ fn managed_binaries_name_their_package_and_provider() {
 /// provider put it there; a binary the package does not declare, or one outside its dirs, stays
 /// unowned.
 #[test]
+#[cfg(unix)]
 fn a_binary_in_a_packages_env_path_dir_is_owned_by_that_package() {
     let b = sandbox(
         &[script(
@@ -750,6 +756,7 @@ fn a_binary_in_a_packages_env_path_dir_is_owned_by_that_package() {
 }
 
 #[test]
+#[cfg(unix)]
 fn which_lists_every_copy_in_path_order_and_marks_the_winner() {
     let (b, _) = bins_sandbox();
     let late = b.home.join("late");
@@ -831,7 +838,7 @@ fn doctor_reports_an_unsourced_env_file_and_passes_after_apply() {
 
     // apply writes the env file and the rc inject; a shell that sourced it has the dir on PATH
     assert_eq!(run(&b, &["apply", "--yes"]).code, 0);
-    let path = format!("{}:/usr/bin:/bin", b.local_bin().display());
+    let path = dots_testkit::path_with(b.local_bin());
     let o = run_path(&b, &path, &["doctor"]);
     assert_eq!(o.code, 0, "{}{}", o.stdout, o.stderr);
     assert!(o.stdout.contains("All good"), "{}", o.stdout);
@@ -858,6 +865,7 @@ fn doctor_reports_dangling_links_as_errors() {
 }
 
 #[test]
+#[cfg(unix)]
 fn doctor_explains_path_order_shadowing() {
     let (b, _) = bins_sandbox();
     let early = b.home.join("early");
@@ -940,6 +948,7 @@ fn goldens_for_status_in_plain_and_json() {
 }
 
 #[test]
+#[cfg(unix)]
 fn goldens_for_bins_which_and_doctor() {
     let g = common::golden();
     let (b, path) = bins_sandbox();

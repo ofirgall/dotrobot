@@ -30,6 +30,7 @@ fn home_flag_writes_nothing_outside_it() {
     for inv in stub_invocations() {
         let status = std::process::Command::new(bin)
             .env_clear()
+            .envs(dots_testkit::system_env())
             .env("HOME", &real_home)
             // Env redirection must lose against the explicit flag.
             .env("DOTS_STATE_DIR", tmp.path().join("env-state"))

@@ -302,9 +302,8 @@ fn shadowed_by_others(ctx: &dots_providers::Ctx, bins: &[PathBuf]) -> Vec<String
         .env
         .get("PATH")
         .map(|p| {
-            p.split(':')
-                .filter(|s| !s.is_empty())
-                .map(PathBuf::from)
+            std::env::split_paths(p)
+                .filter(|d| !d.as_os_str().is_empty())
                 .collect()
         })
         .unwrap_or_default();

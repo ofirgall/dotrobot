@@ -28,7 +28,7 @@ fn write(root: &Path, rel: &str, text: &str) {
 impl Box {
     fn new() -> Box {
         let tmp = tempfile::tempdir().unwrap();
-        let base = tmp.path().canonicalize().unwrap();
+        let base = dots_testkit::canonical(tmp.path());
         let repo = base.join("repo");
         let home = base.join("home");
         fs::create_dir_all(&home).unwrap();
@@ -72,7 +72,8 @@ impl Box {
     fn run(&self, args: &[&str]) -> Out {
         let out = Command::new(env!("CARGO_BIN_EXE_dots"))
             .env_clear()
-            .env("PATH", "/usr/bin:/bin")
+            .envs(dots_testkit::system_env())
+            .env("PATH", dots_testkit::system_path())
             .env("DOTS_PROVIDERS", "none")
             .env("HOME", self.tmp.join("sentinel"))
             .current_dir(&self.tmp)

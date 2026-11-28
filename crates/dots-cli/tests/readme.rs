@@ -69,7 +69,7 @@ fn readme_blocks() -> Vec<Block> {
 
 fn write(p: &Path, text: &str) {
     std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-    std::fs::write(p, text).unwrap();
+    std::fs::write(p, dots_testkit::bash_on_windows(text)).unwrap();
 }
 
 fn git(dir: &Path, args: &[&str]) {
@@ -102,7 +102,8 @@ impl Fx {
     fn run(&self, args: &[&str]) -> (i32, String, String) {
         let o = Command::new(env!("CARGO_BIN_EXE_dots"))
             .env_clear()
-            .env("PATH", "/usr/bin:/bin")
+            .envs(dots_testkit::system_env())
+            .env("PATH", dots_testkit::system_path())
             .env("SHELL", "/bin/zsh")
             .env("COLUMNS", "120")
             .env("DOTS_PROVIDERS", "script")

@@ -7,7 +7,7 @@ use serde_json::Value;
 
 fn write(p: &Path, text: &str) {
     std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-    std::fs::write(p, text).unwrap();
+    std::fs::write(p, dots_testkit::bash_on_windows(text)).unwrap();
 }
 
 #[test]
@@ -43,7 +43,8 @@ fn questions_include_settings_of_required_packages() {
     );
     let o = Command::new(env!("CARGO_BIN_EXE_dots"))
         .env_clear()
-        .env("PATH", "/usr/bin:/bin")
+        .envs(dots_testkit::system_env())
+        .env("PATH", dots_testkit::system_path())
         .env("DOTS_PROVIDERS", "none")
         .env("HOME", tmp.path().join("sentinel"))
         .current_dir(tmp.path())

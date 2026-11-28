@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 fn write(p: &Path, text: &str) {
     std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-    std::fs::write(p, text).unwrap();
+    std::fs::write(p, dots_testkit::bash_on_windows(text)).unwrap();
 }
 
 /// A repo with `hung` (given check and version) and `fine`, planned with a 1 second query
@@ -43,7 +43,8 @@ fn plan(hung_check: &str, hung_version: &str, args: &[&str]) -> (i32, String, Du
     let start = Instant::now();
     let o = Command::new(env!("CARGO_BIN_EXE_dots"))
         .env_clear()
-        .env("PATH", "/usr/bin:/bin")
+        .envs(dots_testkit::system_env())
+        .env("PATH", dots_testkit::system_path())
         .env("DOTS_PROVIDERS", "script")
         .env("DOTS_QUERY_TIMEOUT", "1s")
         .env("HOME", tmp.path().join("sentinel"))

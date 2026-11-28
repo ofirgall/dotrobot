@@ -134,7 +134,7 @@ pub fn run(ctx: &Context, a: &Args) -> Report {
     };
     let rel = |p: &Path| match (p.strip_prefix(&l.rc.m.root), p.strip_prefix(&dirs.home)) {
         (Ok(r), _) => r.display().to_string(),
-        (_, Ok(r)) => format!("~/{}", r.display()),
+        (_, Ok(r)) => format!("~/{}", dots_core::paths::slashed(r)),
         _ => p.display().to_string(),
     };
     let mut r = Report::ok(

@@ -220,7 +220,7 @@ fn candidates(p: &Prepared, names: &[String]) -> Vec<OfferCandidate> {
             .installed
             .get(&choice.id)
             .and_then(|m| m.get(&choice.native_name));
-        if !installed.is_some_and(|i| !i.pinned) {
+        if installed.is_none_or(|i| i.pinned) {
             continue;
         }
         let pkg = p.rc.repo.packages.get(name);

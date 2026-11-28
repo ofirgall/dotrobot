@@ -33,7 +33,8 @@ fn run(repo: &str, machine_extra: &str, args: &[&str]) -> Out {
     .unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_dots"))
         .env_clear()
-        .env("PATH", "/usr/bin:/bin")
+        .envs(dots_testkit::system_env())
+        .env("PATH", dots_testkit::system_path())
         .env("DOTS_PROVIDERS", "none")
         .env("HOME", tmp.path().join("sentinel"))
         .current_dir(tmp.path())

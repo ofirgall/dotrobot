@@ -277,9 +277,10 @@ impl Loaded {
         let live = self.pctx.env.get("PATH").cloned().unwrap_or_default();
         let mut out: Vec<PathBuf> = Vec::new();
         let env = self.env_path_entries(dirs);
-        let live: Vec<&str> = live.split(':').filter(|s| !s.is_empty()).collect();
-        for d in env.iter().map(String::as_str).chain(live) {
-            let p = PathBuf::from(d);
+        let live: Vec<PathBuf> = std::env::split_paths(&live)
+            .filter(|d| !d.as_os_str().is_empty())
+            .collect();
+        for p in env.iter().map(PathBuf::from).chain(live) {
             if !out.contains(&p) {
                 out.push(p);
             }
@@ -315,7 +316,7 @@ pub struct LatestRequest {
 pub fn tilde(p: &Path, home: &Path) -> String {
     match p.strip_prefix(home) {
         Ok(rest) if rest.as_os_str().is_empty() => "~".into(),
-        Ok(rest) => format!("~/{}", rest.display()),
+        Ok(rest) => format!("~/{}", dots_core::paths::slashed(rest)),
         Err(_) => p.display().to_string(),
     }
 }
@@ -426,6 +427,7 @@ pub fn cached_latest<'a>(
 
 /// Fixtures for in-process tests: a repo in a temp dir, a registry of fake providers and a
 /// `Loaded` assembled from them, with no process spawning beyond `git`.
+#[cfg_attr(not(unix), allow(dead_code, unused_imports))] // helpers of unix-only tests
 #[cfg(test)]
 pub mod testing {
     use std::collections::BTreeMap;

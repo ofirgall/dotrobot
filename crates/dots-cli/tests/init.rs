@@ -1,4 +1,5 @@
 //! Task 4.11: `dots init` end to end in a `--home` sandbox (no writes outside it, no network).
+#![cfg_attr(not(unix), allow(dead_code, unused_imports))] // helpers of unix-only tests
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -27,26 +28,34 @@ impl Out {
 
 fn write(path: &Path, text: &str) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(path, text).unwrap();
+    std::fs::write(path, dots_testkit::bash_on_windows(text)).unwrap();
 }
 
 impl Sandbox {
     fn new(hostname: &str) -> Sandbox {
         let tmp = tempfile::tempdir().unwrap();
-        let base = tmp.path().canonicalize().unwrap();
+        let base = dots_testkit::canonical(tmp.path());
         let home = base.join("home");
         std::fs::create_dir_all(&home).unwrap();
-        // A fake `hostname` first on PATH pins the detected host.
+        // A fake `hostname` first on PATH pins the detected host. Windows cannot fake a
+        // command that way (`hostname.exe` is found, a script is not), so tests that depend on
+        // the host name are unix-only and the others run under the real name.
+        #[cfg(unix)]
         let bin = base.join("bin");
-        write(
-            &bin.join("hostname"),
-            &format!("#!/bin/sh\necho {hostname}\n"),
-        );
-        Command::new("chmod")
-            .arg("+x")
-            .arg(bin.join("hostname"))
-            .status()
-            .unwrap();
+        #[cfg(unix)]
+        {
+            write(
+                &bin.join("hostname"),
+                &format!("#!/bin/sh\necho {hostname}\n"),
+            );
+            Command::new("chmod")
+                .arg("+x")
+                .arg(bin.join("hostname"))
+                .status()
+                .unwrap();
+        }
+        #[cfg(windows)]
+        let _ = hostname;
         Sandbox {
             machine: base.join("config/machine.toml"),
             _tmp: tmp,
@@ -58,10 +67,8 @@ impl Sandbox {
     fn run(&self, args: &[&str]) -> Out {
         let out = Command::new(env!("CARGO_BIN_EXE_dots"))
             .env_clear()
-            .env(
-                "PATH",
-                format!("{}:/usr/bin:/bin", self.base.join("bin").display()),
-            )
+            .envs(dots_testkit::system_env())
+            .env("PATH", dots_testkit::path_with(self.base.join("bin")))
             .env("DOTS_PROVIDERS", "none")
             .env("HOME", self.base.join("sentinel"))
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
@@ -248,6 +255,7 @@ fn refuses_to_overwrite_machine_toml() {
 }
 
 #[test]
+#[cfg(unix)]
 fn from_clones_and_picks_the_matching_profile() {
     let sb = Sandbox::new("work-mbp");
     let remote = bare_remote(&sb);

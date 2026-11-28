@@ -632,7 +632,7 @@ fn key(k: &str) -> String {
 
 fn tilde(p: &Path, home: &Path) -> String {
     match p.strip_prefix(home) {
-        Ok(rest) => format!("~/{}", rest.display()),
+        Ok(rest) => format!("~/{}", dots_core::paths::slashed(rest)),
         Err(_) => p.display().to_string(),
     }
 }

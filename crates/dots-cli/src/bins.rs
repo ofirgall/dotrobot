@@ -19,33 +19,16 @@ use serde_json::{Value, json};
 use crate::app::Context;
 use crate::inspect::{Loaded, load, par_map, tilde};
 
-pub fn is_executable(p: &Path) -> bool {
-    let Ok(m) = std::fs::metadata(p) else {
-        return false;
-    };
-    if !m.is_file() {
-        return false;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        m.permissions().mode() & 0o111 != 0
-    }
-    #[cfg(not(unix))]
-    {
-        true
-    }
-}
+pub use dots_core::exe::is_executable;
 
 /// Copies of `name` on `path`, in PATH order, one per distinct real file.
 pub fn find_copies(path: &[PathBuf], name: &str) -> Vec<PathBuf> {
     let mut seen: BTreeSet<PathBuf> = BTreeSet::new();
     let mut out = Vec::new();
     for dir in path {
-        let p = dir.join(name);
-        if !is_executable(&p) {
+        let Some(p) = dots_core::exe::find_in(dir, name) else {
             continue;
-        }
+        };
         let real = std::fs::canonicalize(&p).unwrap_or_else(|_| p.clone());
         if seen.insert(real) {
             out.push(p);
@@ -104,8 +87,7 @@ fn walk_path(dirs: &[PathBuf], only: Option<&str>) -> Vec<(String, PathBuf)> {
     let mut out = Vec::new();
     for dir in dirs {
         if let Some(name) = only {
-            let p = dir.join(name);
-            if is_executable(&p) {
+            if let Some(p) = dots_core::exe::find_in(dir, name) {
                 out.push((name.to_string(), p));
             }
             continue;
@@ -656,6 +638,7 @@ pub fn which_report(l: &Loaded, dirs: &Dirs, bin: &str) -> Report {
     report
 }
 
+#[cfg_attr(not(unix), allow(dead_code, unused_imports))] // helpers of unix-only tests
 #[cfg(test)]
 mod tests {
     use dots_providers::Registry;
@@ -704,6 +687,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn which_marks_the_winner_and_suggests_migrate_on_the_other_copy() {
         let (fx, l) = duplicate();
         let r = which_report(&l, &fx.dirs, "bat");
@@ -757,6 +741,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn the_hint_for_a_copy_of_another_provider_names_what_to_remove() {
         let (fx, l) = switched();
         let r = which_report(&l, &fx.dirs, "fzf");
@@ -777,6 +762,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn an_old_copy_dots_installed_is_not_called_outside_dots() {
         let (fx, l) = duplicate();
         // dots installed bat with apt; the package has since moved to cargo.
@@ -801,6 +787,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn bins_lists_owner_provider_version_and_filters() {
         let (fx, l) = duplicate();
         let r = bins_report(&l, &fx.dirs, &args());
@@ -851,6 +838,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn a_file_no_provider_owns_is_an_unknown_owner() {
         let fx = Fixture::new(&[("bat", "[providers.cargo]\n")]);
         let local = fx.dirs.home.join(".local/bin");
@@ -888,6 +876,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn a_symlink_to_another_name_is_a_shim() {
         let fx = Fixture::new(&[("fd", "[providers.apt]\n")]);
         let (usr, local) = (

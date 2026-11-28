@@ -116,7 +116,7 @@ fn manifest_parents(manifest: &RepoManifest) -> BTreeMap<String, String> {
 pub fn override_locations(m: &MachineCtx, ctx: &Context) -> Vec<OverrideLocation> {
     let dir = ctx.dirs.config.join("overrides");
     let display = match dir.strip_prefix(&ctx.dirs.home) {
-        Ok(rest) => format!("~/{}", rest.display()),
+        Ok(rest) => format!("~/{}", dots_core::paths::slashed(rest)),
         Err(_) => dir.display().to_string(),
     };
     OverrideLocation::standard(&m.root, m.machine.profile.as_deref(), dir, display)

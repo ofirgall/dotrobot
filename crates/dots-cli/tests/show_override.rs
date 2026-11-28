@@ -1,7 +1,9 @@
 //! Task 5.7: `show --effective`, `override list|edit|diff`, the status customization marker
 //! and the stale/redundant override lint, in a `--home` sandbox.
+#![cfg_attr(not(unix), allow(dead_code, unused_imports))] // helpers of unix-only tests
 
 use std::fs;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -49,7 +51,7 @@ default = 13
 impl Sandbox {
     fn new() -> Sandbox {
         let tmp = tempfile::tempdir().unwrap();
-        let base = tmp.path().canonicalize().unwrap();
+        let base = dots_testkit::canonical(tmp.path());
         let repo = base.join("repo");
         let home = base.join("home");
         fs::create_dir_all(&home).unwrap();
@@ -93,7 +95,8 @@ impl Sandbox {
     fn run_with(&self, editor: Option<&Path>, args: &[&str]) -> Out {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_dots"));
         cmd.env_clear()
-            .env("PATH", "/usr/bin:/bin")
+            .envs(dots_testkit::system_env())
+            .env("PATH", dots_testkit::system_path())
             .env("DOTS_PROVIDERS", "none")
             .env("HOME", self.tmp.join("sentinel"))
             .current_dir(&self.tmp)
@@ -125,6 +128,7 @@ impl Sandbox {
             format!("#!/bin/sh\nprintf '%s\\n' '{text}' >> \"$1\"\n"),
         )
         .unwrap();
+        #[cfg(unix)]
         fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
         p
     }
@@ -230,6 +234,7 @@ fn show_by_address_prints_one_setting_and_plain_show_is_the_definition() {
 }
 
 #[test]
+#[cfg(unix)]
 fn scaffold_creates_the_machine_override_and_opens_the_editor() {
     let s = Sandbox::new();
     let ed = s.editor("# edited");
@@ -281,6 +286,7 @@ fn scaffold_creates_the_machine_override_and_opens_the_editor() {
     assert_eq!(missing.code, 1);
     let fail = s.tmp.join("fail.sh");
     fs::write(&fail, "#!/bin/sh\nexit 3\n").unwrap();
+    #[cfg(unix)]
     fs::set_permissions(&fail, fs::Permissions::from_mode(0o755)).unwrap();
     let f = s.run_with(Some(&fail), &["override", "edit", "pkg:delta", "--json"]);
     assert_eq!(f.json()["errors"][0]["code"], "editor-failed");
@@ -460,6 +466,8 @@ fn redundant_count(o: &Out) -> usize {
 fn plat() -> &'static str {
     if cfg!(target_os = "macos") {
         "macos"
+    } else if cfg!(windows) {
+        "windows"
     } else {
         "linux"
     }
@@ -489,11 +497,13 @@ fn redundant_override_lint_compares_with_the_platform_table_beneath() {
 }
 
 #[test]
+#[cfg(unix)]
 fn override_edit_removes_a_new_scaffold_when_nothing_was_changed_or_the_editor_fails() {
     let s = Sandbox::new();
     let file = s.repo.join("overrides/packages/ghostty/override.toml");
     let noop = s.tmp.join("noop.sh");
     fs::write(&noop, "#!/bin/sh\nexit 0\n").unwrap();
+    #[cfg(unix)]
     fs::set_permissions(&noop, fs::Permissions::from_mode(0o755)).unwrap();
     let o = s.run_with(
         Some(&noop),
@@ -504,6 +514,7 @@ fn override_edit_removes_a_new_scaffold_when_nothing_was_changed_or_the_editor_f
 
     let bad = s.tmp.join("bad.sh");
     fs::write(&bad, "#!/bin/sh\nexit 1\n").unwrap();
+    #[cfg(unix)]
     fs::set_permissions(&bad, fs::Permissions::from_mode(0o755)).unwrap();
     let o = s.run_with(Some(&bad), &["override", "edit", "pkg:ghostty"]);
     assert_ne!(o.code, 0);

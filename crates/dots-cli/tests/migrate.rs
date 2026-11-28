@@ -2,6 +2,7 @@
 //! `--home` sandbox. Two providers are real: `script` (the package's own commands) and `cargo`
 //! (driven by a fake `cargo` shell script that keeps `.crates2.json` like the real one), plus a
 //! fake `brew` for the dependency scenario.
+#![cfg_attr(not(unix), allow(dead_code, unused_imports))] // helpers of unix-only tests
 
 mod common;
 
@@ -19,13 +20,16 @@ struct Sb {
 
 fn write(p: &Path, text: &str) {
     std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-    std::fs::write(p, text).unwrap();
+    std::fs::write(p, dots_testkit::bash_on_windows(text)).unwrap();
 }
 
 fn make_exe(p: &Path, text: &str) {
     write(p, text);
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
 }
 
 /// A cargo that installs and removes one crate by writing what the real one writes. The file
@@ -102,7 +106,8 @@ struct Out {
 fn run_env(b: &Sb, env: &[(&str, &str)], args: &[&str]) -> Out {
     let o = Command::new(env!("CARGO_BIN_EXE_dots"))
         .env_clear()
-        .env("PATH", "/usr/bin:/bin")
+        .envs(dots_testkit::system_env())
+        .env("PATH", dots_testkit::system_path())
         .env("SHELL", "/bin/zsh")
         .env("DOTS_PROVIDERS", "script,cargo,brew")
         // Provider tools keep the real HOME, not `--home`: these tests' "real" HOME is the
@@ -174,6 +179,7 @@ fn state(b: &Sb) -> Value {
 const PREFER_SCRIPT: &str = "prefer = [\"script\", \"cargo\"]";
 
 #[test]
+#[cfg(unix)]
 fn migrate_installs_verifies_removes_and_records_everything() {
     let b = sandbox(PREFER_SCRIPT, "rm -f $HOME/bat.installed");
     assert!(lock(&b).contains("provider = \"script\""), "{}", lock(&b));
@@ -244,6 +250,7 @@ fn migrate_installs_verifies_removes_and_records_everything() {
 }
 
 #[test]
+#[cfg(unix)]
 fn a_ranking_that_already_prefers_the_target_leaves_the_package_file_alone() {
     // No `prefer`: cargo sorts before script, so only the sticky install kept script.
     let b = sandbox(PREFER_SCRIPT, "rm -f $HOME/bat.installed");
@@ -281,6 +288,7 @@ fn a_failed_install_leaves_the_old_install_working_and_nothing_recorded() {
 }
 
 #[test]
+#[cfg(unix)]
 fn an_install_that_does_not_verify_is_taken_back_and_the_old_one_stays() {
     let b = sandbox(PREFER_SCRIPT, "rm -f $HOME/bat.installed");
     write(&b.home.join("cargo-no-record"), "");
@@ -294,6 +302,7 @@ fn an_install_that_does_not_verify_is_taken_back_and_the_old_one_stays() {
 }
 
 #[test]
+#[cfg(unix)]
 fn a_failed_removal_keeps_both_installs_and_records_nothing() {
     let b = sandbox(PREFER_SCRIPT, "false");
     let (toml, lock_before) = (package_toml(&b), lock(&b));
@@ -414,6 +423,7 @@ fn items(o: &Out) -> Vec<Value> {
 }
 
 #[test]
+#[cfg(unix)]
 fn a_brew_dependency_is_not_an_orphan() {
     let (b, prefix) = brew_sandbox();
     let env = [("HOMEBREW_PREFIX", prefix.as_str())];
@@ -459,6 +469,7 @@ fn a_brew_dependency_is_not_an_orphan() {
 }
 
 #[test]
+#[cfg(unix)]
 fn migrate_edits_the_override_that_sets_prefer() {
     let b = sandbox(PREFER_SCRIPT, "rm -f $HOME/bat.installed");
     let ov = b.root.join("overrides/packages/bat/override.toml");
@@ -485,6 +496,7 @@ fn migrate_edits_the_override_that_sets_prefer() {
 }
 
 #[test]
+#[cfg(unix)]
 fn migrate_edits_the_platform_table_that_sets_prefer() {
     let b = sandbox(PREFER_SCRIPT, "rm -f $HOME/bat.installed");
     let os = if cfg!(target_os = "macos") {
@@ -522,6 +534,7 @@ fn migrate_edits_the_platform_table_that_sets_prefer() {
 }
 
 #[test]
+#[cfg(unix)]
 fn bins_does_not_call_a_declared_packages_other_copy_an_orphan() {
     let b = sandbox(PREFER_SCRIPT, "rm -f $HOME/bat.installed");
     // A cargo copy of `bat` exists and the ownership record names cargo, but `bat` is still
@@ -531,7 +544,7 @@ fn bins_does_not_call_a_declared_packages_other_copy_an_orphan() {
         .args(["install", "bat"])
         .env("HOME", &b.home)
         .env("CARGO_HOME", &cargo)
-        .env("PATH", "/usr/bin:/bin")
+        .env("PATH", dots_testkit::system_path())
         .status()
         .unwrap();
     assert!(st.success());
@@ -540,7 +553,7 @@ fn bins_does_not_call_a_declared_packages_other_copy_an_orphan() {
     s["packages"]["bat"]["provider"] = "cargo".into();
     s["packages"]["bat"]["name"] = "bat".into();
     write(&sp, &s.to_string());
-    let path = format!("{}:/usr/bin:/bin", cargo.join("bin").display());
+    let path = dots_testkit::path_with(cargo.join("bin"));
     let o = run_env(&b, &[("PATH", path.as_str())], &["bins", "--json"]);
     assert_eq!(o.code, 0, "{}{}", o.stdout, o.stderr);
     let copies = json(&o)["data"]["bins"].as_array().unwrap().clone();
@@ -572,7 +585,7 @@ fn switched_sandbox() -> Sb {
         .args(["install", "bat"])
         .env("HOME", &b.home)
         .env("CARGO_HOME", &cargo)
-        .env("PATH", "/usr/bin:/bin")
+        .env("PATH", dots_testkit::system_path())
         .status()
         .unwrap();
     assert!(st.success());
@@ -581,6 +594,7 @@ fn switched_sandbox() -> Sb {
 }
 
 #[test]
+#[cfg(unix)]
 fn migrate_from_removes_the_other_providers_copy_once_the_package_already_uses_the_target() {
     let b = switched_sandbox();
     let o = run(
@@ -632,6 +646,7 @@ fn migrate_from_removes_the_other_providers_copy_once_the_package_already_uses_t
 }
 
 #[test]
+#[cfg(unix)]
 fn migrate_without_from_says_when_there_is_nothing_to_do() {
     let b = switched_sandbox();
     // No `--from`: dots does not guess which unlisted copy to remove.

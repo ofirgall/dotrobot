@@ -31,7 +31,28 @@ use dots_resolve::InstalledMap;
 /// cargo/uv look for themselves in a directory that has nothing. Only when the process has no
 /// `HOME` does the (possibly sandboxed) `dirs.home` stand in.
 pub fn exec_ctx(dirs: &Dirs, offline: bool, dry_run: bool, run_id: &str) -> Ctx {
-    exec_ctx_from(dirs, std::env::vars().collect(), offline, dry_run, run_id)
+    exec_ctx_from(dirs, process_env(), offline, dry_run, run_id)
+}
+
+/// The process environment as a map. Windows spells the search path `Path` (names are
+/// case-insensitive there), but everything in dots looks it up as `PATH`; and a Windows
+/// process has no `HOME`, only `USERPROFILE`, which stands in for it.
+fn process_env() -> std::collections::BTreeMap<String, String> {
+    let mut env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
+    if cfg!(windows) {
+        if let Some(k) = env.keys().find(|k| k.eq_ignore_ascii_case("PATH")).cloned()
+            && k != "PATH"
+            && let Some(v) = env.remove(&k)
+        {
+            env.insert("PATH".into(), v);
+        }
+        if !env.contains_key("HOME")
+            && let Some(p) = env.get("USERPROFILE").cloned()
+        {
+            env.insert("HOME".into(), p);
+        }
+    }
+    env
 }
 
 fn exec_ctx_from(

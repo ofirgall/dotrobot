@@ -192,16 +192,20 @@ fn env(l: &Loaded, dirs: &Dirs) -> Vec<Finding> {
             ));
         }
     }
-    let live: BTreeSet<&str> = l
+    let live: BTreeSet<String> = l
         .pctx
         .env
         .get("PATH")
-        .map(|p| p.split(':').collect())
+        .map(|p| {
+            std::env::split_paths(p)
+                .map(|d| d.to_string_lossy().into_owned())
+                .collect()
+        })
         .unwrap_or_default();
     let missing: Vec<String> = l
         .env_path_entries(dirs)
         .into_iter()
-        .filter(|d| !live.contains(d.as_str()))
+        .filter(|d| !live.contains(d))
         .collect();
     if !missing.is_empty() {
         out.push(finding(
@@ -504,6 +508,7 @@ pub fn report(l: &Loaded, dirs: &Dirs) -> Report {
     report
 }
 
+#[cfg_attr(not(unix), allow(dead_code, unused_imports))] // helpers of unix-only tests
 #[cfg(test)]
 mod tests {
     use dots_providers::{Availability, Provider, Registry};
@@ -527,6 +532,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn a_system_dir_before_cargo_shadows_the_managed_binary() {
         let fx = Fixture::new(&[("fd", "[providers.cargo]\n")]);
         let t = fx.tmp.path();

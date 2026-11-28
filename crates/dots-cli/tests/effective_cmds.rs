@@ -15,7 +15,7 @@ struct Sb {
 
 fn write(p: &Path, text: &str) {
     std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-    std::fs::write(p, text).unwrap();
+    std::fs::write(p, dots_testkit::bash_on_windows(text)).unwrap();
 }
 
 fn sandbox(machine_toml: Option<&str>) -> Sb {
@@ -39,7 +39,8 @@ fn sandbox(machine_toml: Option<&str>) -> Sb {
 fn run(b: &Sb, args: &[&str]) -> (i32, String, String) {
     let o = Command::new(env!("CARGO_BIN_EXE_dots"))
         .env_clear()
-        .env("PATH", "/usr/bin:/bin")
+        .envs(dots_testkit::system_env())
+        .env("PATH", dots_testkit::system_path())
         .env("SHELL", "/bin/zsh")
         .env("DOTS_PROVIDERS", "none")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
@@ -67,7 +68,7 @@ fn facts_chain_uses_platforms_declared_by_an_override() {
     write(
         &b.machine,
         &format!(
-            "schema = 1\nroot = \"{}\"\nplatform_extra = [\"pop\"]\n",
+            "schema = 1\nroot = '{}'\nplatform_extra = [\"pop\"]\n",
             b.root.display()
         ),
     );

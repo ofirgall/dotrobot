@@ -20,7 +20,7 @@ impl Sb {
 
 fn write(p: &Path, text: &str) {
     std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-    std::fs::write(p, text).unwrap();
+    std::fs::write(p, dots_testkit::bash_on_windows(text)).unwrap();
 }
 
 /// `pkgs`: (name, package.toml body after the header). Every package is in bundle `all`.
@@ -71,8 +71,9 @@ fn run(b: &Sb, args: &[&str]) -> Out {
 fn run_env(b: &Sb, args: &[&str], envs: &[(&str, &Path)]) -> Out {
     let o = Command::new(env!("CARGO_BIN_EXE_dots"))
         .env_clear()
+        .envs(dots_testkit::system_env())
         .envs(envs.iter().copied())
-        .env("PATH", "/usr/bin:/bin")
+        .env("PATH", dots_testkit::system_path())
         .env("SHELL", "/bin/zsh")
         .env("DOTS_PROVIDERS", "script")
         .env("HOME", b.tmp.path().join("sentinel"))
@@ -422,7 +423,10 @@ fn dots_root_env_beats_machine_toml_root() {
     let real = std::fs::read_to_string(&b.machine).unwrap();
     write(
         &b.machine,
-        &real.replace(&b.root.display().to_string(), "/nonexistent/repo"),
+        &real.replace(
+            &format!("{:?}", b.root.display().to_string()),
+            "\"/nonexistent/repo\"",
+        ),
     );
     assert_ne!(run(&b, &["plan", "--check"]).code, 3);
     let o = run_env(&b, &["plan", "--check"], &[("DOTS_ROOT", &b.root)]);

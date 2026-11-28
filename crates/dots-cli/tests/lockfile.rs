@@ -18,7 +18,7 @@ struct Sb {
 
 fn write(p: &Path, text: &str) {
     std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-    std::fs::write(p, text).unwrap();
+    std::fs::write(p, dots_testkit::bash_on_windows(text)).unwrap();
 }
 
 /// `(name, extra keys before the provider table)`.
@@ -78,7 +78,8 @@ fn run(b: &Sb, args: &[&str]) -> Out {
 fn run_env(b: &Sb, env: &[(&str, &str)], args: &[&str]) -> Out {
     let o = Command::new(env!("CARGO_BIN_EXE_dots"))
         .env_clear()
-        .env("PATH", "/usr/bin:/bin")
+        .envs(dots_testkit::system_env())
+        .env("PATH", dots_testkit::system_path())
         .env("DOTS_PROVIDERS", "script")
         .env("HOME", b.tmp.path().join("sentinel"))
         .envs(env.iter().copied())

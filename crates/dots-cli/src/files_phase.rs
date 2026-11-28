@@ -40,7 +40,7 @@ pub struct RepoFiles<'a> {
 fn tilde(p: &Path, home: &Path) -> String {
     match p.strip_prefix(home) {
         Ok(rest) if rest.as_os_str().is_empty() => "~".into(),
-        Ok(rest) => format!("~/{}", rest.display()),
+        Ok(rest) => format!("~/{}", dots_core::paths::slashed(rest)),
         Err(_) => p.display().to_string(),
     }
 }

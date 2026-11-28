@@ -15,7 +15,7 @@ struct Sb {
 
 fn write(p: &Path, text: &str) {
     std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-    std::fs::write(p, text).unwrap();
+    std::fs::write(p, dots_testkit::bash_on_windows(text)).unwrap();
 }
 
 /// `pkgs`: (name, package.toml body after the header). Every package is in bundle `all`.
@@ -66,8 +66,9 @@ fn run(b: &Sb, args: &[&str]) -> Out {
 fn run_env(b: &Sb, args: &[&str], envs: &[(&str, &Path)]) -> Out {
     let o = Command::new(env!("CARGO_BIN_EXE_dots"))
         .env_clear()
+        .envs(dots_testkit::system_env())
         .envs(envs.iter().copied())
-        .env("PATH", "/usr/bin:/bin")
+        .env("PATH", dots_testkit::system_path())
         .env("SHELL", "/bin/zsh")
         .env("DOTS_PROVIDERS", "script")
         .env("HOME", b.tmp.path().join("sentinel"))
@@ -401,6 +402,8 @@ fn text_adopt_keeps_template_expressions_the_edit_did_not_touch() {
     let (b, dst) = templated();
     let os = if cfg!(target_os = "macos") {
         "macos"
+    } else if cfg!(windows) {
+        "windows"
     } else {
         "linux"
     };
@@ -557,7 +560,7 @@ fn a_linked_file_has_nothing_to_adopt() {
     assert_eq!(json(&o)["errors"][0]["code"], "adopt-unsupported");
 }
 
-const PER_PLATFORM: &str = "\n[[files]]\nmode = \"render\"\nformat = \"json\"\nsrc = \"settings.json\"\ndst = { macos = \"{home}/.claude/settings.json\", linux = \"{home}/.claude/settings.json\" }\n";
+const PER_PLATFORM: &str = "\n[[files]]\nmode = \"render\"\nformat = \"json\"\nsrc = \"settings.json\"\ndst = { macos = \"{home}/.claude/settings.json\", linux = \"{home}/.claude/settings.json\", windows = \"{home}/.claude/settings.json\" }\n";
 
 #[test]
 fn machine_adopt_with_a_per_platform_dst_survives_the_next_apply() {
@@ -581,6 +584,7 @@ fn machine_adopt_with_a_per_platform_dst_survives_the_next_apply() {
 }
 
 #[test]
+#[cfg(unix)]
 fn adopt_into_a_symlinked_source_keeps_the_link() {
     let b = applied(&[(
         "app",
