@@ -565,7 +565,7 @@ impl Wanted {
     fn mismatch(&self, raw: &str) -> Option<String> {
         let differs = match self {
             Wanted::Path(dir) => match raw.strip_prefix("path+file://") {
-                Some(p) => !same_dir(Path::new(p), dir),
+                Some(_) => !same_dir(Path::new(&file_url_path(raw)), dir),
                 None => true,
             },
             Wanted::Git { url, rev } => match raw.strip_prefix("git+") {
@@ -594,10 +594,50 @@ impl Wanted {
     }
 }
 
+/// The local path inside a `path+file://` / `file://` url: percent-escapes decoded and, for
+/// the `/C:/...` drive form, the slash before the drive letter dropped. `/Users/x` is unchanged.
+fn file_url_path(url: &str) -> String {
+    let rest = url
+        .strip_prefix("path+file://")
+        .or_else(|| url.strip_prefix("file://"))
+        .unwrap_or(url);
+    let bytes = rest.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = |b: u8| (b as char).to_digit(16);
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let (Some(h), Some(l)) = (hex(bytes[i + 1]), hex(bytes[i + 2]))
+        {
+            out.push((h * 16 + l) as u8);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    let decoded = String::from_utf8_lossy(&out).into_owned();
+    let b = decoded.as_bytes();
+    if b.len() >= 3 && b[0] == b'/' && b[1].is_ascii_alphabetic() && b[2] == b':' {
+        decoded[1..].to_string()
+    } else {
+        decoded
+    }
+}
+
 fn same_dir(a: &Path, b: &Path) -> bool {
-    let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-    let trim = |p: PathBuf| PathBuf::from(p.to_string_lossy().trim_end_matches('/'));
-    trim(canon(a)) == trim(canon(b))
+    let norm = |p: &Path| match dots_core::paths::canonicalize(p) {
+        Ok(c) => c.to_string_lossy().into_owned(),
+        Err(_) => p.to_string_lossy().into_owned(),
+    };
+    // Lexical form: forward slashes, no trailing slash, and on Windows case-insensitive.
+    let lex = |p: &Path| {
+        let s = norm(p).replace('\\', "/");
+        let s = s.trim_end_matches('/').to_string();
+        if cfg!(windows) { s.to_lowercase() } else { s }
+    };
+    lex(a) == lex(b)
 }
 
 /// `host/owner/repo` for any spelling of a git url: `https://`, `ssh://git@`, `git@host:`,
@@ -625,8 +665,12 @@ fn is_compile_error(text: &str) -> bool {
 fn with_path_revs(ctx: &Ctx, mut map: BTreeMap<String, Installed>) -> BTreeMap<String, Installed> {
     let revs = pathsrc::read_revs(&cargo_home(&ctx.home, &ctx.env).join(REVS_FILE));
     for (name, i) in map.iter_mut() {
-        if i.source.as_deref().is_some_and(|s| s.starts_with('/'))
-            && let Some(v) = revs.get(name)
+        if i.source.as_deref().is_some_and(|s| {
+            s.starts_with('/')
+                || s.as_bytes()
+                    .get(1..3)
+                    .is_some_and(|d| d[0] == b':' && d[1] == b'/')
+        }) && let Some(v) = revs.get(name)
         {
             i.version = v.clone();
         }
@@ -657,12 +701,11 @@ fn parse_crates2(text: &str) -> Option<BTreeMap<String, Installed>> {
             if s.starts_with("registry+") || s.starts_with("sparse+") {
                 None
             } else {
-                Some(
-                    s.strip_prefix("git+")
-                        .or_else(|| s.strip_prefix("path+file://"))
-                        .unwrap_or(s)
-                        .to_string(),
-                )
+                Some(match s.strip_prefix("git+") {
+                    Some(g) => g.to_string(),
+                    None if s.starts_with("path+file://") => file_url_path(s),
+                    None => s.to_string(),
+                })
             }
         });
         map.insert(
@@ -743,5 +786,37 @@ mod tests {
             m["foo"].source.as_deref(),
             Some("https://github.com/x/y#abc123")
         );
+    }
+
+    #[test]
+    fn file_url_paths() {
+        let f = file_url_path;
+        assert_eq!(
+            f("path+file:///C:/Users/Ofir/dotfiles/packages/herdr-last-tab"),
+            "C:/Users/Ofir/dotfiles/packages/herdr-last-tab"
+        );
+        assert_eq!(f("path+file:///C:/My%20Dir/x"), "C:/My Dir/x");
+        assert_eq!(f("path+file:///Users/x/y"), "/Users/x/y");
+        assert_eq!(f("file:///Users/x%20y/z"), "/Users/x y/z");
+    }
+
+    #[test]
+    fn matching_path_install_is_not_a_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = Wanted::Path(dir.path().to_path_buf());
+        let url = |p: &str| {
+            format!(
+                "path+file://{}",
+                if p.starts_with('/') {
+                    p.to_string()
+                } else {
+                    format!("/{p}")
+                }
+            )
+        };
+        let p = dots_core::paths::canonicalize(dir.path()).unwrap();
+        let p = p.to_string_lossy().replace('\\', "/");
+        assert_eq!(w.mismatch(&url(&p)), None);
+        assert!(w.mismatch(&url("/nowhere/else")).is_some());
     }
 }

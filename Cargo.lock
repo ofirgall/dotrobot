@@ -396,6 +396,7 @@ dependencies = [
 name = "dots-providers"
 version = "0.1.0"
 dependencies = [
+ "dots-core",
  "dots-facts",
  "dots-testkit",
  "regex",
