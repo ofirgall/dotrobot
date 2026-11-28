@@ -715,6 +715,37 @@ fn copy_modified_and_stale() {
     assert_eq!(status(&[f], &ctx)[0].state, FileState::Modified);
 }
 
+/// A package's inject block and dots' own env block (`# >>> dots env >>>`) share one profile
+/// without touching each other, and the profile's directory is created when it is missing.
+#[test]
+fn an_inject_block_shares_a_profile_with_the_env_block() {
+    let e = env();
+    let src = e.write("pkg/profile.inject", "Set-Alias ll ls\n");
+    let rc = ".config/powershell/Microsoft.PowerShell_profile.ps1";
+    let f = e.file("pwsh-conf", Mode::Inject, rc, Some(src), &[], "text");
+    let ctx = e.ctx("r1");
+    apply_all(&[f.clone()], &ctx);
+    let path = e.home.join(rc);
+    // The env step adds its block (what `dots_env::inject_rc` writes) after the package's.
+    let env_block = "# >>> dots env >>>\nif (Test-Path x) { . x }\n# <<< dots env <<<\n";
+    let mut text = fs::read_to_string(&path).unwrap();
+    text.push_str(env_block);
+    fs::write(&path, &text).unwrap();
+    // The package's block is still ok and untouched by a re-apply; the env block survives.
+    assert_eq!(status(&[f.clone()], &ctx)[0].state, FileState::Ok);
+    assert_eq!(plan(&[f.clone()], &ctx)[0].action, Action::Unchanged);
+    apply_all(&[f.clone()], &ctx);
+    assert_eq!(fs::read_to_string(&path).unwrap(), text);
+    // Removing the package's block leaves the env block.
+    let removals = plan_removals(&[], &ctx, None);
+    assert_eq!(apply(&removals[0], &ctx).status, OutcomeStatus::Applied);
+    let left = fs::read_to_string(&path).unwrap();
+    assert!(
+        left.contains(env_block) && !left.contains("dots:pwsh-conf"),
+        "{left}"
+    );
+}
+
 #[test]
 fn inject_is_idempotent_and_removable() {
     let e = env();
