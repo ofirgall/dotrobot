@@ -4,6 +4,7 @@ pub mod blocks;
 pub mod commands;
 pub mod env;
 pub mod errors;
+pub mod exe;
 pub mod exit;
 pub mod options;
 pub mod paths;

@@ -118,6 +118,18 @@ impl Dirs {
     }
 }
 
+/// `p` as text with `/` separators on every OS, for anything shown to the user or written
+/// to a file that travels between machines (on Windows `\\` becomes `/`; elsewhere a
+/// backslash is a legal file-name character and stays).
+pub fn slashed(p: &Path) -> String {
+    let s = p.to_string_lossy();
+    if cfg!(windows) {
+        s.replace('\\', "/")
+    } else {
+        s.into_owned()
+    }
+}
+
 fn absolute(v: Option<std::ffi::OsString>) -> Option<PathBuf> {
     v.map(PathBuf::from).filter(|p| p.is_absolute())
 }
@@ -138,17 +150,25 @@ mod tests {
 
     #[test]
     fn xdg_then_dots_vars() {
+        // Absolute means a drive letter on Windows.
+        let abs = |p: &str| {
+            if cfg!(windows) {
+                format!("C:{p}")
+            } else {
+                p.to_string()
+            }
+        };
         let env = MapEnv::new()
             .with("HOME", "/h")
-            .with("XDG_STATE_HOME", "/x/state")
+            .with("XDG_STATE_HOME", abs("/x/state"))
             .with("XDG_CONFIG_HOME", "relative-is-ignored")
-            .with("DOTS_CACHE_DIR", "/c");
+            .with("DOTS_CACHE_DIR", abs("/c"));
         let d = Dirs::resolve(None, &env);
-        assert_eq!(d.state, Path::new("/x/state/dots"));
+        assert_eq!(d.state, Path::new(&abs("/x/state/dots")));
         assert_eq!(d.config, Path::new("/h/.config/dots"));
-        assert_eq!(d.cache, Path::new("/c"));
-        let env = env.with("DOTS_STATE_DIR", "/s");
-        assert_eq!(Dirs::resolve(None, &env).state, Path::new("/s"));
+        assert_eq!(d.cache, Path::new(&abs("/c")));
+        let env = env.with("DOTS_STATE_DIR", abs("/s"));
+        assert_eq!(Dirs::resolve(None, &env).state, Path::new(&abs("/s")));
     }
 
     #[test]
