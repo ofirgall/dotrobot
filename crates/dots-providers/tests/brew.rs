@@ -190,6 +190,36 @@ fn latest_is_batched_per_kind_and_offline_is_empty() {
     assert_eq!(rec.count(), 0);
 }
 
+#[test]
+fn latest_drops_a_name_brew_cannot_resolve_and_asks_again_once() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (p, rec, ctx, b) = scripted(tmp.path());
+    // The whole call fails on an untapped formula; the rest must still come back in one call.
+    rec.on(
+        &[&b, "info", "--json=v2", "bat", "oven-sh/bun/bun", "ffmpeg"],
+        Output::fail(
+            1,
+            "Error: No available formula or cask with the name \"oven-sh/bun/bun\".\nThis command requires the tap oven-sh/bun.\n",
+        ),
+    );
+    rec.on(&[&b, "info", "--json=v2"], Output::ok(LATEST_FORMULAE));
+    let specs = [
+        Spec::new("bat"),
+        Spec::new("oven-sh/bun/bun"),
+        Spec::new("ffmpeg"),
+    ];
+    let m = p.latest(&ctx, &specs).unwrap();
+    assert_eq!(
+        rec.lines(),
+        [
+            format!("{b} info --json=v2 bat oven-sh/bun/bun ffmpeg"),
+            format!("{b} info --json=v2 bat ffmpeg"),
+        ]
+    );
+    assert_eq!(m["bat"].version, "0.26.1");
+    assert!(!m.contains_key("oven-sh/bun/bun"));
+}
+
 // ---- plan ---------------------------------------------------------------------------------
 
 #[test]

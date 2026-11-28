@@ -556,6 +556,39 @@ pub struct OfferCandidate {
     pub spec: dots_providers::Spec,
 }
 
+/// Remembered offers, keyed by (provider id, native name).
+pub type OfferAnswers = std::collections::BTreeMap<(String, String), Option<String>>;
+
+/// Records what the resolver would ask (answering nothing), so the real, batched lookup can be
+/// announced before resolving for real.
+#[derive(Default)]
+pub struct RecordingOffers {
+    asked: std::cell::RefCell<Vec<OfferCandidate>>,
+}
+
+impl RecordingOffers {
+    pub fn into_candidates(self) -> Vec<OfferCandidate> {
+        self.asked.into_inner()
+    }
+}
+
+impl dots_resolve::OfferSource for RecordingOffers {
+    fn offered(
+        &self,
+        provider: &str,
+        pkg: &str,
+        _native: &str,
+        spec: &dots_providers::Spec,
+    ) -> Option<String> {
+        self.asked.borrow_mut().push(OfferCandidate {
+            provider: provider.to_string(),
+            pkg: pkg.to_string(),
+            spec: spec.clone(),
+        });
+        None
+    }
+}
+
 /// What providers offer, asked live and remembered for the run. Backs constraint-aware
 /// provider selection and drift notes; a provider that cannot answer offers nothing (and is
 /// then assumed able to deliver).
@@ -570,14 +603,21 @@ pub struct LiveOffers<'a> {
     registry: &'a Registry,
     ctx: &'a Ctx,
     candidates: Vec<OfferCandidate>,
-    seen: std::cell::RefCell<std::collections::BTreeMap<(String, String), Option<String>>>,
+    seen: std::cell::RefCell<OfferAnswers>,
     /// Shared provider ids whose candidates were already fetched.
     fetched: std::cell::RefCell<std::collections::BTreeSet<String>>,
 }
 
 impl<'a> LiveOffers<'a> {
-    pub fn new(registry: &'a Registry, ctx: &'a Ctx) -> Self {
-        Self::with_candidates(registry, ctx, Vec::new())
+    /// Answers remembered by an earlier `LiveOffers` of this run, so nothing is asked twice.
+    pub fn seeded(mut self, seen: OfferAnswers) -> Self {
+        self.seen = std::cell::RefCell::new(seen);
+        self
+    }
+
+    /// Everything asked so far, to seed the next `LiveOffers` of the run.
+    pub fn answers(&self) -> OfferAnswers {
+        self.seen.borrow().clone()
     }
 
     pub fn with_candidates(
@@ -653,7 +693,12 @@ impl dots_resolve::OfferSource for LiveOffers<'_> {
                 let mut specs: Vec<dots_providers::Spec> = Vec::new();
                 if first {
                     for c in self.candidates.iter().filter(|c| {
-                        c.provider == provider && !self.registry.has_scoped(provider, &c.pkg)
+                        c.provider == provider
+                            && !self.registry.has_scoped(provider, &c.pkg)
+                            && !self
+                                .seen
+                                .borrow()
+                                .contains_key(&(provider.to_string(), c.spec.name.clone()))
                     }) {
                         if !specs.iter().any(|s| s.name == c.spec.name) {
                             specs.push(c.spec.clone());

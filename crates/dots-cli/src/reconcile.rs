@@ -141,6 +141,8 @@ pub(crate) struct Prepared {
     pub(crate) registry: dots_providers::Registry,
     pub(crate) installed: dots_resolve::InstalledMap,
     pub(crate) resolution: dots_resolve::Resolution,
+    /// What providers offered while resolving, reused by the planner's drift checks.
+    pub(crate) offered: providers::OfferAnswers,
     pub(crate) pctx: dots_providers::Ctx,
     /// `dots.lock`, and this machine's platform key in it.
     pub(crate) lock: dots_lock::Lock,
@@ -179,26 +181,33 @@ pub(crate) fn prepare(
         .map_err(|d| (vec![d], rc.m.warnings.clone()))?;
     let machine_key = crate::lock_cmd::machine_key(&rc);
     // Provider choice is constraint-aware: ask what providers offer when a constraint needs it.
+    let offered;
     let resolution = {
-        let offers = providers::LiveOffers::new(&registry, &pctx);
-        resolve_full(
-            &dots_resolve::Inputs {
-                repo: &rc.repo,
-                machine: &rc.m.machine,
-                facts: &rc.m.facts,
-                chain: &rc.chain,
-                providers: &registry,
-                installed: &installed,
-            },
-            &offers,
-            &settings,
-        )
+        let inputs = dots_resolve::Inputs {
+            repo: &rc.repo,
+            machine: &rc.m.machine,
+            facts: &rc.m.facts,
+            chain: &rc.chain,
+            providers: &registry,
+            installed: &installed,
+        };
+        // A dry pass records which (provider, spec) pairs the constraint checks ask about, so
+        // the real pass asks each shared provider once for all of them (a `brew info` call
+        // is about a second; one per package made a plan take minutes).
+        let recorder = providers::RecordingOffers::default();
+        let _ = resolve_full(&inputs, &recorder, &settings);
+        let offers =
+            providers::LiveOffers::with_candidates(&registry, &pctx, recorder.into_candidates());
+        let resolution = resolve_full(&inputs, &offers, &settings);
+        offered = offers.answers();
+        resolution
     };
     Ok(Prepared {
         rc,
         registry,
         installed,
         resolution,
+        offered,
         pctx,
         lock,
         machine_key,
@@ -243,7 +252,7 @@ fn offers_for<'a>(
             spec: dots_resolve::spec_for_in(&choice.native_name, cfg, pkg.map(|k| k.dir.as_path())),
         });
     }
-    providers::LiveOffers::with_candidates(&p.registry, pctx, cands)
+    providers::LiveOffers::with_candidates(&p.registry, pctx, cands).seeded(p.offered.clone())
 }
 
 // ------------------------------------------------------------------------------ plan

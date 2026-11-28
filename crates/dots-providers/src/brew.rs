@@ -235,6 +235,12 @@ impl BrewProvider {
     }
 }
 
+/// The name in brew's "No available formula or cask with the name "x"" error.
+fn unknown_name(msg: &str) -> Option<&str> {
+    let rest = msg.split("with the name \"").nth(1)?;
+    rest.split('"').next().filter(|n| !n.is_empty())
+}
+
 fn arr<'a>(v: &'a Value, key: &str) -> &'a [Value] {
     v.get(key)
         .and_then(Value::as_array)
@@ -397,9 +403,29 @@ impl Provider for BrewProvider {
             if group.is_empty() {
                 continue;
             }
-            let mut args: Vec<&str> = if cask == 1 { vec!["--cask"] } else { vec![] };
-            args.extend(group.iter().map(|(_, n)| n.as_str()));
-            let doc = self.info(ctx, &bin, &args)?;
+            // One name brew cannot resolve (a formula of a tap that is not tapped, a removed
+            // package) fails the whole call. Drop the name it complains about and ask again
+            // for the rest, so one bad name does not turn a one-call lookup into one call per
+            // package.
+            let mut names: Vec<&str> = group.iter().map(|(_, n)| n.as_str()).collect();
+            let mut retries = 0;
+            let doc = loop {
+                let mut args: Vec<&str> = if cask == 1 { vec!["--cask"] } else { vec![] };
+                args.extend(names.iter().copied());
+                match self.info(ctx, &bin, &args) {
+                    Ok(doc) => break doc,
+                    Err(ProviderError::Other(msg)) if retries < 8 && names.len() > 1 => {
+                        let unknown =
+                            unknown_name(&msg).and_then(|u| names.iter().position(|n| *n == u));
+                        let Some(i) = unknown else {
+                            return Err(ProviderError::Other(msg));
+                        };
+                        names.remove(i);
+                        retries += 1;
+                    }
+                    Err(e) => return Err(e),
+                }
+            };
             let mut versions: BTreeMap<String, String> = BTreeMap::new();
             if cask == 1 {
                 for c in arr(&doc, "casks") {
