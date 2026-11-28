@@ -17,6 +17,19 @@ pub fn candidates(dir: &Path, name: &str) -> Vec<PathBuf> {
     v
 }
 
+/// A file name as a command is called: on Windows without its `PATHEXT` extension (`bat.exe`
+/// is `bat`); unchanged elsewhere.
+pub fn command_name(file_name: &str) -> String {
+    if cfg!(windows)
+        && let Some((stem, ext)) = file_name.rsplit_once('.')
+        && !stem.is_empty()
+        && path_exts().iter().any(|e| e[1..].eq_ignore_ascii_case(ext))
+    {
+        return stem.to_string();
+    }
+    file_name.to_string()
+}
+
 /// The first runnable file for `name` in `dir`, as found on disk.
 pub fn find_in(dir: &Path, name: &str) -> Option<PathBuf> {
     candidates(dir, name).into_iter().find(|p| is_executable(p))
@@ -69,6 +82,14 @@ mod tests {
         assert!(!is_executable(&d.path().join("nope")));
         assert!(find_in(d.path(), "nope").is_none());
         assert!(!is_executable(d.path()), "a directory is not");
+    }
+
+    #[test]
+    fn command_name_drops_the_pathext_extension_on_windows_only() {
+        assert_eq!(command_name("notes.txt"), "notes.txt");
+        assert_eq!(command_name("tool"), "tool");
+        let want = if cfg!(windows) { "bat" } else { "bat.exe" };
+        assert_eq!(command_name("bat.exe"), want);
     }
 
     #[cfg(windows)]

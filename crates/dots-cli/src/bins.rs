@@ -29,7 +29,7 @@ pub fn find_copies(path: &[PathBuf], name: &str) -> Vec<PathBuf> {
         let Some(p) = dots_core::exe::find_in(dir, name) else {
             continue;
         };
-        let real = std::fs::canonicalize(&p).unwrap_or_else(|_| p.clone());
+        let real = dots_core::paths::canonicalize(&p).unwrap_or_else(|_| p.clone());
         if seen.insert(real) {
             out.push(p);
         }
@@ -103,7 +103,8 @@ fn walk_path(dirs: &[PathBuf], only: Option<&str>) -> Vec<(String, PathBuf)> {
         for n in names {
             let p = dir.join(&n);
             if is_executable(&p) {
-                out.push((n, p));
+                // `bat.exe` is listed (and owned) as `bat` on Windows.
+                out.push((dots_core::exe::command_name(&n), p));
             }
         }
     }
@@ -125,7 +126,7 @@ pub fn inventory(l: &Loaded, dirs: &Dirs, only: Option<&str>) -> Vec<BinCopy> {
     let mut seen_real: BTreeSet<(String, PathBuf)> = BTreeSet::new();
     let mut copies: Vec<BinCopy> = Vec::new();
     for (bin, p) in walk_path(&path, only) {
-        let real = std::fs::canonicalize(&p).unwrap_or_else(|_| p.clone());
+        let real = dots_core::paths::canonicalize(&p).unwrap_or_else(|_| p.clone());
         if !seen_real.insert((bin.clone(), real.clone())) {
             continue;
         }
@@ -163,7 +164,7 @@ pub fn inventory(l: &Loaded, dirs: &Dirs, only: Option<&str>) -> Vec<BinCopy> {
     let mut table: BTreeMap<PathBuf, (String, String)> = BTreeMap::new();
     for ((id, _), r) in jobs.iter().zip(results) {
         for e in r.unwrap_or_default() {
-            let real = std::fs::canonicalize(&e.path).unwrap_or_else(|_| e.path.clone());
+            let real = dots_core::paths::canonicalize(&e.path).unwrap_or_else(|_| e.path.clone());
             table
                 .entry(e.path.clone())
                 .or_insert((id.to_string(), e.package.clone()));

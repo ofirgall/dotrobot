@@ -663,3 +663,24 @@ fn break_system_packages_opt_in() {
             .any(|l| l.contains("--break-system-packages"))
     );
 }
+
+/// A venv's interpreter is `Scripts\\python.exe` on Windows, and removal does not need `rm`.
+#[cfg(windows)]
+#[test]
+fn venv_kind_uses_scripts_python_and_powershell_on_windows() {
+    let p = UvProvider::with_bin("C:/u/uv").with_venv_root("C:/h/venvs");
+    let spec = "kind=venv;requirements=requirements.txt;pkg_dir=C:/repo/packages/scripts";
+    let actions = p
+        .plan(&[op(OpKind::Install, "scripts", Some(spec), None)])
+        .unwrap();
+    let python = &actions[1].argv[actions[1]
+        .argv
+        .iter()
+        .position(|a| a == "--python")
+        .unwrap()
+        + 1];
+    assert!(python.ends_with("Scripts\\python.exe"), "{python}");
+    let rm = argv(&p, op(OpKind::Remove, "scripts", Some("kind=venv"), None));
+    assert!(!rm.iter().any(|a| a.contains("/bin/rm")), "{rm:?}");
+    assert!(rm.last().unwrap().contains("Remove-Item"), "{rm:?}");
+}

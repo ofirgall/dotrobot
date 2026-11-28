@@ -43,6 +43,23 @@ fn availability(home: &Path) -> Availability {
     }
 }
 
+/// The command that deletes a venv directory: `rm -rf` on unix, PowerShell's `Remove-Item` on
+/// Windows (there is no `rm`).
+fn remove_dir_argv(dir: &str) -> Vec<String> {
+    if cfg!(windows) {
+        let (sh, flags) = crate::script::platform_shell();
+        let mut v = vec![sh.to_string_lossy().into_owned()];
+        v.extend(flags.iter().map(|f| f.to_string()));
+        v.push(format!(
+            "Remove-Item -LiteralPath '{}' -Recurse -Force",
+            dir.replace('\'', "''")
+        ));
+        v
+    } else {
+        ["/bin/rm", "-rf", dir].map(String::from).to_vec()
+    }
+}
+
 fn default_venv_root(home: &Path) -> PathBuf {
     home.join(".local/share/dots/venvs")
 }
@@ -201,7 +218,7 @@ impl UvProvider {
         });
         match op.kind {
             OpKind::Pin | OpKind::Unpin => Err(no_pin()),
-            OpKind::Remove => Ok(vec![act(vec![op.clone()], v(&["/bin/rm", "-rf", &dir_s]))]),
+            OpKind::Remove => Ok(vec![act(vec![op.clone()], remove_dir_argv(&dir_s))]),
             OpKind::Install | OpKind::Upgrade => {
                 let mut create = v(&[bin, "venv", "--allow-existing"]);
                 if let Some(py) = o.get("python").filter(|p| *p != "system") {
@@ -211,7 +228,15 @@ impl UvProvider {
                 let Some(reqs) = reqs else {
                     return Ok(vec![act(vec![op.clone()], create)]);
                 };
-                let python = dir.join("bin/python").to_string_lossy().into_owned();
+                // A venv keeps its interpreter in `bin/` on unix and `Scripts\python.exe` on
+                // Windows.
+                let python = if cfg!(windows) {
+                    dir.join("Scripts").join("python.exe")
+                } else {
+                    dir.join("bin/python")
+                }
+                .to_string_lossy()
+                .into_owned();
                 let mut pip = v(&[bin, "pip", "install", "--python", &python]);
                 if op.kind == OpKind::Upgrade {
                     pip.push("--upgrade".into());

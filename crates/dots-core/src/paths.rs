@@ -130,6 +130,26 @@ pub fn slashed(p: &Path) -> String {
     }
 }
 
+/// `fs::canonicalize` without the `\\?\` verbatim prefix Windows adds to a drive path. That
+/// prefix defeats comparisons with the same path written normally (`strip_prefix(home)`), and
+/// is rejected by tools such as git and most shells. A UNC path keeps its prefix.
+pub fn canonicalize(p: &Path) -> io::Result<PathBuf> {
+    let c = std::fs::canonicalize(p)?;
+    Ok(strip_verbatim(c))
+}
+
+fn strip_verbatim(c: PathBuf) -> PathBuf {
+    if cfg!(windows) {
+        let s = c.to_string_lossy();
+        if let Some(rest) = s.strip_prefix(r"\\?\")
+            && !rest.starts_with("UNC\\")
+        {
+            return PathBuf::from(rest.to_string());
+        }
+    }
+    c
+}
+
 fn absolute(v: Option<std::ffi::OsString>) -> Option<PathBuf> {
     v.map(PathBuf::from).filter(|p| p.is_absolute())
 }
@@ -169,6 +189,16 @@ mod tests {
         assert_eq!(d.cache, Path::new(&abs("/c")));
         let env = env.with("DOTS_STATE_DIR", abs("/s"));
         assert_eq!(Dirs::resolve(None, &env).state, Path::new(&abs("/s")));
+    }
+
+    #[test]
+    fn canonicalize_has_no_verbatim_prefix() {
+        let d = tempfile::tempdir().unwrap();
+        let c = canonicalize(d.path()).unwrap();
+        assert!(!c.to_string_lossy().starts_with(r"\\?\"), "{c:?}");
+        assert!(c.is_dir());
+        // The same directory reached through the plain path compares equal.
+        assert_eq!(c, canonicalize(&c).unwrap());
     }
 
     #[test]

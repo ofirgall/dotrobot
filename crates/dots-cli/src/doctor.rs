@@ -181,7 +181,7 @@ fn env(l: &Loaded, dirs: &Dirs) -> Vec<Finding> {
         .or_else(|| Shell::detect(&l.rc.m.facts.shell));
     if let Some(s) = shell {
         let rc = default_rc(s, &dirs.home);
-        let target = std::fs::canonicalize(&rc).unwrap_or_else(|_| rc.clone());
+        let target = dots_core::paths::canonicalize(&rc).unwrap_or_else(|_| rc.clone());
         let text = std::fs::read_to_string(target).unwrap_or_default();
         if !text.contains(MARKER_OPEN) {
             out.push(finding(

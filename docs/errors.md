@@ -343,7 +343,7 @@ Every error dots reports carries one of these stable codes (`errors[].code` in `
 ## `manual-invalid`
 
 - Message: {file}: {detail}
-- Hint: Fix the front matter (`id`, `title`, `when`, `after`, `check`, `requires`, `revision`, `interactive`).
+- Hint: Fix the front matter (`id`, `title`, `when`, `after`, `check`, `shell`, `requires`, `revision`, `interactive`).
 - Provenance: `file`, `line`
 
 ## `manual-unknown`

@@ -60,7 +60,7 @@ pub fn inject_rc(
     env_file: &Path,
     home: &Path,
 ) -> Result<InjectOutcome, EnvError> {
-    let target = std::fs::canonicalize(rc).unwrap_or_else(|_| rc.to_path_buf());
+    let target = dots_core::paths::canonicalize(rc).unwrap_or_else(|_| rc.to_path_buf());
     let existed = target.exists();
     let text = match std::fs::read_to_string(&target) {
         Ok(t) => t,
@@ -91,7 +91,7 @@ pub fn inject_rc(
 /// Remove every dots block from `rc`, leaving all other text byte for byte. A missing rc or
 /// one without a block is `Unchanged`.
 pub fn remove_rc_inject(rc: &Path) -> Result<InjectOutcome, EnvError> {
-    let target = std::fs::canonicalize(rc).unwrap_or_else(|_| rc.to_path_buf());
+    let target = dots_core::paths::canonicalize(rc).unwrap_or_else(|_| rc.to_path_buf());
     let text = match std::fs::read_to_string(&target) {
         Ok(t) => t,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(InjectOutcome::Unchanged),

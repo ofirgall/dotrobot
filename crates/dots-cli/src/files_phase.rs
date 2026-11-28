@@ -403,7 +403,8 @@ impl RepoFiles<'_> {
                 });
                 let rc_stale = match (shell, &rc) {
                     (Some(s), Some(rc)) => {
-                        let target = std::fs::canonicalize(rc).unwrap_or_else(|_| rc.clone());
+                        let target =
+                            dots_core::paths::canonicalize(rc).unwrap_or_else(|_| rc.clone());
                         let want = format!(
                             "{}\n{}\n{}\n",
                             dots_env::MARKER_OPEN,
@@ -418,8 +419,10 @@ impl RepoFiles<'_> {
                 let rc_stale = if contribs.is_empty() {
                     // Nothing contributes: the block should be gone, not merely current.
                     rc.as_deref().is_some_and(|r| {
-                        std::fs::read_to_string(std::fs::canonicalize(r).unwrap_or(r.into()))
-                            .is_ok_and(|t| t.contains(dots_env::MARKER_OPEN))
+                        std::fs::read_to_string(
+                            dots_core::paths::canonicalize(r).unwrap_or(r.into()),
+                        )
+                        .is_ok_and(|t| t.contains(dots_env::MARKER_OPEN))
                     })
                 } else {
                     rc_stale

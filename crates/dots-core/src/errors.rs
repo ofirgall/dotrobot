@@ -375,7 +375,7 @@ pub static REGISTRY: &[ErrorDef] = &[
     def!(
         "manual-invalid",
         "{file}: {detail}",
-        "Fix the front matter (`id`, `title`, `when`, `after`, `check`, `requires`, `revision`, `interactive`).",
+        "Fix the front matter (`id`, `title`, `when`, `after`, `check`, `shell`, `requires`, `revision`, `interactive`).",
         ["file", "line"]
     ),
     def!(

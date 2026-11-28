@@ -66,7 +66,9 @@ fn same_path(a: &Path, b: &Path) -> bool {
         return true;
     }
     let canon = |p: &Path| {
-        let parent = p.parent().and_then(|d| std::fs::canonicalize(d).ok())?;
+        let parent = p
+            .parent()
+            .and_then(|d| dots_core::paths::canonicalize(d).ok())?;
         Some(parent.join(p.file_name()?))
     };
     matches!((canon(a), canon(b)), (Some(x), Some(y)) if x == y)

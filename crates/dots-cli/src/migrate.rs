@@ -307,7 +307,7 @@ fn shadowed_by_others(ctx: &dots_providers::Ctx, bins: &[PathBuf]) -> Vec<String
                 .collect()
         })
         .unwrap_or_default();
-    let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let canon = |p: &Path| dots_core::paths::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     let mut out = Vec::new();
     for b in bins {
         let Some(name) = b.file_name().and_then(|n| n.to_str()) else {

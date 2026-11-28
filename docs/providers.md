@@ -165,6 +165,31 @@ packages along. Without `--from`, migrating to the provider a package already us
 - **cargo `locked`.** `cargo install` runs with `--locked` by default. Set `[providers.cargo] locked = false` for an old crate whose lockfile no longer builds with the current rustc. If a `--locked` install fails with a compile error, the failure message suggests it.
 - **uv `kind = "lib", python = "system"`.** On an externally managed python (PEP 668, e.g. Ubuntu 24.04, detected by the `EXTERNALLY-MANAGED` marker in the stdlib dir) the install fails with a message suggesting `kind = "venv"`. To install into the system python anyway, opt in with `break_system_packages = true`: `dots` passes `--break-system-packages` and uses sudo only when the target directory is not writable.
 
+## Windows
+
+- **winget.** `[providers.winget] id = "Git.Git"` names the package by its winget id. `installed`
+  reads `winget export --include-versions` (the one machine-readable listing; the table `winget
+  list` prints is truncated to the console width and is only the fallback), `latest` reads
+  `winget show --id X --exact`. Installs, upgrades and removals run with `--exact --silent
+  --disable-interactivity` and accept the package and source agreements. "Already installed" and
+  "no applicable upgrade" are success. `override = "..."` is passed as `--override` (installer
+  arguments, e.g. the Visual Studio Build Tools workloads); `args = ["--location", "D:\\Tools"]`
+  adds arguments to install and upgrade. Ids are matched as winget reports them (`Git.Git`).
+- **Links.** `link` and `render` files are symlinks. A Windows account may not create them
+  without Developer Mode or elevation; dots then makes a hardlink for a file and a junction for
+  a directory, and records which in `files.json` (`link_kind`). A hardlink is only the same file
+  until something replaces the target by rename (every dots write does), so `status` compares
+  content and the next `dots apply` links again. `dots doctor` says which case this machine is in.
+- **Elevated shells.** A symlink made by a normal (Medium integrity) shell cannot be followed by
+  an elevated (High integrity) one: Windows answers "The path cannot be traversed because it
+  contains an untrusted mount point". Use one kind of shell for `dots apply` and for the programs
+  that read the links; `dots doctor` lists the links that fail this way.
+- **Shell.** Script packages, hooks, manual-action checks and declarative providers run in
+  PowerShell on Windows. Set `shell = "bash"` (Git for Windows' bash) or `"pwsh"` on a script or
+  declarative provider, or `shell:` in a manual action's front matter, to choose another.
+- **Environment.** `env.ps1` sits beside `env.sh` and is sourced from the PowerShell profile
+  (`Documents\PowerShell\Microsoft.PowerShell_profile.ps1`).
+
 ## User-defined providers
 
 Declare a provider in `dots.toml` to support a package manager dots does not know (go, gem, pipx,
@@ -188,6 +213,7 @@ batch     = false
 | `version` | Command printing one package's version, for listing entries that carry none. |
 | `install` | The install command template. |
 | `batch` | `true`: one action installs all ops; `install` must contain `{names}`. |
+| `shell` | `bash`, `sh` or `pwsh`: the shell the command lines run in. Default `/bin/sh` on unix, PowerShell on Windows. |
 
 Parse modes for `installed`:
 
