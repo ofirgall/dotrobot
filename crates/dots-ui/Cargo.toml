@@ -13,7 +13,12 @@ dots-core.workspace = true
 serde_json.workspace = true
 unicode-width = "0.2"
 toml_edit = "0.25"
+
+[target.'cfg(unix)'.dependencies]
 rustix = { version = "1", features = ["termios", "stdio"] }
+
+[target.'cfg(windows)'.dependencies]
+terminal_size = "0.4"
 
 [dev-dependencies]
 tempfile.workspace = true

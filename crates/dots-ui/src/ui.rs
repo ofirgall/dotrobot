@@ -26,16 +26,35 @@ pub struct Term {
 
 impl Term {
     pub fn detect() -> Term {
-        let size = rustix::termios::tcgetwinsize(std::io::stdout())
-            .ok()
-            .filter(|w| w.ws_col > 0);
+        let size = terminal_size();
         Term {
             stdout_tty: std::io::stdout().is_terminal(),
             stderr_tty: std::io::stderr().is_terminal(),
-            width: size.map(|w| usize::from(w.ws_col)),
-            height: size.map(|w| usize::from(w.ws_row)).filter(|h| *h > 0),
+            width: size.map(|(w, _)| w),
+            height: size.map(|(_, h)| h).filter(|h| *h > 0),
         }
     }
+}
+
+/// `(columns, rows)` of the terminal on stdout, `None` when it is not one or reports no width.
+#[cfg(unix)]
+fn terminal_size() -> Option<(usize, usize)> {
+    rustix::termios::tcgetwinsize(std::io::stdout())
+        .ok()
+        .filter(|w| w.ws_col > 0)
+        .map(|w| (usize::from(w.ws_col), usize::from(w.ws_row)))
+}
+
+#[cfg(windows)]
+fn terminal_size() -> Option<(usize, usize)> {
+    terminal_size::terminal_size_of(std::io::stdout())
+        .filter(|(w, _)| w.0 > 0)
+        .map(|(w, h)| (usize::from(w.0), usize::from(h.0)))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn terminal_size() -> Option<(usize, usize)> {
+    None
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

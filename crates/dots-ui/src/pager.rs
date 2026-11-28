@@ -34,8 +34,11 @@ pub fn run_pager(cmd: &str, text: &str) -> bool {
     };
     #[cfg(windows)]
     let mut c = {
+        use std::os::windows::process::CommandExt;
         let mut c = Command::new("cmd");
-        c.arg("/C").arg(cmd);
+        // `raw_arg`: cmd.exe does its own parsing; Rust's quoting would escape the quotes
+        // in a pager command line with backslashes cmd does not understand.
+        c.arg("/C").raw_arg(cmd);
         c
     };
     let Ok(mut child) = c.stdin(Stdio::piped()).spawn() else {
@@ -72,9 +75,16 @@ mod tests {
         let sink = dir.path().join("out.txt");
         let mut ui = Ui::fixed(Tier::Basic, 80);
         ui.height = Some(10);
-        ui.pager = Some(format!("cat > {}", sink.display()));
+        // `cat` does not exist on Windows; `findstr "^"` copies stdin to stdout there.
+        let copy = if cfg!(windows) {
+            "findstr \"^\""
+        } else {
+            "cat"
+        };
+        ui.pager = Some(format!("{copy} > \"{}\"", sink.display()));
         let long = "line\n".repeat(50);
         assert!(page(&ui, &long));
-        assert_eq!(std::fs::read_to_string(sink).unwrap(), long);
+        let got = std::fs::read_to_string(sink).unwrap();
+        assert_eq!(got.replace("\r\n", "\n"), long);
     }
 }
