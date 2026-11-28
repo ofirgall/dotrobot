@@ -89,7 +89,7 @@ pub fn bin_dir(home: &Path) -> PathBuf {
 /// `~/...` for display.
 pub fn tilde(home: &Path, p: &Path) -> String {
     match p.strip_prefix(home) {
-        Ok(rel) => format!("~/{}", rel.display()),
+        Ok(rel) => format!("~/{}", dots_core::paths::slashed(rel)),
         Err(_) => p.display().to_string(),
     }
 }
@@ -150,6 +150,7 @@ pub fn declared(repo: &Repo, resolution: &Resolution, home: &Path) -> Vec<ShimDe
 /// skipping `skip_dir` (the shim directory itself, so a shim never points at another shim).
 pub fn find_bin(bin: &str, path_var: &str, home: &Path, skip_dir: &Path) -> Option<PathBuf> {
     let mut dirs: Vec<PathBuf> = std::env::split_paths(path_var).collect();
+    #[cfg(unix)]
     for d in [
         "/usr/local/bin",
         "/usr/bin",
@@ -162,13 +163,17 @@ pub fn find_bin(bin: &str, path_var: &str, home: &Path, skip_dir: &Path) -> Opti
     dirs.push(home.join(".cargo/bin"));
     dirs.into_iter()
         .filter(|d| d.is_absolute() && d != skip_dir)
-        .map(|d| d.join(bin))
-        .find(|p| is_executable(p))
+        .find_map(|d| dots_core::exe::find_in(&d, bin))
 }
 
-fn is_executable(p: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+#[cfg(unix)]
+fn symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+#[cfg(windows)]
+fn symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::windows::fs::symlink_file(target, link)
 }
 
 /// Point `link` at `target`: written next to it and renamed over, so a reader never sees a
@@ -184,8 +189,7 @@ pub fn make_link(link: &Path, target: &Path) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     let tmp = dir.join(format!(".dots-shim-{}.tmp", std::process::id()));
     let _ = std::fs::remove_file(&tmp);
-    std::os::unix::fs::symlink(target, &tmp)
-        .map_err(|e| format!("cannot link {}: {e}", link.display()))?;
+    symlink(target, &tmp).map_err(|e| format!("cannot link {}: {e}", link.display()))?;
     std::fs::rename(&tmp, link).map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
         format!("cannot link {}: {e}", link.display())

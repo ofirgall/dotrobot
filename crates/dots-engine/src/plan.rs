@@ -1071,8 +1071,14 @@ fn wanted_specs(inp: &Inputs<'_>, provider: &str) -> Vec<dots_providers::Spec> {
 
 /// Relative path of `p` under `base` (for journal logs), or `p` itself.
 pub(crate) fn relative(base: &Path, p: &Path) -> String {
-    p.strip_prefix(base)
-        .unwrap_or(p)
-        .to_string_lossy()
-        .into_owned()
+    // Relative paths land in the journal and state files, which must read the same on every
+    // OS: `/`-separated.
+    match p.strip_prefix(base) {
+        Ok(rel) => rel
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/"),
+        Err(_) => p.to_string_lossy().into_owned(),
+    }
 }

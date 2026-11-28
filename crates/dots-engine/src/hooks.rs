@@ -107,8 +107,10 @@ pub struct NoHooksPhase;
 
 impl HooksPhase for NoHooksPhase {
     fn command(&self, req: &HookRequest<'_>, ctx: &Ctx) -> Result<Cmd, String> {
-        let mut c = Cmd::new("/bin/sh")
-            .args(["-c", req.command])
+        let (sh, flags) = dots_providers::script::platform_shell();
+        let mut c = Cmd::new(sh)
+            .args(flags.iter().copied())
+            .arg(req.command)
             .cwd(req.pkg_dir);
         c.env = ctx.env.clone();
         c.env.insert("DOTS_PKG".into(), req.package.into());

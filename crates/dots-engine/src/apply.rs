@@ -1702,7 +1702,7 @@ fn execute(
                             format!("depends on {dep}")
                         };
                         sudo_skipped_settings.push(item(s, reason));
-                    } else if !(only && !s.root) {
+                    } else if !only || s.root {
                         settings_skipped.push((s.clone(), (*dep).to_string()));
                     }
                 }

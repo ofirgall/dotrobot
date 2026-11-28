@@ -13,6 +13,14 @@ pub struct RunLock {
     _file: File,
 }
 
+/// `run.lock.pid`, next to the lock file (Windows only; see `acquire`).
+#[cfg(windows)]
+fn pid_file(lock: &Path) -> std::path::PathBuf {
+    let mut p = lock.as_os_str().to_owned();
+    p.push(".pid");
+    p.into()
+}
+
 impl RunLock {
     /// Take the lock, or return the `lock-busy` diagnostic naming the holder's pid.
     pub fn acquire(path: &Path) -> Result<RunLock, Diagnostic> {
@@ -53,11 +61,19 @@ impl RunLock {
                 let _ = file.rewind();
                 let _ = write!(file, "{}", std::process::id());
                 let _ = file.flush();
+                #[cfg(windows)]
+                let _ = std::fs::write(pid_file(path), std::process::id().to_string());
                 Ok(RunLock { _file: file })
             }
             Err(TryLockError::WouldBlock) => {
                 let mut text = String::new();
                 let _ = file.read_to_string(&mut text);
+                // A Windows lock is mandatory: the holder's lock covers the whole file, so
+                // the pid cannot be read from it. The holder also wrote it beside the lock.
+                #[cfg(windows)]
+                if text.trim().is_empty() {
+                    text = std::fs::read_to_string(pid_file(path)).unwrap_or_default();
+                }
                 let pid = text.trim();
                 let pid = if pid.is_empty() { "unknown" } else { pid };
                 Err(Diagnostic::from_code("lock-busy", &[("pid", pid)]))

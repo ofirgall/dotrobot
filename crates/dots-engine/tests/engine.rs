@@ -119,6 +119,12 @@ impl dots_resolve::OfferSource for MapOffers {
     }
 }
 
+/// A path as it can sit inside a TOML basic string (and be read by any shell): `/`-separated,
+/// since a Windows path's backslashes would be taken for escapes.
+fn toml_path(p: &Path) -> String {
+    p.display().to_string().replace('\\', "/")
+}
+
 impl<'a> Case<'a> {
     fn new(sb: &'a Sandbox, reg: &'a Registry, files: &'a dyn FilesPhase) -> Self {
         let run_ctx = Ctx {
@@ -2508,7 +2514,7 @@ mod hooks {
         for (event, cmd) in hooks {
             body.push_str(&format!(
                 "{event} = \"{}\"\n",
-                cmd.replace("{order}", &order.display().to_string())
+                cmd.replace("{order}", &toml_path(&order))
             ));
         }
         write(
@@ -2641,6 +2647,7 @@ mod hooks {
     }
 
     #[test]
+    #[cfg(unix)]
     fn a_failing_post_hook_fails_the_run_skips_the_rest_and_is_retried() {
         let (sb, order) = hooked(&[
             ("post_install", "echo post_install >> {order}; exit 3"),
@@ -2803,6 +2810,7 @@ mod hooks {
 
 // ------------------------------------------------------------------ shims
 
+#[cfg(unix)]
 mod shims {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
@@ -3080,7 +3088,7 @@ mod sudo_policy {
             &sb.root.join("packages/rootpkg/package.toml"),
             &format!(
                 "schema = 1\nname = \"rootpkg\"\n[providers.apt]\n[hooks]\npost_install = \"echo rootpkg >> {}\"\n",
-                order.display()
+                toml_path(&order)
             ),
         );
         (sb, order)
