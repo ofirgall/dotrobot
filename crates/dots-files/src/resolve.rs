@@ -17,7 +17,16 @@ fn src_path(pkg_dir: &Path, s: &str, ctx: &FilesCtx) -> PathBuf {
 }
 
 fn label(p: &Path, ctx: &FilesCtx) -> String {
-    p.strip_prefix(&ctx.root).unwrap_or(p).display().to_string()
+    // A repo-relative label is `/`-separated on every OS: it lands in generated file headers
+    // and goldens, which must not differ between machines.
+    match p.strip_prefix(&ctx.root) {
+        Ok(rel) => rel
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/"),
+        Err(_) => p.display().to_string(),
+    }
 }
 
 fn layer(p: PathBuf, ctx: &FilesCtx) -> LayerSrc {

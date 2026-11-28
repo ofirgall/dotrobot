@@ -391,7 +391,7 @@ fn launchd_changed_plist_boots_out_and_back_in_instead_of_kickstart_k() {
         cmds,
         [
             "bootout gui/501/com.x.a",
-            "bootstrap gui/501 /home/u/Library/LaunchAgents/com.x.a.plist",
+            &bootstrap_line(),
             "kickstart gui/501/com.x.a",
         ]
     );
@@ -414,7 +414,7 @@ fn launchd_bootstraps_only_a_job_that_is_not_loaded_and_before_kickstart() {
         launchd_cmds(&s, State::GONE, &none()),
         [
             "enable gui/501/com.x.a",
-            "bootstrap gui/501 /home/u/Library/LaunchAgents/com.x.a.plist",
+            &bootstrap_line(),
             "kickstart gui/501/com.x.a",
         ]
     );
@@ -449,13 +449,7 @@ fn launchd_not_enabled_but_wanted_running_is_bootstrapped_before_it_is_kicked() 
     let mut s = svc("a", "com.x.a", Manager::Launchd);
     s.enabled = false;
     let cmds = launchd_cmds(&s, State::GONE, &none());
-    assert_eq!(
-        cmds,
-        [
-            "bootstrap gui/501 /home/u/Library/LaunchAgents/com.x.a.plist",
-            "kickstart gui/501/com.x.a",
-        ]
-    );
+    assert_eq!(cmds, [&bootstrap_line(), "kickstart gui/501/com.x.a",]);
 }
 
 #[test]
@@ -781,4 +775,13 @@ fn a_failing_step_stops_at_the_first_failed_command() {
     let e = apply(&sys(&r), &steps[0]).unwrap_err();
     assert!(e.contains("no bus"), "{e}");
     assert_eq!(r.count(), 1);
+}
+
+/// The `bootstrap` command line for the sandbox home's plist; the path is built with the
+/// platform's separator.
+fn bootstrap_line() -> String {
+    let plist = std::path::Path::new("/home/u")
+        .join("Library/LaunchAgents")
+        .join("com.x.a.plist");
+    format!("bootstrap gui/501 {}", plist.display())
 }

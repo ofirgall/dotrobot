@@ -32,6 +32,11 @@ pub fn rc_line(shell: Shell, env_file: &Path, home: &Path) -> String {
         Some(r) if r.starts_with('/') || r.starts_with('\\') => ("$HOME", r),
         _ => ("", s.as_ref()),
     };
+    let rest = if pre.is_empty() {
+        std::borrow::Cow::Borrowed(rest)
+    } else {
+        crate::shells::home_relative(rest)
+    };
     let q = format!("\"{pre}{rest}\"");
     match shell {
         Shell::Zsh | Shell::Bash => format!("[ -f {q} ] && . {q}"),

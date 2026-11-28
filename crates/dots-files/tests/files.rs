@@ -161,7 +161,11 @@ fn link_goes_through_active() {
     // second apply is a no-op
     assert_eq!(plan(&[f.clone()], &ctx)[0].action, Action::Unchanged);
     // worktree vanishes: dangling
-    fs::remove_file(e.state.join("active")).unwrap();
+    // (a directory symlink is removed with `remove_dir` on Windows)
+    let active = e.state.join("active");
+    fs::remove_file(&active)
+        .or_else(|_| fs::remove_dir(&active))
+        .unwrap();
     assert_eq!(status(&[f], &ctx)[0].state, FileState::Dangling);
 }
 
@@ -447,7 +451,7 @@ fn ghostty_native_include() {
     .unwrap()
     .unwrap();
     let out = render_layers(&f, &ctx).unwrap();
-    let a = e.state.join("active/pkg/config");
+    let a = e.state.join("active").join("pkg").join("config");
     assert!(
         out.contains(&format!("config-file = {}\n", a.join("common").display())),
         "{out}"

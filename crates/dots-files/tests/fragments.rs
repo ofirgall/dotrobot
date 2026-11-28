@@ -44,7 +44,8 @@ fn gitconfig_composition() {
     let out = render_layers(&files[0], &ctx).unwrap();
     golden(
         "gitconfig-composed.txt",
-        &out.replace(&e.home.display().to_string(), "<HOME>"),
+        &out.replace(&e.home.display().to_string(), "<HOME>")
+            .replace("<HOME>\\", "<HOME>/"),
     );
     assert!(out.contains("[core]") && out.contains("[user]"), "{out}");
     assert!(
@@ -82,7 +83,9 @@ fn gitconfig_composition() {
     );
     golden(
         "gitconfig-without-delta.txt",
-        &after.replace(&e.home.display().to_string(), "<HOME>"),
+        &after
+            .replace(&e.home.display().to_string(), "<HOME>")
+            .replace("<HOME>\\", "<HOME>/"),
     );
     assert!(plan_removals(&plan(&files, &ctx), &ctx, None).is_empty());
 

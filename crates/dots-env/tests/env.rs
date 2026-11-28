@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::path::Path;
+#[cfg(unix)]
 use std::process::Command;
 
 use dots_core::paths::Dirs;
@@ -226,6 +227,7 @@ fn overlay_exposes_fresh_tool_to_later_actions() {
 }
 
 #[test]
+#[cfg(unix)]
 fn shell_smoke() {
     let t = tempfile::tempdir().unwrap();
     let home = t.path();

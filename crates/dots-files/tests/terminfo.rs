@@ -128,7 +128,10 @@ fn compile_on_apply() {
     let tic = format!(
         "tic -x -o {} {}",
         e.home.join(".terminfo").display(),
-        e.root.join("herdr/herdr-256color.terminfo").display()
+        e.root
+            .join("herdr")
+            .join("herdr-256color.terminfo")
+            .display()
     );
     assert!(calls.contains(&tic), "{calls:?}");
     assert!(e.home.join(".terminfo/h/herdr-256color").is_file());

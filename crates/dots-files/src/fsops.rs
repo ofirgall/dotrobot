@@ -104,13 +104,35 @@ fn symlink(target: &Path, link: &Path) -> io::Result<()> {
 
 /// Create `link` -> `target`, replacing whatever symlink or file is at `link`, atomically
 /// (`link.dots-tmp` then `rename`). It does not replace a directory.
+///
+/// Windows cannot rename over an existing directory symlink, so there an existing link is
+/// removed first (the swap is then two steps, not one).
 pub fn atomic_symlink(target: &Path, link: &Path) -> io::Result<()> {
     let tmp = tmp_name(link);
-    let _ = fs::remove_file(&tmp);
+    let _ = remove_link(&tmp);
     symlink(target, &tmp)?;
+    #[cfg(windows)]
+    if fs::symlink_metadata(link).is_ok_and(|m| m.file_type().is_symlink()) {
+        remove_link(link)?;
+    }
     fs::rename(&tmp, link).inspect_err(|_| {
-        let _ = fs::remove_file(&tmp);
+        let _ = remove_link(&tmp);
     })
+}
+
+/// Remove a file or a symlink. On Windows a symlink to a directory is a directory entry and
+/// `remove_file` refuses it, so a symlink that `remove_file` could not remove goes through
+/// `remove_dir` (which removes the link, never what it points at).
+pub fn remove_link(p: &Path) -> io::Result<()> {
+    match fs::remove_file(p) {
+        Err(e)
+            if cfg!(windows)
+                && fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink()) =>
+        {
+            fs::remove_dir(p).map_err(|_| e)
+        }
+        r => r,
+    }
 }
 
 pub fn lexists(p: &Path) -> bool {
@@ -154,7 +176,7 @@ pub fn copy_recursive(from: &Path, to: &Path) -> io::Result<()> {
 pub fn remove_any(p: &Path) -> io::Result<()> {
     match fs::symlink_metadata(p) {
         Ok(m) if m.is_dir() => fs::remove_dir_all(p),
-        Ok(_) => fs::remove_file(p),
+        Ok(_) => remove_link(p),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e),
     }

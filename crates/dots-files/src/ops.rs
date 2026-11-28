@@ -314,7 +314,7 @@ fn remove(step: &FileStep, ctx: &FilesCtx) -> FileOutcome {
         }
         Mode::Link | Mode::Render => {
             if fs::symlink_metadata(dst).is_ok_and(|m| m.file_type().is_symlink()) {
-                fs::remove_file(dst)?;
+                crate::fsops::remove_link(dst)?;
             } else if lexists(dst) {
                 return Ok(false); // replaced by something that is not ours
             }
