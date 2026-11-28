@@ -1106,6 +1106,22 @@ fn execute(
     obs.planned(&plan_v);
     let stop: &AtomicBool = &cfg.stop;
     let mut overlay = env.map(dots_env::EnvOverlay::new);
+    // A dependency installed by an earlier run has no step now, but its `[env]` (a tool on
+    // `PATH`, `ZIG=...`) still has to reach what builds against it: seed the overlay with every
+    // active package that is already satisfied. Packages that install in this run join as they
+    // finish. Resolution covers the whole profile, so a targeted apply sees its deps too.
+    if let Some(o) = overlay.as_mut() {
+        for p in inp.resolution.active() {
+            let pending = plan_v.steps.iter().any(|s| s.package == p.name)
+                || plan_v.unplanned.iter().any(|(n, _)| *n == p.name);
+            if pending {
+                continue;
+            }
+            if let Some(pkg) = inp.repo.packages.get(&p.name) {
+                o.add_package(&pkg.env);
+            }
+        }
+    }
     let can_prompt = prompter.can_prompt() && !cfg.yes;
 
     // One sudo prompt for the whole run.
