@@ -1,4 +1,5 @@
 //! Tests for user-defined declarative providers.
+#![cfg_attr(not(unix), allow(dead_code, unused_imports))] // helpers of unix-only tests
 
 use std::fs;
 use std::path::Path;
@@ -88,10 +89,7 @@ fn fact_placeholders_and_shell_syntax() {
     };
     let p = CustomProvider::new(CustomDef::from_json("go", &t).unwrap(), &facts);
     let a = p.plan(&[install_op("kv", None, None)]).unwrap();
-    assert_eq!(
-        a[0].argv,
-        ["/bin/sh", "-c", "curl -L https://x/linux-x86_64/kv | tar x"]
-    );
+    assert_eq!(a[0].argv, sh("curl -L https://x/linux-x86_64/kv | tar x"));
     assert_eq!(p.caps().exact_version, Support::No);
     assert!(p.plan(&[install_op("kv", None, Some("1"))]).is_err());
 }
@@ -164,13 +162,11 @@ fn ctx_with(r: &Arc<RecordingRunner>) -> Ctx {
 }
 
 #[test]
+#[cfg(unix)]
 fn availability_ready_bootstrap_or_unsupported() {
     let facts = Facts::default();
     let r = Arc::new(RecordingRunner::new());
-    r.on(
-        &["/bin/sh", "-c", "command -v go"],
-        Output::ok("/usr/local/go/bin/go\n"),
-    );
+    r.on(&sh("command -v go"), Output::ok("/usr/local/go/bin/go\n"));
     assert_eq!(
         go().availability_in(&ctx_with(&r), &facts),
         Availability::Ready {
@@ -178,7 +174,7 @@ fn availability_ready_bootstrap_or_unsupported() {
         }
     );
     let r = Arc::new(RecordingRunner::new());
-    r.on(&["/bin/sh", "-c", "command -v go"], Output::fail(1, ""));
+    r.on(&sh("command -v go"), Output::fail(1, ""));
     assert_eq!(
         go().availability_in(&ctx_with(&r), &facts),
         Availability::Bootstrap { pkg: "go".into() }
@@ -199,7 +195,7 @@ fn provider_with_parse(
     let t = json!({"install": "x {name}", "installed": {"cmd": "list", "parse": parse}});
     let p = CustomProvider::new(CustomDef::from_json("x", &t).unwrap(), &Facts::default());
     let r = Arc::new(RecordingRunner::new());
-    r.on(&["/bin/sh", "-c", "list"], Output::ok(out));
+    r.on(&sh("list"), Output::ok(out));
     p.installed(&ctx_with(&r)).unwrap()
 }
 
@@ -248,13 +244,9 @@ fn parse_regex_named_and_numbered_groups() {
 #[test]
 fn version_command_fills_missing_versions() {
     let r = Arc::new(RecordingRunner::new());
-    r.on(&["/bin/sh", "-c", "ls ~/go/bin"], Output::ok("y\n"));
+    r.on(&sh("ls ~/go/bin"), Output::ok("y\n"));
     r.on(
-        &[
-            "/bin/sh",
-            "-c",
-            "go version -m ~/go/bin/y | awk '/^\\tmod/{print $3}'",
-        ],
+        &sh("go version -m ~/go/bin/y | awk '/^\\tmod/{print $3}'"),
         Output::ok("v0.4.1\n"),
     );
     let m = go().installed(&ctx_with(&r)).unwrap();
@@ -288,6 +280,7 @@ impl Runner for FakeGo {
     }
 }
 
+#[cfg(unix)]
 conformance_test!(custom_go_provider_conforms, {
     let backend = FakeGo::default();
     backend
@@ -306,10 +299,11 @@ conformance_test!(custom_go_provider_conforms, {
 /// fails and the tool comes from another package of the run, and `installed()` is empty (not
 /// an error) until then.
 #[test]
+#[cfg(unix)]
 fn availability_without_a_context_probes_available_once() {
     let facts = Facts::default();
     let r = Arc::new(RecordingRunner::new());
-    r.on(&["/bin/sh", "-c", "command -v go"], Output::fail(1, ""));
+    r.on(&sh("command -v go"), Output::fail(1, ""));
     let p = CustomProvider::new(CustomDef::from_json("go", &go_table()).unwrap(), &facts)
         .with_probe(ctx_with(&r));
     for _ in 0..3 {
@@ -333,10 +327,7 @@ fn availability_without_a_context_probes_available_once() {
     assert!(!r.lines().iter().any(|l| l.contains("ls ~/go/bin")));
 
     let r = Arc::new(RecordingRunner::new());
-    r.on(
-        &["/bin/sh", "-c", "command -v go"],
-        Output::ok("/usr/local/go/bin/go\n"),
-    );
+    r.on(&sh("command -v go"), Output::ok("/usr/local/go/bin/go\n"));
     let p = CustomProvider::new(CustomDef::from_json("go", &go_table()).unwrap(), &facts)
         .with_probe(ctx_with(&r));
     assert_eq!(
@@ -427,4 +418,14 @@ fn batched_names_use_the_block_source_too() {
         ])
         .unwrap();
     assert_eq!(a[0].argv, ["gem", "install", "x/a", "b"]);
+}
+
+/// The argv a declarative provider's shell line runs as: the platform shell, its flags, the line.
+fn sh(line: &'static str) -> Vec<&'static str> {
+    let (shell, flags) = dots_providers::script::platform_shell();
+    let shell: &'static str = Box::leak(shell.to_string_lossy().into_owned().into_boxed_str());
+    let mut v = vec![shell];
+    v.extend(flags.iter().copied());
+    v.push(line);
+    v
 }

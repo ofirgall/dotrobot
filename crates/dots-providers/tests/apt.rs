@@ -5,6 +5,9 @@
 //! * `DOTS_CONTAINER_TESTS=1 cargo test -p dots-providers --test apt container_matrix` drives
 //!   Docker: it runs the `#[ignore]`d `real_*` tests inside Ubuntu 22.04 and 24.04.
 
+// apt, dpkg and sudo exist only on Debian-family Linux; the provider is unavailable elsewhere.
+#![cfg(unix)]
+
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};

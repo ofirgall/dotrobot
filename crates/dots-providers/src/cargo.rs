@@ -21,16 +21,46 @@ use crate::{
     Provider, ProviderError, Result, Spec, Support,
 };
 
+/// Carries `VAR=value` in front of a command in a plan. Windows has no `env`: there the
+/// variable travels in the process environment instead (see `exec`).
+#[cfg(unix)]
 const ENV: &str = "/usr/bin/env";
 const FETCH_WITH_CLI: &str = "CARGO_NET_GIT_FETCH_WITH_CLI";
 const REVS_FILE: &str = ".dots-path-revs.json";
 
+#[cfg(unix)]
 pub(crate) const SYSTEM_PATH: &str =
     "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
+/// What a Windows tool needs to start: the system directories (the `PATH` search order cannot
+/// be relied on in a sanitized environment).
+#[cfg(windows)]
+pub(crate) const SYSTEM_PATH: &str = r"C:\Windows\System32;C:\Windows";
 
-/// First existing file among `candidates`.
+/// First existing file among `candidates`. On Windows `cargo` also finds `cargo.exe`, and the
+/// path returned is the real file.
 pub(crate) fn first_file(candidates: impl IntoIterator<Item = PathBuf>) -> Option<PathBuf> {
-    candidates.into_iter().find(|p| p.is_file())
+    candidates.into_iter().find_map(|p| {
+        if p.is_file() {
+            return Some(p);
+        }
+        if cfg!(windows) {
+            let mut exe = p.into_os_string();
+            exe.push(".exe");
+            let exe = PathBuf::from(exe);
+            return exe.is_file().then_some(exe);
+        }
+        None
+    })
+}
+
+/// A Windows program directory (`ProgramFiles`, `LOCALAPPDATA`, ...) joined with `sub`:
+/// the places installers put tools, found from the environment instead of a hardcoded drive.
+#[cfg(windows)]
+pub(crate) fn windows_dirs(vars: &[&str], sub: &str) -> Vec<PathBuf> {
+    vars.iter()
+        .filter_map(std::env::var_os)
+        .map(|d| PathBuf::from(d).join(sub))
+        .collect()
 }
 
 /// A version requirement as a command-line suffix: `1.2.3` becomes `==1.2.3`; anything that
@@ -54,7 +84,8 @@ pub(crate) fn command_env(ctx: &Ctx, prefix: Option<&Path>) -> BTreeMap<String, 
         parts.push(p.clone());
     }
     parts.push(SYSTEM_PATH.to_string());
-    env.insert("PATH".into(), parts.join(":"));
+    let sep = if cfg!(windows) { ";" } else { ":" };
+    env.insert("PATH".into(), parts.join(sep));
     if !env.contains_key("HOME") && !ctx.home.as_os_str().is_empty() {
         env.insert("HOME".into(), ctx.home.to_string_lossy().into_owned());
     }
@@ -278,6 +309,7 @@ impl Provider for CargoProvider {
                     OpKind::Install | OpKind::Upgrade => {
                         let o = &op.spec.opts;
                         let mut a = Vec::new();
+                        #[cfg(unix)]
                         if op.spec.flag("git_fetch_with_cli", false) {
                             a.extend([ENV.to_string(), format!("{FETCH_WITH_CLI}=true")]);
                         }
@@ -351,6 +383,7 @@ impl Provider for CargoProvider {
     fn exec(&self, ctx: &Ctx, action: &Action) -> Result<Outcome> {
         let home = cargo_home(&ctx.home, &ctx.env);
         // `env VAR=1 cargo ...` carries the program at index 2.
+        #[cfg(unix)]
         let idx = if action.argv.first().map(String::as_str) == Some(ENV) {
             action
                 .argv
@@ -361,12 +394,24 @@ impl Provider for CargoProvider {
         } else {
             0
         };
+        #[cfg(not(unix))]
+        let idx = 0;
         let action = &resolve_bare(action, idx, "cargo", resolve_bin(&ctx.home, &ctx.env))?;
         let bin_dir = Path::new(&action.argv[idx]).parent().map(Path::to_path_buf);
         let home_str = home.to_string_lossy();
         let mut extra: Vec<(&str, &str)> = vec![("CARGO_HOME", &home_str)];
         if let Some(v) = fetch_with_cli(ctx) {
             extra.push((FETCH_WITH_CLI, v));
+        }
+        // Where the plan has no `env VAR=1` prefix (Windows), the variable goes in the process
+        // environment.
+        if cfg!(not(unix))
+            && action
+                .ops
+                .iter()
+                .any(|o| o.spec.flag("git_fetch_with_cli", false))
+        {
+            extra.push((FETCH_WITH_CLI, "true"));
         }
         let out = exec_action(ctx, action, bin_dir.as_deref(), &extra)?;
         if !out.success && !ctx.dry_run && action.argv.iter().any(|a| a == "--locked") {

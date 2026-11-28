@@ -8,7 +8,7 @@ use dots_testkit::RecordingRunner;
 use dots_testkit::{ConformanceFixture, conformance_test};
 
 fn git(dir: &Path, args: &[&str]) -> String {
-    let out = Command::new("/usr/bin/git")
+    let out = Command::new(git_path().expect("git"))
         .current_dir(dir)
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_SYSTEM", "/dev/null")
@@ -55,8 +55,27 @@ fn bare_repo(root: &Path) -> (PathBuf, String, String) {
     (bare, first, second)
 }
 
+/// The real git these tests drive: `/usr/bin/git`, or Git for Windows.
+fn git_path() -> Option<PathBuf> {
+    #[cfg(unix)]
+    let cands = vec![PathBuf::from("/usr/bin/git")];
+    #[cfg(windows)]
+    let cands: Vec<PathBuf> = ["ProgramFiles", "ProgramW6432", "LOCALAPPDATA"]
+        .iter()
+        .filter_map(std::env::var_os)
+        .flat_map(|d| {
+            let d = PathBuf::from(d);
+            [
+                d.join("Git").join("cmd").join("git.exe"),
+                d.join("Programs").join("Git").join("cmd").join("git.exe"),
+            ]
+        })
+        .collect();
+    cands.into_iter().find(|p| p.is_file())
+}
+
 fn have_git() -> bool {
-    Path::new("/usr/bin/git").exists()
+    git_path().is_some()
 }
 
 conformance_test!(git_conforms, {
@@ -141,7 +160,10 @@ fn plan_shapes_and_unknown_repo() {
     );
     assert_eq!(
         p.plan(&[o(OpKind::Install, Some("0123abc"))]).unwrap()[0].argv[0],
-        "/bin/sh"
+        dots_providers::script::platform_shell()
+            .0
+            .to_string_lossy()
+            .as_ref()
     );
     assert!(
         p.plan(&[Op {
@@ -168,7 +190,7 @@ fn availability_resolves_own_binary() {
     let a = GitProvider::new().availability_in(&ctx, &Default::default());
     assert_eq!(
         matches!(a, Availability::Ready { .. }),
-        Path::new("/usr/bin/git").exists()
+        have_git()
             || Path::new("/opt/homebrew/bin/git").exists()
             || Path::new("/usr/local/bin/git").exists()
     );
@@ -246,6 +268,10 @@ fn exec_resolves_bare_program() {
     let sh = p.plan(&[o(Some("0123abc"))]).unwrap().remove(0);
     assert!(p.exec(&ctx, &sh).unwrap().success);
     let c = &rec.commands()[0];
-    assert_eq!(c.program, PathBuf::from("/bin/sh"));
+    assert_eq!(c.program, dots_providers::script::platform_shell().0);
+    #[cfg(unix)]
     assert!(Path::new(&c.args[2]).is_absolute(), "{:?}", c.args);
+    // On Windows the resolved git is quoted into the PowerShell text.
+    #[cfg(windows)]
+    assert!(!c.args.last().unwrap().contains("& 'git'"), "{:?}", c.args);
 }

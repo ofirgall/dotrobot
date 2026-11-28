@@ -71,6 +71,14 @@ fn op(kind: OpKind, name: &str, source: Option<&str>, version: Option<&str>) -> 
     }
 }
 
+/// `dir` joined with `leaf` by the platform's rules, as the provider builds paths.
+fn joined(dir: &str, leaf: &str) -> String {
+    std::path::Path::new(dir)
+        .join(leaf)
+        .to_string_lossy()
+        .into_owned()
+}
+
 fn argv(p: &UvProvider, o: Op) -> Vec<String> {
     p.plan(&[o]).unwrap().remove(0).argv
 }
@@ -138,6 +146,7 @@ fn library_mode_installs_into_system_python() {
 /// ARCHITECTURE 5.2: `kind = "venv"` + `requirements` creates `~/.local/share/dots/venvs/<name>`
 /// and installs the requirements into it (it used to be refused as "not supported yet").
 #[test]
+#[cfg(unix)]
 fn venv_kind_creates_the_venv_and_installs_requirements() {
     let p = UvProvider::with_bin("/u/uv").with_venv_root("/h/venvs");
     let spec = "kind=venv;requirements=requirements.txt;pkg_dir=/repo/packages/scripts";
@@ -148,7 +157,12 @@ fn venv_kind_creates_the_venv_and_installs_requirements() {
     assert!(actions[0].ops.is_empty(), "venv creation is a prep action");
     assert_eq!(
         actions[0].argv,
-        ["/u/uv", "venv", "--allow-existing", "/h/venvs/scripts"]
+        [
+            "/u/uv",
+            "venv",
+            "--allow-existing",
+            &joined("/h/venvs", "scripts")
+        ]
     );
     assert_eq!(actions[1].ops.len(), 1);
     assert_eq!(
@@ -350,7 +364,12 @@ fn path_and_git_sources() {
     );
     assert_eq!(
         argv(&p, path.clone()),
-        ["/u/uv", "tool", "install", "/repo/packages/x/mytool"]
+        [
+            "/u/uv",
+            "tool",
+            "install",
+            &joined("/repo/packages/x", "mytool")
+        ]
     );
     let up = Op {
         kind: OpKind::Upgrade,
@@ -363,7 +382,7 @@ fn path_and_git_sources() {
             "tool",
             "install",
             "--force",
-            "/repo/packages/x/mytool"
+            &joined("/repo/packages/x", "mytool")
         ]
     );
     let git = op(

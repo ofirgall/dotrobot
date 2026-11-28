@@ -52,7 +52,9 @@ pub(crate) fn crate_version(dir: &Path) -> Option<String> {
 }
 
 fn git_bin() -> Option<PathBuf> {
-    GIT.iter().map(PathBuf::from).find(|p| p.is_file())
+    // The same lookup the git provider does (Windows locations included).
+    crate::git::resolve_bin(Path::new(""))
+        .or_else(|| GIT.iter().map(PathBuf::from).find(|p| p.is_file()))
 }
 
 /// The full version of the source in `dir` right now. Without git, just the crate version.

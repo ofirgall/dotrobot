@@ -255,10 +255,88 @@ fn own_group(cmd: &Cmd) -> bool {
     cmd.stdin != Stdin::Inherit && !KEEP_TTY.with(|k| k.get())
 }
 
+/// A Windows job object holding the child and everything it starts: terminating it kills the
+/// whole tree, including processes whose parent link `taskkill /T` cannot follow (MSYS
+/// shells fork children that way). It does not kill on close: a script that leaves a
+/// background process running on purpose keeps it.
+#[cfg(windows)]
+mod job {
+    use std::os::windows::io::AsRawHandle;
+
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, TerminateJobObject,
+    };
+
+    pub struct Job(HANDLE);
+
+    // SAFETY: a job handle is just a kernel object reference; any thread may use it.
+    #[allow(unsafe_code)]
+    unsafe impl Send for Job {}
+    #[allow(unsafe_code)]
+    unsafe impl Sync for Job {}
+
+    impl Job {
+        /// A new job containing `child`, or `None` when the system refuses (the caller falls
+        /// back to `taskkill`).
+        #[allow(unsafe_code)]
+        pub fn containing(child: &std::process::Child) -> Option<Job> {
+            // SAFETY: plain Win32 calls with a null security descriptor and name; the handle
+            // is checked before use and closed in `Drop`. `child`'s handle is valid while
+            // the `Child` is alive, which the borrow guarantees.
+            unsafe {
+                let h = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+                if h.is_null() {
+                    return None;
+                }
+                let job = Job(h);
+                (AssignProcessToJobObject(h, child.as_raw_handle() as HANDLE) != 0).then_some(job)
+            }
+        }
+
+        #[allow(unsafe_code)]
+        pub fn terminate(&self) {
+            // SAFETY: `self.0` is the live job handle created in `containing`.
+            unsafe {
+                TerminateJobObject(self.0, 1);
+            }
+        }
+    }
+
+    impl Drop for Job {
+        #[allow(unsafe_code)]
+        fn drop(&mut self) {
+            // SAFETY: the handle is owned by this value and closed exactly once.
+            unsafe {
+                CloseHandle(self.0);
+            }
+        }
+    }
+}
+
+/// What groups the child's descendants for a timeout kill: a job object on Windows (when one
+/// could be made), nothing elsewhere (unix kills the process group by id).
+#[cfg(windows)]
+type Group = Option<job::Job>;
+#[cfg(not(windows))]
+type Group = ();
+
+#[cfg(windows)]
+fn join_group(child: &std::process::Child, cmd: &Cmd) -> Group {
+    if own_group(cmd) {
+        job::Job::containing(child)
+    } else {
+        None
+    }
+}
+#[cfg(not(windows))]
+fn join_group(_child: &std::process::Child, _cmd: &Cmd) -> Group {}
+
 /// Kill the command's process group (the child leads its own group, see `run`), so a
 /// timed-out script does not leave orphans holding its output open. A child in the
 /// terminal's group is killed alone (by the caller).
-fn kill_tree(child: &std::process::Child, cmd: &Cmd) {
+#[cfg_attr(not(windows), allow(unused_variables))]
+fn kill_tree(child: &std::process::Child, cmd: &Cmd, group: &Group) {
     #[cfg(unix)]
     if own_group(cmd) {
         let _ = Command::new("/bin/sh")
@@ -269,8 +347,23 @@ fn kill_tree(child: &std::process::Child, cmd: &Cmd) {
             .stderr(Stdio::null())
             .status();
     }
-    #[cfg(not(unix))]
-    let _ = (child, cmd);
+    // Windows has no process groups to signal: `taskkill /T` walks the child's process tree
+    // (children carry their parent's pid), `/F` forces it.
+    #[cfg(windows)]
+    if own_group(cmd) {
+        // The tree walk first, while the parent links are intact; the job then takes whatever
+        // that missed.
+        let _ = Command::new("taskkill")
+            .args(["/T", "/F", "/PID"])
+            .arg(child.id().to_string())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        if let Some(j) = group {
+            j.terminate();
+        }
+    }
 }
 
 /// Run `setsid()` in the child between fork and exec.
@@ -334,7 +427,18 @@ impl Runner for RealRunner {
             use std::os::unix::process::CommandExt;
             c.process_group(0);
         }
+        // Windows has no controlling-terminal prompt to dodge (ssh and git ask through the
+        // console, which `CREATE_NO_WINDOW` leaves the child without), so there is no
+        // session to detach: a non-interactive command just gets no console of its own.
+        #[cfg(windows)]
+        if !keeps_tty(cmd) {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            c.creation_flags(CREATE_NO_WINDOW);
+        }
         let mut child = c.spawn().map_err(spawn_err)?;
+        #[cfg_attr(not(windows), allow(clippy::let_unit_value))]
+        let group = join_group(&child, cmd);
         if let (Stdin::Bytes(b), Some(mut si)) = (&cmd.stdin, child.stdin.take()) {
             let b = b.clone();
             thread::spawn(move || {
@@ -374,7 +478,7 @@ impl Runner for RealRunner {
             }
             if cmd.timeout.is_some_and(|t| start.elapsed() >= t) {
                 timed_out = true;
-                kill_tree(&child, cmd);
+                kill_tree(&child, cmd, &group);
                 let _ = child.kill();
                 let _ = child.wait();
                 break -1;
@@ -397,17 +501,36 @@ impl Runner for RealRunner {
 mod tests {
     use super::*;
 
+    /// A command line for the platform's shell: `/bin/sh -c` on unix, `cmd.exe /C` on Windows.
+    fn shell(line: &str) -> Cmd {
+        #[cfg(unix)]
+        return Cmd::new("/bin/sh").arg("-c").arg(line);
+        #[cfg(windows)]
+        return Cmd::new(system32("cmd.exe")).arg("/C").arg(line);
+    }
+
+    #[cfg(windows)]
+    fn system32(exe: &str) -> PathBuf {
+        PathBuf::from(std::env::var_os("SystemRoot").expect("SystemRoot"))
+            .join("System32")
+            .join(exe)
+    }
+
+    /// Sleeps well past the timeouts the tests use.
+    fn sleep_a_while() -> Cmd {
+        #[cfg(unix)]
+        return Cmd::new("/bin/sleep").arg("5");
+        #[cfg(windows)]
+        return shell("ping -n 6 127.0.0.1 > nul");
+    }
+
     #[test]
     fn real_runner_runs_and_times_out() {
         let r = RealRunner;
-        let o = r.run(&Cmd::new("/bin/echo").arg("hi")).unwrap();
-        assert!(o.success() && o.stdout == "hi\n");
+        let o = r.run(&shell("echo hi")).unwrap();
+        assert!(o.success() && o.stdout.trim_end() == "hi");
         let o = r
-            .run(
-                &Cmd::new("/bin/sleep")
-                    .arg("5")
-                    .timeout(Some(Duration::from_millis(50))),
-            )
+            .run(&sleep_a_while().timeout(Some(Duration::from_millis(50))))
             .unwrap();
         assert!(o.timed_out && !o.success());
         assert!(r.run(&Cmd::new("/nonexistent/x")).is_err());
@@ -432,18 +555,22 @@ mod tests {
         let seen = Arc::new(Mutex::new(Vec::<String>::new()));
         let s = seen.clone();
         let sink: LineSink = Arc::new(move |l: &str| s.lock().unwrap().push(l.to_string()));
-        let o = with_line_sink(Some(sink), || {
-            RealRunner
-                .run(
-                    &Cmd::new("/bin/sh")
-                        .arg("-c")
-                        .arg("echo one; printf 'two\\rthree\\n' >&2"),
-                )
-                .unwrap()
-        });
+        #[cfg(unix)]
+        let line = "echo one; printf 'two\\rthree\\n' >&2";
+        #[cfg(windows)]
+        let line = "echo one& echo two>&2& echo three>&2";
+        let o = with_line_sink(Some(sink), || RealRunner.run(&shell(line)).unwrap());
         // The collected output is untouched.
-        assert_eq!(o.stdout, "one\n");
-        assert_eq!(o.stderr, "two\rthree\n");
+        #[cfg(unix)]
+        {
+            assert_eq!(o.stdout, "one\n");
+            assert_eq!(o.stderr, "two\rthree\n");
+        }
+        #[cfg(windows)]
+        {
+            assert_eq!(o.stdout.trim_end(), "one");
+            assert_eq!(o.stderr.replace("\r\n", "\n").trim_end(), "two\nthree");
+        }
         let seen = seen.lock().unwrap();
         for want in ["one", "two", "three"] {
             assert!(seen.iter().any(|l| l == want), "{seen:?}");
@@ -470,6 +597,23 @@ mod tests {
         assert!(t.elapsed() < Duration::from_secs(5));
     }
 
+    /// Windows: a timeout kills the whole tree (`taskkill /T`), so a grandchild does not hold
+    /// the output pipes open until it ends on its own.
+    #[cfg(windows)]
+    #[test]
+    fn a_timeout_kills_the_process_tree() {
+        let t = Instant::now();
+        // cmd starts ping (a grandchild of the runner) that outlives cmd by 30 seconds.
+        let o = RealRunner
+            .run(
+                &shell("ping -n 30 127.0.0.1 > nul & ping -n 30 127.0.0.1 > nul")
+                    .timeout(Some(Duration::from_millis(500))),
+            )
+            .unwrap();
+        assert!(o.timed_out);
+        assert!(t.elapsed() < Duration::from_secs(10), "{:?}", t.elapsed());
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_timeout_still_kills_a_detached_tree() {
@@ -491,12 +635,33 @@ mod tests {
         let probe = |mut cmd: Cmd| {
             // `clear_env` makes the process environment irrelevant to the test.
             cmd.clear_env = true;
-            let o = RealRunner
-                .run(&cmd.arg("echo \"$GIT_TERMINAL_PROMPT|$GIT_SSH_COMMAND\""))
-                .unwrap();
-            o.stdout.trim().to_string()
+            #[cfg(unix)]
+            {
+                let o = RealRunner
+                    .run(&cmd.arg("echo \"$GIT_TERMINAL_PROMPT|$GIT_SSH_COMMAND\""))
+                    .unwrap();
+                o.stdout.trim().to_string()
+            }
+            // `set GIT` lists the `GIT*` variables as `NAME=value` lines.
+            #[cfg(windows)]
+            {
+                let o = RealRunner.run(&cmd.arg("set GIT")).unwrap();
+                let get = |name: &str| {
+                    o.stdout
+                        .lines()
+                        .find_map(|l| l.strip_prefix(&format!("{name}=")))
+                        .unwrap_or("")
+                        .to_string()
+                };
+                format!("{}|{}", get("GIT_TERMINAL_PROMPT"), get("GIT_SSH_COMMAND"))
+            }
         };
-        let sh = || Cmd::new("/bin/sh").arg("-c");
+        let sh = || {
+            #[cfg(unix)]
+            return Cmd::new("/bin/sh").arg("-c");
+            #[cfg(windows)]
+            return Cmd::new(system32("cmd.exe")).arg("/C");
+        };
         assert_eq!(probe(sh()), "0|ssh -o BatchMode=yes");
         let c = sh()
             .env("GIT_SSH_COMMAND", "ssh -i k")
@@ -507,7 +672,21 @@ mod tests {
 
     #[test]
     fn stdin_is_null_by_default() {
-        let o = RealRunner.run(&Cmd::new("/bin/cat")).unwrap();
-        assert!(o.success() && o.stdout.is_empty());
+        #[cfg(unix)]
+        {
+            let o = RealRunner.run(&Cmd::new("/bin/cat")).unwrap();
+            assert!(o.success() && o.stdout.is_empty());
+        }
+        // PowerShell prints how many characters it could read from stdin.
+        #[cfg(windows)]
+        {
+            let ps = Cmd::new(system32("WindowsPowerShell/v1.0/powershell.exe")).args([
+                "-NoProfile",
+                "-Command",
+                "[Console]::In.ReadToEnd().Length",
+            ]);
+            let o = RealRunner.run(&ps).unwrap();
+            assert!(o.success() && o.stdout.trim() == "0", "{o:?}");
+        }
     }
 }

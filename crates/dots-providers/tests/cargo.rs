@@ -322,7 +322,9 @@ fn path_source_installs_from_the_package_dir() {
             "install",
             "--locked",
             "--path",
-            "/repo/packages/herdr/herdr-last-tab"
+            &std::path::Path::new("/repo/packages/herdr")
+                .join("herdr-last-tab")
+                .to_string_lossy()
         ]
     );
     let up = Op {
@@ -338,6 +340,7 @@ fn path_source_installs_from_the_package_dir() {
 }
 
 #[test]
+#[cfg(unix)]
 fn private_git_crate_sets_fetch_with_cli() {
     let p = CargoProvider::with_bin("/c/cargo");
     let o = op(

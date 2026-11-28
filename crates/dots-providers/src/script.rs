@@ -147,6 +147,59 @@ pub fn unpinned_curl_pipe(text: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// PowerShell on Windows, from known locations (never via `PATH`): PowerShell 7 installed
+/// machine-wide, the Store/winget app-execution alias in `WindowsApps`, then the Windows
+/// PowerShell 5.1 that ships with the OS (it takes the same `-NoProfile -NonInteractive
+/// -Command` flags).
+#[cfg(windows)]
+pub fn windows_pwsh() -> Option<PathBuf> {
+    let mut c =
+        crate::cargo::windows_dirs(&["ProgramFiles", "ProgramW6432"], r"PowerShell\7\pwsh.exe");
+    c.extend(crate::cargo::windows_dirs(
+        &["LOCALAPPDATA"],
+        r"Microsoft\WindowsApps\pwsh.exe",
+    ));
+    c.extend(crate::cargo::windows_dirs(
+        &["SystemRoot"],
+        r"System32\WindowsPowerShell\v1.0\powershell.exe",
+    ));
+    c.into_iter().find(|p| p.is_file())
+}
+
+/// `bash` or `sh` on Windows: the ones Git for Windows installs (`shell = "bash"` in a
+/// package runs its scripts there; the default shell on Windows is PowerShell).
+#[cfg(windows)]
+fn windows_git_shell(kind: &str) -> Option<PathBuf> {
+    let exe = format!("{kind}.exe");
+    let mut c = Vec::new();
+    for sub in [r"Git\bin", r"Git\usr\bin"] {
+        c.extend(crate::cargo::windows_dirs(
+            &["ProgramFiles", "ProgramW6432"],
+            &format!(r"{sub}\{exe}"),
+        ));
+    }
+    c.extend(crate::cargo::windows_dirs(
+        &["LOCALAPPDATA"],
+        &format!(r"Programs\Git\bin\{exe}"),
+    ));
+    let found = c.into_iter().find(|p| p.is_file());
+    // A box without bash still runs a script written for plain sh.
+    found.or_else(|| (kind == "bash").then(|| windows_git_shell("sh")).flatten())
+}
+
+/// The shell that runs a command line, as `(program, flags before the line)`: `/bin/sh -c`
+/// on unix, PowerShell on Windows (the same lookup as the script provider). For callers that
+/// have a line of shell text and no package shell setting (hooks, declarative providers).
+pub fn platform_shell() -> (PathBuf, &'static [&'static str]) {
+    #[cfg(unix)]
+    return (PathBuf::from("/bin/sh"), &["-c"]);
+    #[cfg(windows)]
+    return (
+        windows_pwsh().unwrap_or_else(|| PathBuf::from("powershell.exe")),
+        &["-NoProfile", "-NonInteractive", "-Command"],
+    );
+}
+
 /// Lower-case 64-digit hex of a `sha256:`-optional hash.
 pub fn normalize_hash(h: &str) -> Option<String> {
     let h = h.trim().strip_prefix("sha256:").unwrap_or(h.trim());
@@ -280,6 +333,7 @@ impl PrivateDir {
                 N.fetch_add(1, Ordering::Relaxed)
             );
             let dir = std::env::temp_dir().join(name);
+            #[allow(unused_mut)] // only the unix branch sets a mode
             let mut b = fs::DirBuilder::new();
             #[cfg(unix)]
             {
@@ -475,11 +529,14 @@ impl ScriptProvider {
             set(&format!("DOTS_SETTING_{}", env_name(k)), v.clone());
         }
         if !self.env.path_prefix.is_empty() {
-            let mut parts: Vec<String> = self.env.path_prefix.iter().map(|d| p(d)).collect();
+            let mut parts: Vec<PathBuf> = self.env.path_prefix.clone();
             if let Some(old) = ctx.env.get("PATH").filter(|s| !s.is_empty()) {
-                parts.push(old.clone());
+                parts.extend(std::env::split_paths(old));
             }
-            set("PATH", parts.join(":"));
+            // `;` on Windows, `:` elsewhere.
+            if let Ok(joined) = std::env::join_paths(&parts) {
+                set("PATH", joined.to_string_lossy().into_owned());
+            }
         }
         e
     }
@@ -541,6 +598,18 @@ impl ScriptProvider {
     /// Absolute path of the shell, from known locations (never via `PATH`).
     fn shell_path(&self) -> Option<PathBuf> {
         let kind = self.shell_kind();
+        #[cfg(windows)]
+        if kind == "pwsh" {
+            windows_pwsh()
+        } else {
+            windows_git_shell(kind)
+        }
+        #[cfg(not(windows))]
+        self.unix_shell_path(kind)
+    }
+
+    #[cfg(not(windows))]
+    fn unix_shell_path(&self, kind: &str) -> Option<PathBuf> {
         let cands: &[&str] = match kind {
             "bash" => &[
                 "/bin/bash",

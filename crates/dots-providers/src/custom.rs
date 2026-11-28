@@ -14,7 +14,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use dots_facts::Facts;
 use serde_json::Value;
@@ -24,7 +24,10 @@ use crate::{
     Provider, ProviderError, Result, Spec, Support,
 };
 
-const SH: &str = "/bin/sh";
+/// The shell a declarative provider's command lines run in.
+fn sh_path() -> PathBuf {
+    crate::script::platform_shell().0
+}
 
 /// How to read the output of the `installed` command.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -211,7 +214,11 @@ fn shell_quote(s: &str) -> String {
 fn to_argv(line: &str) -> Vec<String> {
     let shelly = |c: char| "|&;<>()$`\\\"'*?[]{}~#!\n".contains(c);
     if line.chars().any(shelly) {
-        vec![SH.into(), "-c".into(), line.to_string()]
+        let (sh, flags) = crate::script::platform_shell();
+        let mut v = vec![sh.to_string_lossy().into_owned()];
+        v.extend(flags.iter().map(|f| f.to_string()));
+        v.push(line.to_string());
+        v
     } else {
         line.split_whitespace().map(String::from).collect()
     }
@@ -286,7 +293,11 @@ impl CustomProvider {
     }
 
     fn sh(&self, ctx: &Ctx, line: &str) -> Cmd {
-        Cmd::new(SH).arg("-c").arg(line).envs(&ctx.env)
+        let (sh, flags) = crate::script::platform_shell();
+        Cmd::new(sh)
+            .args(flags.iter().copied())
+            .arg(line)
+            .envs(&ctx.env)
     }
 
     fn log_path(&self, ctx: &Ctx, action: &Action) -> PathBuf {
@@ -402,7 +413,7 @@ impl Provider for CustomProvider {
         }
         if facts.providers.get(self.id) == Some(&true) {
             Availability::Ready {
-                bin_path: PathBuf::from(SH),
+                bin_path: sh_path(),
             }
         } else {
             Availability::Unsupported
@@ -412,16 +423,16 @@ impl Provider for CustomProvider {
     fn availability_in(&self, ctx: &Ctx, _facts: &Facts) -> Availability {
         let Some(cmd) = &self.def.available else {
             return Availability::Ready {
-                bin_path: PathBuf::from(SH),
+                bin_path: sh_path(),
             };
         };
         match ctx.runner.run(&self.sh(ctx, cmd)) {
             Ok(o) if o.success() => {
                 let bin = o.stdout.lines().next().map(str::trim).unwrap_or("");
-                let bin_path = if bin.starts_with('/') {
+                let bin_path = if Path::new(bin).is_absolute() {
                     PathBuf::from(bin)
                 } else {
-                    PathBuf::from(SH)
+                    sh_path()
                 };
                 Availability::Ready { bin_path }
             }

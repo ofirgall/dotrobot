@@ -35,10 +35,16 @@ impl Fetcher for CurlFetcher {
         if !valid_url(url) {
             return Err(ProviderError::Other(format!("refusing to fetch `{url}`")));
         }
+        // `curl.exe` ships with Windows 10 and later, in System32.
+        #[cfg(windows)]
+        let system32 = crate::cargo::windows_dirs(&["SystemRoot"], r"System32\curl");
+        #[cfg(not(windows))]
+        let system32: Vec<PathBuf> = Vec::new();
         let curl = CURL
             .iter()
             .map(PathBuf::from)
-            .find(|p| p.is_file())
+            .chain(system32)
+            .find_map(|p| crate::cargo::first_file([p]))
             .ok_or_else(|| ProviderError::Unavailable {
                 provider: "fetch".into(),
                 reason: "curl not found".into(),

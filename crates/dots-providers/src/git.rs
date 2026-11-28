@@ -24,13 +24,27 @@ use crate::{
     Provider, ProviderError, Result, Spec, Support,
 };
 
-fn resolve_bin(home: &Path) -> Option<PathBuf> {
-    first_file([
+pub(crate) fn resolve_bin(home: &Path) -> Option<PathBuf> {
+    #[cfg_attr(not(windows), allow(unused_mut))]
+    let mut c = vec![
         home.join(".nix-profile/bin/git"),
         PathBuf::from("/opt/homebrew/bin/git"),
         PathBuf::from("/usr/local/bin/git"),
         PathBuf::from("/usr/bin/git"),
-    ])
+    ];
+    // Git for Windows: machine-wide (`ProgramFiles`) or per-user (`LOCALAPPDATA\Programs`).
+    #[cfg(windows)]
+    {
+        c.extend(crate::cargo::windows_dirs(
+            &["ProgramFiles", "ProgramW6432", "ProgramFiles(x86)"],
+            r"Git\cmd\git",
+        ));
+        c.extend(crate::cargo::windows_dirs(
+            &["LOCALAPPDATA"],
+            r"Programs\Git\cmd\git",
+        ));
+    }
+    first_file(c)
 }
 
 fn availability(home: &Path) -> Availability {
@@ -202,11 +216,31 @@ impl Provider for GitProvider {
                 let dest = repo.dest.to_string_lossy().into_owned();
                 let git = git.clone();
                 let s = |x: &str| x.to_string();
+                // Two commands in one action need a shell; on Windows that is PowerShell
+                // (`& 'git'` is rewritten to the resolved path by `exec`).
+                #[cfg(windows)]
+                let two_step = |script: String| -> Vec<String> {
+                    let (sh, flags) = crate::script::platform_shell();
+                    let mut v = vec![sh.to_string_lossy().into_owned()];
+                    v.extend(flags.iter().map(|f| f.to_string()));
+                    v.push(format!("{script}\nexit $LASTEXITCODE"));
+                    v
+                };
+                #[cfg(windows)]
+                let pq = |x: &str| format!("'{}'", x.replace('\'', "''"));
                 let argv: Vec<String> = match (op.kind, op.version.as_deref()) {
                     (OpKind::Install, None) => vec![git, s("clone"), repo.url, dest],
                     (OpKind::Install, Some(rev)) if !is_sha(rev) => {
                         vec![git, s("clone"), s("--branch"), s(rev), repo.url, dest]
                     }
+                    #[cfg(windows)]
+                    (OpKind::Install, Some(rev)) => two_step(format!(
+                        "& 'git' clone {u} {d}\nif ($LASTEXITCODE -eq 0) {{ & 'git' -C {d} checkout --detach {r} }}",
+                        u = pq(&repo.url),
+                        d = pq(&dest),
+                        r = pq(rev)
+                    )),
+                    #[cfg(not(windows))]
                     (OpKind::Install, Some(rev)) => vec![
                         s("/bin/sh"),
                         s("-c"),
@@ -217,6 +251,13 @@ impl Provider for GitProvider {
                         s(rev),
                     ],
                     (_, None) => vec![git, s("-C"), dest, s("pull"), s("--ff-only")],
+                    #[cfg(windows)]
+                    (_, Some(rev)) => two_step(format!(
+                        "& 'git' -C {d} fetch --tags --force origin\nif ($LASTEXITCODE -eq 0) {{\n  & 'git' -C {d} checkout --detach ('origin/' + {r}) 2>$null\n  if ($LASTEXITCODE -ne 0) {{ & 'git' -C {d} checkout --detach {r} }}\n}}",
+                        d = pq(&dest),
+                        r = pq(rev)
+                    )),
+                    #[cfg(not(windows))]
                     (_, Some(rev)) => vec![
                         s("/bin/sh"),
                         s("-c"),
@@ -245,7 +286,17 @@ impl Provider for GitProvider {
         let mut fixed = resolve_bare(action, 0, "git", git.clone())?;
         // `/bin/sh -c <script> git ...`: `$0` is the git binary.
         if fixed.argv.first().map(String::as_str) == Some("/bin/sh") {
-            fixed = resolve_bare(&fixed, 3, "git", git)?;
+            fixed = resolve_bare(&fixed, 3, "git", git.clone())?;
+        }
+        // Windows two-step actions carry `& 'git'` inside the PowerShell text.
+        #[cfg(windows)]
+        if let (Some(g), Some(last)) = (&git, fixed.argv.last_mut())
+            && last.contains("& 'git'")
+        {
+            *last = last.replace(
+                "& 'git'",
+                &format!("& '{}'", g.to_string_lossy().replace('\'', "''")),
+            );
         }
         let action = &fixed;
         exec_action(ctx, action, None, &[("GIT_TERMINAL_PROMPT", "0")])

@@ -1,5 +1,8 @@
 //! Tests for the `script` provider with real processes in temp dirs.
 
+// The script provider tests run bash scripts through a real shell; Windows runs scripts in pwsh (see tests/script_windows.rs).
+#![cfg(unix)]
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -495,6 +498,7 @@ impl dots_providers::Runner for FakeShell {
     }
 }
 
+#[cfg(unix)]
 dots_testkit::conformance_test!(script_conforms, {
     let sb = sandbox();
     let c = ScriptConfig {
@@ -558,6 +562,7 @@ fn check_of_a_root_script_runs_through_the_shell_not_sudo() {
 /// Run a root script's install through a recording runner; `sudo` says whether the engine
 /// put `sudo -n` in front. Returns the first command's argv, and the env file's mode and text
 /// as read while the command "ran".
+#[cfg(unix)]
 fn root_install(sudo: bool) -> (Vec<String>, u32, String, PathBuf) {
     use std::os::unix::fs::PermissionsExt;
     type Seen = (Vec<String>, u32, String, PathBuf);
@@ -616,6 +621,7 @@ fn root_install(sudo: bool) -> (Vec<String>, u32, String, PathBuf) {
 /// `sudo -n` resets the environment: HOME, the DOTS_* variables and the `[env]` PATH directories
 /// travel in a 0600 file the script text sources, never in argv.
 #[test]
+#[cfg(unix)]
 fn root_script_carries_env_in_a_private_file_not_argv() {
     let (argv, mode, body, _) = root_install(true);
     assert_eq!(&argv[..2], ["/usr/bin/sudo", "-n"]);
@@ -650,6 +656,7 @@ fn root_script_carries_env_in_a_private_file_not_argv() {
 
 /// Already root: no `sudo`, the same file prelude.
 #[test]
+#[cfg(unix)]
 fn root_script_without_sudo_gets_the_same_prelude() {
     let (argv, mode, body, _) = root_install(false);
     assert!(

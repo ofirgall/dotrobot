@@ -2,12 +2,14 @@
 //! `brew info --json=v2` fixtures captured from a real Homebrew, and a read-only run against the
 //! real brew when this machine has one.
 
+#[cfg_attr(not(unix), allow(unused_imports))] // used by unix-only tests
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use dots_facts::Facts;
 use dots_providers::brew::{self, BrewProvider};
+#[cfg_attr(not(unix), allow(unused_imports))] // used by unix-only tests
 use dots_providers::{
     Availability, Cmd, Ctx, Installed, Op, OpKind, Output, Provider, RealRunner, Result, Runner,
     Spec,
@@ -191,6 +193,7 @@ fn latest_is_batched_per_kind_and_offline_is_empty() {
 // ---- plan ---------------------------------------------------------------------------------
 
 #[test]
+#[cfg(unix)]
 fn plan_batches_formulae_casks_taps_and_pins() {
     let p = BrewProvider::new();
     let ops = [
@@ -376,6 +379,7 @@ fn exec_runs_with_deterministic_env_and_logs_failures() {
 // ---- bins / owner_of ----------------------------------------------------------------------
 
 #[test]
+#[cfg(unix)]
 fn bins_and_owner_of_use_one_query_and_the_filesystem() {
     let tmp = tempfile::tempdir().unwrap();
     let (p, rec, ctx, b) = scripted(tmp.path());
