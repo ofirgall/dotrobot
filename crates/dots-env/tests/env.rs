@@ -271,3 +271,27 @@ fn shell_smoke() {
         assert!(s.contains("a \"b\" $c `d` \\e"));
     }
 }
+
+// Scenario: PowerShell gets its own env file and profile hook on a fresh machine
+#[test]
+fn powershell_profile_is_created_and_sources_env_ps1() {
+    use dots_env::{Shell, default_rc, inject_rc};
+    let t = tempfile::tempdir().unwrap();
+    let home = t.path();
+    let f = sample(home);
+    // `$env:PATH` entries are checked against the platform's own separator.
+    assert!(f.ps1.contains("[IO.Path]::PathSeparator"), "{}", f.ps1);
+    assert!(f.ps1.contains("$HOME/.cargo/bin"), "{}", f.ps1);
+    let rc = default_rc(Shell::PowerShell, home);
+    assert!(!rc.exists());
+    let env_file = home.join(".local/state/dots/env.ps1");
+    inject_rc(&rc, Shell::PowerShell, &env_file, home).unwrap();
+    let text = std::fs::read_to_string(&rc).unwrap();
+    assert!(
+        text.contains(
+            "if (Test-Path \"$HOME/.local/state/dots/env.ps1\") { . \"$HOME/.local/state/dots/env.ps1\" }"
+        ),
+        "{text}"
+    );
+    assert_eq!(text.matches(MARKER_OPEN).count(), 1);
+}

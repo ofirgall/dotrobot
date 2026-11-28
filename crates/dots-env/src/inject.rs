@@ -20,6 +20,13 @@ pub fn default_rc(shell: Shell, home: &Path) -> PathBuf {
         Shell::Zsh => home.join(".zshenv"),
         Shell::Bash => home.join(".bashrc"),
         Shell::Fish => home.join(".config/fish/config.fish"),
+        // PowerShell's current-user profile: `Documents\PowerShell` on Windows (PowerShell 7;
+        // Windows PowerShell 5.1 reads `Documents\WindowsPowerShell` and is not touched),
+        // `~/.config/powershell` elsewhere.
+        Shell::PowerShell if cfg!(windows) => home
+            .join("Documents")
+            .join("PowerShell")
+            .join("Microsoft.PowerShell_profile.ps1"),
         Shell::PowerShell => home.join(".config/powershell/Microsoft.PowerShell_profile.ps1"),
     }
 }
@@ -68,6 +75,10 @@ pub fn inject_rc(
         replace(&text, &block).ok_or_else(|| EnvError::UnterminatedBlock(rc.to_path_buf()))?;
     if out == text && existed {
         return Ok(InjectOutcome::Unchanged);
+    }
+    if let Some(dir) = target.parent() {
+        // A fresh machine has no `Documents\PowerShell` (or `~/.config/fish`) yet.
+        std::fs::create_dir_all(dir)?;
     }
     dots_files::atomic_write(&target, out.as_bytes())?;
     Ok(if existed {
