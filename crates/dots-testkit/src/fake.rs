@@ -12,6 +12,16 @@ use dots_providers::{
 
 use crate::conformance::ConformanceFixture;
 
+/// The fake's absolute binary path (a drive-letter path on Windows, where `/fake` is relative).
+fn fake_bin(id: &str) -> PathBuf {
+    let root = if cfg!(windows) {
+        "C:\\fake\\bin"
+    } else {
+        "/fake/bin"
+    };
+    PathBuf::from(root).join(id)
+}
+
 #[derive(Default)]
 struct State {
     installed: BTreeMap<String, Installed>,
@@ -155,7 +165,7 @@ impl FakeProvider {
     }
 
     fn bin(&self) -> PathBuf {
-        PathBuf::from(format!("/fake/bin/{}", self.id))
+        fake_bin(self.id)
     }
 
     /// A conformance fixture matching this fake: `installed_pkg` is installed, `missing_pkg`
@@ -183,7 +193,7 @@ impl FakeProvider {
                 exclusive_lock: false,
             },
             availability: Availability::Ready {
-                bin_path: PathBuf::from(format!("/fake/bin/{id}")),
+                bin_path: fake_bin(id),
             },
             state: Arc::default(),
         }
@@ -396,7 +406,7 @@ impl Provider for FakeProvider {
             .map(|n| BinEntry {
                 package: n.clone(),
                 bin: n.clone(),
-                path: PathBuf::from(format!("/fake/bin/{n}")),
+                path: fake_bin(n),
             })
             .collect())
     }

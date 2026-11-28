@@ -63,16 +63,26 @@ impl RecordingRunner {
     }
 }
 
+/// Both sides of a rule match are compared with `/` separators: on Windows a path built with
+/// `join("a/b")` mixes `\` and `/`, and the scripted prefix is written either way.
+fn norm(s: &str) -> String {
+    if cfg!(windows) {
+        s.replace('\\', "/")
+    } else {
+        s.to_string()
+    }
+}
+
 impl Runner for RecordingRunner {
     fn run(&self, cmd: &Cmd) -> Result<Output> {
         self.calls.lock().unwrap().push(cmd.clone());
-        let argv = cmd.argv();
+        let argv: Vec<String> = cmd.argv().iter().map(|a| norm(a)).collect();
         let scripted = self
             .rules
             .lock()
             .unwrap()
             .iter()
-            .find(|r| argv.starts_with(&r.prefix))
+            .find(|r| argv.starts_with(&r.prefix.iter().map(|p| norm(p)).collect::<Vec<_>>()))
             .map(|r| r.output.clone());
         if let Some(o) = scripted {
             return Ok(o);

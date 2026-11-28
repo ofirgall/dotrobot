@@ -6,6 +6,8 @@ use std::process::Command;
 
 use tempfile::TempDir;
 
+use crate::sys::{system_env, system_path};
+
 pub struct RunOutput {
     pub stdout: String,
     pub stderr: String,
@@ -33,7 +35,8 @@ impl Golden {
         std::fs::create_dir_all(&home).unwrap();
         let mut cmd = Command::new(&self.bin);
         cmd.env_clear()
-            .env("PATH", "/usr/bin:/bin")
+            .envs(system_env())
+            .env("PATH", system_path())
             // The real HOME points at an empty sentinel: nothing should ever touch it.
             .env("HOME", sandbox.path().join("sentinel"))
             .current_dir(sandbox.path())

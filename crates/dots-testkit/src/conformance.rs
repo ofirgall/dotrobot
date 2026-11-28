@@ -153,7 +153,13 @@ fn fs_snapshot(dir: &Path) -> Vec<(PathBuf, u64, Option<std::time::SystemTime>)>
         for e in rd.flatten() {
             let p = e.path();
             if let Ok(m) = e.metadata() {
-                v.push((p.clone(), m.len(), m.modified().ok()));
+                // A directory's own size and mtime say nothing a new or removed entry does
+                // not (and on Windows they are refreshed lazily, so they flap).
+                if m.is_dir() {
+                    v.push((p.clone(), 0, None));
+                } else {
+                    v.push((p.clone(), m.len(), m.modified().ok()));
+                }
                 if m.is_dir() {
                     stack.push(p);
                 }
@@ -240,8 +246,18 @@ pub fn run(provider: &dyn Provider, fx: &ConformanceFixture) -> Vec<Failure> {
             format!("plan ran commands: {:?}", fx.recorder.lines()),
         );
     }
-    if fs_snapshot(fx.sandbox_dir()) != before {
-        fail(&mut f, "plan-pure", "plan changed files in the sandbox");
+    let after = fs_snapshot(fx.sandbox_dir());
+    if after != before {
+        let changed: Vec<_> = after
+            .iter()
+            .filter(|e| !before.contains(e))
+            .chain(before.iter().filter(|e| !after.contains(e)))
+            .collect();
+        fail(
+            &mut f,
+            "plan-pure",
+            format!("plan changed files in the sandbox: {changed:?}"),
+        );
     }
     match (&p1, &p2) {
         (Ok(a), Ok(b)) if a == b => {}
