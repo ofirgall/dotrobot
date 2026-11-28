@@ -434,7 +434,8 @@ fn local_tool_goes_outdated_when_its_repo_changes() {
     std::fs::create_dir_all(home.join(".local/bin")).unwrap();
     std::fs::write(home.join(".local/bin/uv"), "").unwrap();
     let rec = Arc::new(RecordingRunner::new());
-    rec.on(&["/usr/bin/git"], Output::ok("2\n"));
+    let git = host_git();
+    rec.on(&[git.as_str()], Output::ok("2\n"));
     rec.on(
         &[home.join(".local/bin/uv").to_str().unwrap(), "tool", "list"],
         Output::ok("mytool v0.5.1\n- mytool\n"),
@@ -470,13 +471,13 @@ fn local_tool_goes_outdated_when_its_repo_changes() {
     let latest = p.latest(&ctx, std::slice::from_ref(&spec)).unwrap()["mytool"]
         .version
         .clone();
-    if std::path::Path::new("/usr/bin/git").is_file() {
+    if std::path::Path::new(&git).is_file() {
         assert!(have.starts_with("0.5.1.2+"), "{have}");
         assert_eq!(have, latest);
         // The tree gains a commit.
         rec.clear();
         let rec2 = Arc::new(RecordingRunner::new());
-        rec2.on(&["/usr/bin/git"], Output::ok("3\n"));
+        rec2.on(&[git.as_str()], Output::ok("3\n"));
         let ctx2 = Ctx {
             runner: rec2,
             ..ctx
@@ -683,4 +684,14 @@ fn venv_kind_uses_scripts_python_and_powershell_on_windows() {
     let rm = argv(&p, op(OpKind::Remove, "scripts", Some("kind=venv"), None));
     assert!(!rm.iter().any(|a| a.contains("/bin/rm")), "{rm:?}");
     assert!(rm.last().unwrap().contains("Remove-Item"), "{rm:?}");
+}
+
+/// The git a path source runs, in the provider's lookup order (a brew git comes before the
+/// system one), so the faked `git` matches it on any Mac.
+fn host_git() -> String {
+    ["/opt/homebrew/bin/git", "/usr/local/bin/git", "/usr/bin/git"]
+        .into_iter()
+        .find(|p| std::path::Path::new(p).is_file())
+        .unwrap_or("/usr/bin/git")
+        .to_string()
 }
